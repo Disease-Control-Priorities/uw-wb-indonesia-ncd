@@ -1,2 +1,2 @@
 # uw-wb-indonesia-ncd
-Indonesia NCD Simulation Model Integrating Cardiovascular Disease and Cancer using Markov State-Transition population-level simulation models designed to project the future burden of cancer and cardiovascular disease and evaluate policy interventions on risk factors.
+A population-level Markov state-transition model integrating cardiovascular disease and cancer to project future disease burden and evaluate risk-factor policy interventions in Indonesia.
