@@ -489,4 +489,5 @@ adjustments <- merge(test,grid,all.x=T)
 
 ##write out adjustments
 
-write.csv(adjustments, paste0(wd,"adjustments2023_age.csv"), row.names = F)
+write.csv(adjustments, paste0(wd_data,"adjustments2023_age.csv"), row.names = F)
+

@@ -17,7 +17,7 @@ library(gmodels)
 # For forecasting mortality
 library(forecast)
 
-wd <- "C:/Users/wrgar/OneDrive - UW/02Work/WHO-CVD/github/uw-who-cvdtargets/"
+wd <- "C:/Users/wrgar/OneDrive - UW/02Work/WorldBank-Indonesia/uw-wb-indonesia-ncd/"
 
 wd_code <- paste0(wd,"code/")
 
@@ -29,12 +29,12 @@ wd_data <- paste0(wd,"data/processed/")
 wd_outp <- paste0(wd,"output/")
 
 # Create a temporary directory for the processing data change to wd in final version
-wd_temp <- paste0("C:/Users/wrgar/OneDrive - UW/02Work/WHO-CVD/","temp/")
+wd_temp <- paste0("C:/Users/wrgar/OneDrive - UW/02Work/WorldBank-Indonesia/","temp/")
 if (!dir.exists(wd_temp)) {
   dir.create(wd_temp, recursive = TRUE)
 }
 
-setwd(wd_code)
+setwd(paste0(wd_code,"cvd/"))
 
 #...........................................................
 # 0. Functions and parameters-----
@@ -108,14 +108,19 @@ source("05_build_baseline.R")
 # 06. Run model ----
 #...........................................................
 
-# Run Aim 1: multiple interventions
+# Run CVD multiple interventions
 source("06_run_scenarios_multiple.R")
-
-# Run Aim 2: HTN control scenarios, 150 Million by 2030
-source("06_run_scenarios_targets.R")
 
 #...........................................................
 # 07. Run Burden of Disease ----
 #...........................................................
 
 source("07_output_dalys.R")
+
+#...........................................................
+# 08. Run Economic Value ----
+#...........................................................
+
+source("08_economic_value_calculation.R")
+
+
