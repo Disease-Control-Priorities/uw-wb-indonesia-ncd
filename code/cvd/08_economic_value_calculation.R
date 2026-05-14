@@ -338,6 +338,9 @@ ssp_pc_long <- ssp_pc_long[!is.na(iso3) & !is.na(ssp_gdp_pc) & ssp_gdp_pc > 0]
 model_years <- sort(unique(dt_compare$year))
 iso3_list   <- sort(unique(dt_compare[!is.na(iso3), iso3]))
 
+# Manually assign IDN and USA
+iso3_list   <- c("IDN","USA")
+  
 # Interpolate SSP GDP pc to annual series (log-linear between 5-year nodes)
 ssp_annual <- ssp_pc_long[iso3 %in% iso3_list, {
   ord  <- order(year)
