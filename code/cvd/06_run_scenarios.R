@@ -2304,14 +2304,14 @@ results_list <- foreach(
       dt_hbp_targets      = dt_hbp_targets,
       htn_target_col      = target_col,    # key: drives which column is read
       target_control_diabetes = target_control_diabetes,
-      statin_target_coverage   = 0.50,
+      statin_target_coverage   = 0.60,
       statin_start_year        = 2026,
-      statin_target_year       = 2030,
+      statin_target_year       = 2050,
       adherence_ir             = 1,
       adherence_cf             = 1,
       baseline_statin_coverage = NULL,
       saltmet   = "percent",
-      salteff   = 0,                       # no sodium reduction
+      salteff   = 0.3,                       # sodium reduction
       saltyear1 = 2026,
       saltyear2 = 2030,
       tfa_target_tfa        = 0,

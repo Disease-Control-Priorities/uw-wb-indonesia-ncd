@@ -125,17 +125,33 @@ data.out[intervention %in% c("baseline", "BAU", "b.a.u"),
          intervention := "b.a.u"]
 data.out[intervention %in% c("bp_only", "antihypertensive",
                              "BP", "Antihypertensive therapy"),
-         intervention := "HTN Control (General)"]
-data.out[intervention %in% c("bp_diabetes_only", "antihypertensive_diabetes","BP_diabetes"),
-         intervention := "HTN Control (Diabetes)"]
+         intervention := "Antihypertensive Therapy"]
+data.out[intervention %in% c("sodium_only", "sodium", "Salt"),
+         intervention := "Sodium Reduction"]
+data.out[intervention %in% c("tfa_only", "tfa", "TFA"),
+         intervention := "Trans-Fat Elimination"]
 data.out[intervention %in% c("statins_only", "statins", "Statins"),
-         intervention := "Improved Statin Uptake"]
-data.out[intervention %in% c("all_interventions","BP + BP_diabetes + Statins"),
+         intervention := "Statin Therapy"]
+data.out[intervention %in% c("bp_sodium", "BP + Salt"),
+         intervention := "HTN + Sodium"]
+data.out[intervention %in% c("bp_sodium_tfa", "BP + Salt + TFA"),
+         intervention := "HTN + Sodium + TFA"]
+data.out[intervention %in% c("all_four", "all_interventions",
+                             "BP + Salt + TFA + Statins"),
          intervention := "All Interventions"]
 
 ## keep only relevant scenarios
 
-data.out <- data.out[intervention %in% c("b.a.u", "HTN Control (General)", "HTN Control (Diabetes)","Improved Statin Uptake","All Interventions")]
+# int_order <- c(
+#   "b.a.u",
+#   "Antihypertensive Therapy",
+#   "Sodium Reduction",
+#   "Trans-Fat Elimination",
+#   "Statin Therapy",
+#   "All Interventions"
+# )
+# 
+# data.out <- data.out[intervention %in% int_order]
 
 # # ---- Core: deaths delayed by intervention x year ----------------------------
 # dt_base <- data.out[intervention == "b.a.u" & year >= 2025,

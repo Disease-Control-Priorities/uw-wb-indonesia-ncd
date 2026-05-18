@@ -1,0 +1,220 @@
+---
+title: "Cancer Modeling Inputs and Calculations"
+author: "Mohamed Albirair"
+date: "`r Sys.Date()`"
+output:
+      html_document:
+            toc: true
+            toc_float:
+                  collapsed: false
+            toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+```{r}
+## load packages
+pacman::p_load(tidyverse)
+
+# Load settings
+z <- yaml::read_yaml("../../settings.yml")
+
+# Home folder
+# z <- list()
+z$home_dir <- "../../"
+
+# R code, inputs, and outputs
+if (!exists("root")){
+      root <- z$home_dir
+}
+
+z$fnx_dir     <- paste0(root, "/fnx")
+z$inputs_dir  <- paste0(root, "/input")
+z$outputs_dir <- paste0(root, "/outputs")
+z$scripts_dir <- paste0(root, "/scripts")
+
+# Source functions
+list.files(path       = z$fnx_dir,
+           pattern    = "\\.R$",
+           full.names = TRUE) %>%
+      walk(.f        = safely(.f = ~ source(.x, echo = FALSE)),
+           .progress = TRUE)
+
+# URLs
+# `not it`
+source(z$not_in)
+
+# ggplot theme_caviz
+source(z$theme_caviz)
+## Basic scenario-defining input values
+load("../inputs/all-baseline-data.RData")
+load("../inputs/RData/Uganda/bsln/Uganda_bsln_input.RData")
+```
+
+```{r}
+scrollable <- function(df) {
+      # https://stackoverflow.com/questions/45849433/horizontal-scrolling-in-rmarkdown
+      kableExtra::kable(df, "html") %>% 
+            kableExtra::kable_styling("striped") %>% 
+            kableExtra::scroll_box(height = "600px")
+}
+```
+
+## Baseline Stage Distribution
+
+```{r}
+bsln_stg_dist %>% scrollable()
+```
+
+## GBD Epi Data
+
+```{r}
+country_epi %>% 
+      map_depth(.x     = .,
+                .depth = 2,
+                .f     = function(df) {
+                      df[as.character(reference_year)]
+                }) %>% 
+      imap_dfr(., function(cause_data, cause_name) {
+            imap_dfr(cause_data, function(sex_data, sex_name) {
+                  imap_dfr(sex_data, function(year_data, year_name) {
+                        year_data %>% 
+                              mutate(cause = cause_name,
+                                     sex   = sex_name,
+                                     year  = year_name)
+                  })
+            })
+      }) %>% scrollable()
+```
+
+## GBD All-Cause Mortality
+
+```{r}
+country_acm %>% 
+      map_depth(.x     = .,
+                .depth = 2,
+                .f     = function(df) {
+                      df[as.character(reference_year)]
+                }) %>% 
+      imap_dfr(., function(cause_data, cause_name) {
+            imap_dfr(cause_data, function(sex_data, sex_name) {
+                  imap_dfr(sex_data, function(year_data, year_name) {
+                        year_data %>% 
+                              mutate(cause = cause_name,
+                                     sex   = sex_name,
+                                     year  = year_name)
+                  })
+            })
+      }) %>% scrollable()
+```
+
+## GBD Fertility Data
+
+```{r}
+country_fert %>% 
+      map_depth(.x     = .,
+                .depth = 1,
+                .f     = function(df) {
+                      df[as.character(reference_year)]
+                }) %>% 
+      imap_dfr(., function(sex_data, sex_name) {
+            imap_dfr(sex_data, function(year_data, year_name) {
+                  year_data %>% 
+                        mutate(sex   = sex_name,
+                               year  = year_name)
+            })
+      }) %>% scrollable()
+```
+
+## No. of Cancer Cases
+
+```{r}
+n_cases %>% 
+      imap_dfr(., function(cause_data, cause_name) {
+            imap_dfr(cause_data, function(sex_data, sex_name) {
+                  sex_data %>% 
+                        mutate(cause = cause_name,
+                               sex   = sex_name)
+            })
+      }) %>% scrollable()
+```
+
+## No. and Rate of Cancer-Specific Mortality
+
+```{r}
+n_cmx_deaths %>% 
+      imap_dfr(., function(cause_data, cause_name) {
+            imap_dfr(cause_data, function(sex_data, sex_name) {
+                  sex_data %>% 
+                        mutate(cause = cause_name,
+                               sex   = sex_name)
+            })
+      }) %>% scrollable()
+```
+
+## No. and Rate of All-Cause Mortality + Total Population Counts
+
+```{r}
+n_mx_N_acm %>% 
+      imap_dfr(., function(cause_data, cause_name) {
+            imap_dfr(cause_data, function(sex_data, sex_name) {
+                  sex_data %>% 
+                        mutate(cause = cause_name,
+                               sex   = sex_name)
+            })
+      }) %>% scrollable()
+```
+
+## Markov Correction for All-Cause and Cancer-Specific Mortality Data
+```{r}
+markov_correction %>% 
+      filter(cause %in% c(cause1[2], cause2[2], cause3[2])) %>% 
+      scrollable()
+```
+
+## Starting Health State Distribution
+
+```{r}
+start_stg_dist %>% 
+      imap_dfr(., function(loc_data, loc_name) {
+            imap_dfr(loc_data, function(cause_data, cause_name) {
+                  imap_dfr(cause_data, function(sex_data, sex_name) {
+                        imap_dfr(sex_data, function(year_data, year_name) {
+                              imap_dfr(year_data, function(age_data, age_name) {
+                                    age_data %>% 
+                                          mutate(loc   = loc_name,
+                                                 cause = cause_name,
+                                                 sex   = sex_name,
+                                                 year  = year_name,
+                                                 age   = age_name)
+                              })    
+                        })
+                  })
+            })
+      }) %>% scrollable()
+```
+
+
+## Transition Probability Matrices
+
+### Bladder Cancer (Category 1)
+
+```{r}
+bsln_tpms$Uganda$`Bladder cancer`$Female$`2019`$`45`
+```
+
+### Breast Cancer (Category 2)
+
+```{r}
+bsln_tpms$Uganda$`Breast cancer`$Female$`2019`$`45`
+```
+
+### CRC (Category 3)
+
+```{r}
+bsln_tpms$Uganda$`Colon and rectum cancer`$Female$`2019`$`45`
+```
+
+

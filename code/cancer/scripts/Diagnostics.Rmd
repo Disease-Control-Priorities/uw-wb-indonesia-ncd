@@ -1,0 +1,2054 @@
+---
+title: "Diagnostics"
+author: "Mohamed Albirair"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load Data
+
+```{r}
+load("R/inputs/RData/perform_testing.RData")
+```
+
+# Pre-Processing
+
+```{r}
+gbd_epi_1yr_predict %>%
+      filter(sex == "Female",
+             cause %in% c(cause2[-2], cause3[2]),
+             location == "Uganda",
+             year == 2019) %>%
+
+      ggplot(aes(x = age,
+                 # y = val,
+                 y = log(pred_rates)
+                 # color = sex
+                 )) +
+                 # shape = location,
+                 # group = interaction(sex, location))) +
+      # geom_point(alpha = 0.6) +
+      geom_hline(yintercept = 0, linetype = 2, color = "darkred") +
+      geom_line(aes(x = age, y = log(pred_rates)), linetype = 1, color = "green") +
+      # geom_smooth(method = "lm", se = TRUE, alpha = 0.2) +
+      facet_grid(cause ~ measure, scales = "free_y") +  # Free y-axis scales
+      labs(title = "Age-Value Regression Lines by Group",
+           x = "Age", y = "Value") +
+      theme_bw()
+```
+
+```{r}
+gbd_epi_1yr_predict %>%
+      filter(sex == "Female",
+             cause %in% c(cause2[-2], cause3[2]),
+             location == "Uganda",
+             # measure == "Deaths",
+             year == 2019) %>%
+
+      ggplot(aes(x = age,
+                 # y = val,
+                 y = pred_cases
+                 # color = sex
+                 )) +
+                 # shape = location,
+                 # group = interaction(sex, location))) +
+      # geom_point(alpha = 0.6) +
+      geom_hline(yintercept = 0, linetype = 2, color = "darkred") +
+      geom_line(aes(x = age, y = pred_cases), linetype = 1, color = "green") +
+      # geom_smooth(method = "lm", se = TRUE, alpha = 0.2) +
+      facet_grid(cause ~ measure, scales = "free_y") +  # Free y-axis scales
+      labs(title = "Age-Value Regression Lines by Group",
+           x = "Age", y = "Value") +
+      theme_bw()
+```
+
+```{r}
+gbd_calc_compr <- left_join(
+
+      # Linear model predicted counts (incid and deaths), all ages
+      x  = gbd_epi_1yr_predict %>% 
+            filter(year == 2019) %>% 
+            mutate(calc_pred_cases = pred_rates * pop / 1e5) %>% 
+            select(!pop),
+
+      # GBD calculated counts (incid and deaths), all ages
+      y = full_join(
+
+            # GBD epi data, 5YAGs
+            x  = gbd_epi_5yr %>% filter(year == 2019),
+
+            # GBD pop data, 5YAGs
+            y  = gbd_pop_5yr %>% filter(year == 2019) %>% 
+                  mutate(age_gp = as.character(age_gp)),
+
+            by = join_by(location, sex, age, age_gp, year)
+      ) %>% 
+            filter(metric == "Number") %>% 
+            select(!c(pop, upper, lower, age_cat, age_mid, pop)),
+
+      by = join_by(measure, location, year, cause, sex, age, age_gp)
+) %>% 
+      mutate(counts_diff = pred_cases - val,
+             counts_ratio = pred_cases / val)
+```
+
+```{r}
+gbd_calc_compr %>% 
+      filter(sex == "Female",
+             cause %in% c(cause2[-2], cause3[2]),
+             location == "Uganda") %>% 
+      filter(age <= 75) %>% 
+      filter(measure != "Prevalence") %>% 
+
+      ggplot() +
+      geom_hline(yintercept = 0, linetype = 2, color = "darkred") +
+      geom_point(aes(x = age, y = val), color = "blue", alpha = 0.6) +
+      geom_line(aes(x = age, y = calc_pred_cases), linetype = 1, color = "green") +
+      # geom_smooth(method = "lm", se = TRUE, alpha = 0.2) +
+      facet_grid(cause ~ measure, scales = "free_y") +  # Free y-axis scales
+      labs(title = "Age-Value Regression Lines by Group",
+           x = "Age", y = "Value") +
+      theme_bw()
+```
+
+```{r}
+gbd_calc_compr %>% 
+      filter(sex == "Female",
+             cause %in% c(cause2[-2], cause3[2]),
+             location == "Uganda") %>% 
+      filter(age <= 75) %>% 
+      filter(measure != "Prevalence") %>% 
+
+      ggplot() +
+      geom_hline(yintercept = 0, linetype = 2, color = "darkred") +
+      geom_point(aes(x = age, y = log(val)), color = "blue", alpha = 0.6) +
+      geom_line(aes(x = age, y = log(calc_pred_cases)), linetype = 1, color = "green") +
+      # geom_smooth(method = "lm", se = TRUE, alpha = 0.2) +
+      facet_grid(cause ~ measure, scales = "free_y") +  # Free y-axis scales
+      labs(title = "Age-Value Regression Lines by Group",
+           x = "Age", y = "Value") +
+      theme_bw()
+```
+
+```{r}
+gbd_calc_sum_compr <- left_join(
+
+      # Linear model predicted counts (incid and deaths), all ages
+      x  = gbd_epi_1yr_predict %>% 
+            filter(year == 2019) %>% 
+            group_by(measure, location, cause, sex) %>%
+            reframe(tot_cases_calc = sum(pred_cases)),
+
+      # GBD calculated counts (incid and deaths), all ages
+      y = full_join(
+
+            # GBD epi data, 5YAGs
+            x  = gbd_epi_5yr %>% filter(year == 2019) %>% 
+                  rename(age_gp = age_cat),
+
+            # GBD pop data, 5YAGs
+            y  = gbd_pop_5y %>% filter(year == 2019) %>% 
+                  mutate(age_gp = as.character(age_gp)),
+
+            by = join_by(location, sex, age_gp, year)
+      ) %>%
+            mutate(gbd_cases = exp(log_val) * pop) %>%
+            group_by(measure, location, cause, sex) %>%
+            reframe(tot_cases_gbd = sum(gbd_cases)),
+
+      by = join_by(measure, location, cause, sex)
+) %>%
+      mutate(counts_diff = tot_cases_calc - tot_cases_gbd,
+             counts_ratio = tot_cases_calc / tot_cases_gbd)
+```
+
+
+```{r}
+gbd_calc_compr %>%
+      ggplot() +
+      geom_histogram(aes(x = counts_diff), alpha = 0.5, position = "identity", fill = "red") +
+      geom_histogram(aes(x = counts_ratio), alpha = 0.5, position = "identity", fill = "blue") +
+      facet_wrap(. ~ cause) +
+      theme_minimal()
+```
+
+
+```{r}
+gbd_epi %>%
+      filter(year == reference_year,
+             age < 95,
+             measure != "Prevalence",
+             metric == "Rate",
+             location == "Uganda",
+             cause %in% cause2) %>%
+      group_by(location, sex, cause, measure) %>%
+      filter(n() > 1) %>%
+      ungroup() %>%
+      # mutate(group_label = paste(location, sex, cause, measure, sep = "\n")) %>%
+      ggplot(aes(x = age, y = log(val), color = sex)) +
+      geom_point(alpha = 0.6) +
+      geom_smooth(method = "lm", se = TRUE, alpha = 0.2) +
+      facet_grid(cause ~ measure, scales = "free_y") +  # Free y-axis scales
+      labs(title = "Age-Value Regression Lines by Group",
+           x = "Age", y = "Value") +
+      theme_bw()
+```
+
+# Count Calculations
+
+## Comparison of Rates between GBD and Outputs using the `ungroup::pclm()`
+
+```{r}
+full_join(
+      x  = gbd$Uganda$`Bladder cancer`$Female$`2019` %>% 
+            filter(measure == "Deaths",
+                   metric == "Rate",
+                   age >= 15) %>% 
+            complete(age = 15:95, nesting(sex, measure, year, cause, location, metric)) %>% 
+            mutate(val = zoo::na.approx(val)) %>% 
+            rename(cmx = val) %>% 
+            select(!upper, !lower) %>% 
+            mutate(source = "GBD"),
+      # y  = n_cmx_deaths$`Bladder cancer`$Female %>% 
+      #       filter(age >= 15) %>% 
+      #       mutate(cmx = cmx * 1e5) %>% 
+      #       mutate(source = "PCLM"),
+      y  = full_join(
+            x  = n_cases$`Bladder cancer`$Female %>% 
+                  filter(age >= 15),
+            y  = n_mx_N_acm$`All causes`$Female %>% 
+                  filter(age >= 15),
+            by = join_by(age, year, sex, location)
+      ) %>% 
+            mutate(cmx = counts / Nx * 1e5,
+                   source = "PCLM"),
+      by = join_by(age, sex, year, location, cmx, source)
+) %>% 
+      
+      ggplot(aes(x = age, y = cmx, color = source)) +
+      geom_line() +
+      theme_minimal()
+```
+
+## Markov states over time (40 YOF, breast cancer)
+
+```{r}
+bsln_markov_trace %>% 
+      filter(cause == cause2[1],
+             # between(age, 40, 70),
+             age %in% seq(40, 70, 5),
+             sex == "Female") %>% 
+      pivot_longer(cols = c(plcl, pcdx, pbgdx),
+                   names_to = "trans",
+                   values_to = "prob") %>% 
+      mutate(age = as.character(age)) %>% 
+      ggplot(aes(x = year, y = prob, group = age, color = age)) +
+      geom_line() +
+      scale_y_continuous(name = "Probability",
+                         labels = scales::label_percent(accuracy = 0.01, scale = 1e2)) +
+      facet_wrap(. ~ trans, scales = "free_y") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+
+## cause-specific Markov states, incidence and mortality rates by time (40 YOF)
+
+```{r}
+bsln_markov_trace %>% 
+      filter(cause %in% target_cancers[-5],
+             # age %in% seq(40, 70, 5),
+             age == 40,
+             sex == "Female") %>% 
+      pivot_longer(cols = c(plcl, pcdx, inc_rate, cdeath_rate),
+                   names_to = "measure",
+                   values_to = "rate") %>% 
+      # mutate(# age = as.character(age),
+      #        measure = ifelse(measure == "inc_rate", "Incidence",
+      #                         "Cause-specific mortality")) %>% 
+      ggplot(aes(x = year, y = rate, group = age, color = age)) +
+      geom_line() +
+      scale_y_continuous(name = "Rate (per 100,000)",
+                         labels = scales::label_comma(accuracy = 0.1, scale = 1e5)) +
+      facet_grid(cause ~ measure, scales = "free_y") +
+      theme_minimal()
+```
+
+## Cause-specific changes in intervention TPs by time
+
+```{r}
+intv_modif_rr %>% 
+      filter(cause %in% target_cancers) %>% 
+      pivot_longer(cols = starts_with("effect_on_"), names_to = "cat", values_to = "tp") %>% 
+      ggplot(aes(x = year, y = tp, color = cat)) +
+      geom_line() +
+      facet_wrap(. ~ cause) +
+      theme_minimal()
+```
+
+```{r}
+country_epi_2000_2010 <- calc_metric(country_dt   = country_epi,
+            measure_inpt = "Prevalence",
+            counts_name  = "cPx",
+            rate_name    = "cpx",
+            add_Nx       = FALSE,
+            year_inpt    = 2000:2010)
+
+country_epi_2000_2010 %>% 
+      filter(age == 40,
+             sex == "Female",
+             cause %in% target_cancers[-5]) %>% 
+      ggplot(aes(x = year, y = cmx * 1e5)) +
+      geom_line() +
+      facet_wrap(. ~ cause, scales = "free_y") +
+      theme_minimal()
+```
+
+## Cause-specific baseline TP values
+
+```{r}
+bsln_markov_trace %>% 
+      filter(age == 40,
+             sex == "Female",
+             cause %in% target_cancers[-5]) %>% 
+      ggplot(aes(x = year, y = pdst)) +
+      geom_point() +
+      facet_wrap(. ~ cause, scales = "free_y") +
+      theme_minimal()
+```
+
+## Baseline vs. intervention Markov health state distribution
+
+```{r}
+# scen 1: 1, 1, 0.9, 0.9, 0.9
+# intv_modif_rr_1 <- intv_modif_rr
+# intv_tps_1 <- intv_tps
+# intv_markov_trace_1 <- intv_markov_trace
+
+# scen def: 1, 1, 0.05, 0.5, 0.9
+# intv_modif_rr_cfr1 <- intv_modif_rr
+# intv_tps_cfr1 <- intv_tps
+# intv_markov_trace_cfr1 <- intv_markov_trace
+
+# scen def: 0.05, 1, 0.05, 0.5, 0.9
+# intv_modif_def <- intv_modif_rr
+# intv_tps_def <- intv_tps
+# intv_markov_trace_def <- intv_markov_trace
+
+full_join(
+      x  = full_join(
+            x  = bsln_markov_trace %>% 
+                  select(age, year, sex, cause, location, plcl, pcdx, inc_rate, cdeath_rate) %>% 
+                  mutate(cohort = year - age) %>% 
+                  mutate(lplcl = plcl - lag(plcl, default = first(plcl)),
+                         lpcdx = pcdx - lag(pcdx, default = first(pcdx)),
+                         .by = c(cohort, sex, cause, location)) %>% 
+                  mutate(source = "blsn"),
+            y  = intv_markov_trace %>% 
+                  select(age, year, sex, cause, location, plcl, pcdx, inc_rate, cdeath_rate) %>% 
+                  mutate(cohort = year - age) %>% 
+                  mutate(lplcl = plcl - lag(plcl, default = first(plcl)),
+                         lpcdx = pcdx - lag(pcdx, default = first(pcdx)),
+                         .by = c(cohort, sex, cause, location)) %>% 
+                  mutate(source = "intv"),
+            by = join_by(age, year, sex, cause, location, plcl, pcdx,
+                         lplcl, lpcdx, inc_rate, cdeath_rate, source)
+      ),
+      
+      y = full_join(
+            x  = intv_markov_trace_1 %>% 
+                  select(age, year, sex, cause, location, plcl, pcdx, inc_rate, cdeath_rate) %>% 
+                  mutate(cohort = year - age) %>% 
+                  mutate(lplcl = plcl - lag(plcl, default = first(plcl)),
+                         lpcdx = pcdx - lag(pcdx, default = first(pcdx)),
+                         .by = c(cohort, sex, cause, location)) %>% 
+                  mutate(source = "secn 1"),
+            y  = intv_markov_trace_cfr0.05 %>% 
+                  select(age, year, sex, cause, location, plcl, pcdx, inc_rate, cdeath_rate) %>% 
+                  mutate(cohort = year - age) %>% 
+                  mutate(lplcl = plcl - lag(plcl, default = first(plcl)),
+                         lpcdx = pcdx - lag(pcdx, default = first(pcdx)),
+                         .by = c(cohort, sex, cause, location)) %>% 
+                  mutate(source = "cfr 0.05"),
+            by = join_by(age, year, sex, cause, location, plcl, pcdx,
+                         lplcl, lpcdx, inc_rate, cdeath_rate, source)
+      ),
+      
+      by = join_by(age, year, sex, cause, location, plcl, pcdx,
+                   lplcl, lpcdx, inc_rate, cdeath_rate, source)
+) %>% 
+      pivot_longer(cols = c(plcl, pcdx, lplcl, lpcdx, inc_rate, cdeath_rate),
+                   names_to = "metric", values_to = "val") %>% 
+      filter(age == 50,
+             sex == "Female",
+             cause %in% target_cancers[2],
+             # metric %in% c("cdeath_rate")) %>%
+             # metric %in% c("pcdx")) %>% 
+             metric %in% c("cdeath_rate", "lpcdx")) %>%
+      # pivot_wider(id_cols = c(age, year, sex, cause, location, source),
+      #             names_from = metric, values_from = val) %>% 
+      # view()
+      ggplot(aes(x = year, y = val, col = source)) +
+      geom_line() +
+      scale_y_continuous(labels = scales::label_comma(scale = 1 * 1e5)) +
+      facet_grid(cause ~ metric, scales = "free_y") +
+      theme_minimal() +
+      theme(strip.text.y = element_text(angle = 0),
+            legend.position = "bottom")
+```
+
+```{r}
+full_join(
+      x  = bsln_markov_trace %>% 
+            select(age, year, sex, cause, location, plcl, pcdx, inc_rate, cdeath_rate) %>% 
+            mutate(cohort = year - age) %>% 
+            mutate(lplcl = plcl - lag(plcl, default = first(plcl)),
+                   lpcdx = pcdx - lag(pcdx, default = first(pcdx)),
+                   .by = c(cohort, sex, cause, location)) %>% 
+            mutate(source = "blsn"),
+      y  = intv_markov_trace %>% 
+            select(age, year, sex, cause, location, plcl, pcdx, inc_rate, cdeath_rate) %>% 
+            mutate(cohort = year - age) %>% 
+            mutate(lplcl = plcl - lag(plcl, default = first(plcl)),
+                   lpcdx = pcdx - lag(pcdx, default = first(pcdx)),
+                   .by = c(cohort, sex, cause, location)) %>% 
+            mutate(source = "intv"),
+      by = join_by(age, year, sex, cause, location, plcl, pcdx,
+                   lplcl, lpcdx, inc_rate, cdeath_rate, source)
+) %>% 
+      pivot_longer(cols = c(plcl, pcdx, lplcl, lpcdx, inc_rate, cdeath_rate),
+                   names_to = "metric", values_to = "val") %>% 
+      filter(age == 50,
+             sex == "Female",
+             cause %in% target_cancers[2],
+             # metric %in% c("cdeath_rate")) %>%
+             # metric %in% c("pcdx")) %>% 
+             metric %in% c("cdeath_rate", "lpcdx")) %>%
+      # pivot_wider(id_cols = c(age, year, sex, cause, location, source),
+      #             names_from = metric, values_from = val) %>% 
+      # view()
+      ggplot(aes(x = year, y = val, col = source)) +
+      geom_line() +
+      scale_y_continuous(labels = scales::label_comma(scale = 1 * 1e5)) +
+      facet_grid(cause ~ metric, scales = "free_y") +
+      theme_minimal() +
+      theme(strip.text.y = element_text(angle = 0),
+            legend.position = "bottom")
+```
+
+## Testing how BGMx changes in the intv scen
+
+```{r}
+tps_sbst <- intv_tps %>% 
+      filter(year == 2030,
+             sex == "Female",
+             cause == cause3[1]) %>% 
+      rowwise() %>% 
+      mutate(w_sum = sum(c_across(starts_with("dst_")), na.rm = TRUE),
+             adds_to_one = abs(w_sum - 1) < 1e-8) %>% 
+      ungroup() %>% 
+      # select()
+      view()
+
+
+rowSums(tps_sbst[, grepl("^w_", names(tps_sbst))])
+
+w_cols <- tps_sbst[ , grepl("^w_", names(tps_sbst))]
+
+tps_sbst[, TRUE]
+```
+
+```{r}
+full_join(
+      x  = bsln_tps %>% 
+            filter(age %in% seq(50, 90, 5),
+                   sex == "Female",
+                   cause == cause3[1]) %>% 
+            rowwise() %>% 
+            mutate(dst_sum = sum(c_across(starts_with("dst_")), na.rm = TRUE),
+                   adds_to_one = abs(dst_sum - 1) < 1e-8,
+                   scen = "bsln") %>% 
+            ungroup(),
+      y  = intv_tps %>% 
+            filter(age %in% seq(50, 90, 5),
+                   sex == "Female",
+                   cause == cause3[1]) %>% 
+            rowwise() %>% 
+            mutate(dst_sum = sum(c_across(starts_with("dst_")), na.rm = TRUE),
+                   adds_to_one = abs(dst_sum - 1) < 1e-8,
+                   scen = "intv") %>% 
+            ungroup()
+) %>% 
+      # filter(scen == "intv",
+      #        year >= 2019) %>% 
+      # select(year, starts_with("dst_"))
+
+      ggplot(aes(x = year, y = dst_sum, color = scen)) +
+      geom_line() +
+      facet_wrap(. ~ age) +
+      theme_minimal()
+```
+
+```{r}
+country_epi %>% 
+      filter(sex == "Female",
+             age %in% seq(40, 70, 5),
+             cause %in% target_cancers,
+             measure == "Incidence",
+             metric == "Rate") %>% 
+      mutate(age = as.character(age)) %>% 
+      ggplot(aes(x = year, y = val, group = age, col = age)) +
+      geom_line() +
+      facet_wrap(. ~ cause) +
+      theme_minimal()
+```
+
+## Fertility Charts
+
+```{r}
+full_join(
+      x = gbd_fert %>% 
+            filter(location %in% c("United States of America", "Uganda", "India", "China"),
+                   sex == "Female",
+                   year == 2000, sex == "Female"),
+      y = gbd_fert_5y %>% 
+            filter(location %in% c("United States of America", "Uganda", "India", "China"),
+                   sex == "Female",
+                   year == 2000, sex == "Female")
+      ) %>% 
+      # pivot_longer(cols = c(asfr, asfr_5)) %>% 
+      ggplot(aes(x = age)) +
+      geom_line(aes(y = asfr)) +
+      geom_point(aes(y = asfr_5)) +
+      facet_wrap(.~ location) +
+      theme_minimal()
+```
+
+## Cancer-Specific Markov Trace Plost
+
+```{r}
+bsln_tps %>% 
+      filter(cause %in% c(cause1, cause2, cause3),
+             # sex == "Female",
+             case_when(cause == cause2[2] ~ sex == "Male",
+                       TRUE ~ sex == "Female"),
+             age == 60) %>% 
+      pivot_longer(cols = c(w_prc, w_lcl, prc_lcl, lcl_rgn, rgn_dst,
+                            dst_d, lcl_d),
+                   names_to = "tp",
+                   values_to = "val") %>% 
+      ggplot(aes(x = year, y = val, col = tp)) +
+      geom_line() +
+      facet_wrap(. ~ cause, scales = "free_y") +
+      theme_minimal()
+```
+
+```{r}
+bsln_markov_trace %>% 
+      filter(cause %in% c(cause1, cause2, cause3),
+             # sex == "Female",
+             case_when(cause == cause2[2] ~ sex == "Male",
+                       TRUE ~ sex == "Female"),
+             age == 60) %>% 
+      pivot_longer(cols = c(pprc, plcl, prgn, pdst, pcdx),
+                   names_to = "tp",
+                   values_to = "val") %>% 
+      ggplot(aes(x = year, y = val, col = tp)) +
+      geom_line() +
+      facet_wrap(. ~ cause, scales = "free_y") +
+      theme_minimal()
+```
+
+## Jan 2026
+
+```{r}
+`%between%` <- data.table::`%between%`
+
+calc_markov_state_deltas_dt <- function(
+            markov_trace,
+            cols = c("pwell","pprc","plcl","prgn","pdst","pcdx","pbgdx"),
+            year_range = c(2000L, 2050L),
+            age_range  = c(1L, 75L),
+            year_col = "year",
+            age_col  = "age",
+            delta_prefix = "d_",
+            check_unique_year_age = FALSE
+) {
+      dt <- data.table::as.data.table(markov_trace)
+      
+      miss_keys <- setdiff(c(year_col, age_col), names(dt))
+      if (length(miss_keys)) stop("Missing key columns: ", paste(miss_keys, collapse = ", "))
+      
+      miss_cols <- setdiff(cols, names(dt))
+      if (length(miss_cols)) stop("Missing state columns: ", paste(miss_cols, collapse = ", "))
+      
+      dt[, (year_col) := as.integer(get(year_col))]
+      dt[, (age_col)  := as.integer(get(age_col))]
+      
+      y0 <- as.integer(year_range[1]); y1 <- as.integer(year_range[2])
+      a0 <- as.integer(age_range[1]);  a1 <- as.integer(age_range[2])
+      
+      
+      dt_sub <- dt[
+            get(year_col) %between% c(y0, y1 + 1L) &
+                  get(age_col)  %between% c(a0, a1 + 1L)
+      ]
+      
+      if (check_unique_year_age) {
+            dupN <- dt_sub[, .N, by = c(year_col, age_col)][N > 1L, .N]
+            if (nrow(dupN) > 0) {
+                  stop("Found duplicate rows for the same (year, age). ",
+                       "Delta merge would expand rows. Fix upstream or aggregate first.")
+            }
+      }
+      
+      # shifted "next" table: align (year+1, age+1) back onto (year, age)
+      next_dt <- dt_sub[, c(year_col, age_col, cols), with = FALSE]
+      next_dt[, (year_col) := get(year_col) - 1L]
+      next_dt[, (age_col)  := get(age_col)  - 1L]
+      data.table::setnames(next_dt, cols, paste0("next_", cols))
+      
+      # merge by (year, age)
+      data.table::setkeyv(dt_sub, c(year_col, age_col))
+      data.table::setkeyv(next_dt, c(year_col, age_col))
+      out <- next_dt[dt_sub]  
+      
+      # compute deltas
+      for (j in cols) {
+            out[, (paste0(delta_prefix, j)) := get(paste0("next_", j)) - get(j)]
+      }
+      
+      # drop helper next_*
+      out[, (paste0("next_", cols)) := NULL]
+      
+      # restrict to requested output window
+      out <- out[
+            get(year_col) %between% c(y0, y1) &
+                  get(age_col)  %between% c(a0, a1)
+      ]
+      
+      out
+}
+
+```
+
+```{r}
+calc_markov_state_deltas_dt(markov_trace = bsln_markov_trace %>% 
+                                  filter(sex == "Female", cause == cause2[1])) %>% 
+      filter(age %in% seq(45, 75, 5)) %>%
+      # mutate(cohort = year - age) %>% 
+      # filter(cohort %in% seq(1945, 1975, 5)) %>% 
+      # filter(age %in% seq(0, 40, 5)) %>% 
+      mutate(age = as.character(age)) %>% 
+      # mutate(cohort = as.character(cohort)) %>% 
+      pivot_longer(cols = ends_with("_rate"),
+                   names_to = "metric",
+                   values_to = "rate") %>% 
+      ggplot(aes(x = year, y = rate, col = age)) +
+      geom_line() +
+      facet_wrap(. ~ metric, scales = "free_y") +
+      theme_caviz
+```
+
+```{r}
+calc_markov_state_deltas_dt(markov_trace = bsln_markov_trace %>% 
+                                  filter(sex == "Female", cause == cause2[1])) %>% 
+      # filter(age %in% seq(45, 75, 5)) %>% 
+      mutate(cohort = year - age) %>% 
+      filter(cohort %in% seq(1945, 1975, 5)) %>% 
+      # filter(age %in% seq(0, 40, 5)) %>% 
+      # mutate(age = as.character(age)) %>% 
+      mutate(cohort = as.character(cohort)) %>% 
+      pivot_longer(cols = ends_with("_rate"),
+                   names_to = "metric",
+                   values_to = "rate") %>% 
+      ggplot(aes(x = year, y = rate, col = cohort)) +
+      geom_line() +
+      facet_wrap(. ~ metric, scales = "free_y") +
+      theme_caviz
+```
+
+
+
+### Session with Renu 2/4/2026
+
+```{r}
+test_gbd <- explore_rdata_obj(file_path = "../inputs/gbd_dt.RData",
+                              obj_nm    = "gbd_epi_1yr_predict")
+```
+
+```{r}
+mod_proj <- explore_rdata_obj(file_path = "../outputs/RData/Uganda/Uganda_top_5.RData")
+                              # obj_nm    = "gbd_epi_1yr_predict")
+```
+
+```{r}
+full_join(
+      x  = test_gbd %>% 
+            filter(measure == "Deaths",
+                   location == "Uganda",
+                   sex == "Female",
+                   cause == cause2[1]) %>% head(),
+      
+      y  = bsln_pop_projection %>% names()
+            filter(location == "Uganda",
+                   sex == "Female",
+                   cause == cause2[1]) %>% names(),
+      
+      by = join_by()
+)
+```
+
+
+```{r}
+plot_age_specific_rates <- function(data,
+                                    measure_name,
+                                    location_name,
+                                    cause_name) {
+      # Filter the data
+      plot_data <- data %>%
+            filter(
+                  measure == measure_name,
+                  location == location_name,
+                  sex == "Female",
+                  age %in% c("40-44 years", "50-54 years", "60-64 years"),
+                  cause == cause_name,
+                  metric == "Rate",
+                  year >= 2000 & year <= 2019
+            )
+      # Create the plot
+      ggplot(plot_data, aes(x = year, y = val, color = age)) +
+            geom_line(linewidth = 1) +
+            geom_point(size = 2) +
+            labs(
+                  title = paste(measure_name, "Rate by Age Group -", cause_name),
+                  subtitle = paste(location_name, "| Females | 2000-2019"),
+                  x = "Year",
+                  y = paste(measure_name, "Rate (per 100,000)"),
+                  color = "Age Group"
+            ) +
+            scale_x_continuous(breaks = seq(2000, 2019, by = 2)) +
+            theme_minimal() +
+            theme(
+                  legend.position = "bottom",
+                  plot.title = element_text(face = "bold")
+            )
+}
+```
+
+
+```{r}
+gbd_epi_raw <- explore_rdata_obj(file_path = "../inputs/gbd_dt.RData",
+                                 obj_nm    = "gbd_epi_raw")
+
+plot_data <- gbd_epi_raw %>%
+      filter(
+            measure == "Incidence",
+            location == "Uganda",
+            sex == "Female",
+            age %in% c("40-44 years", "50-54 years", "60-64 years"),
+            cause == "Breast cancer",
+            metric == "Rate",
+            year >= 2000 & year <= 2019
+      )
+ 
+
+plot_age_specific_rates(
+      data = gbd_epi_raw,
+      measure_name = "Incidence",
+      location_name = "Uganda",
+      cause_name = "Breast cancer"
+)
+```
+
+## GBD Cohort Explorations
+
+```{r}
+country_epi %>% 
+      filter(location == "Uganda",
+             sex      == "Female",
+             # cause %in% c("Breast cancer", "Cervical cancer", "Pancreatic cancer"),
+             measure %in% c("Incidence", "Deaths")) %>% 
+      mutate(cohort = year - age) %>% 
+      # filter(cohort %in% seq(1960, 2000, 5)) %>%
+      # filter(between(age, 40, 79)) %>%
+      mutate(measure = factor(measure, levels = c("Incidence", "Deaths"))) %>%
+      mutate(cohort = as.character(cohort)) %>% 
+      
+      ggplot(aes(x = age, y = pred_rates,
+                 # color = cohort,
+                 group = cohort)) +
+      geom_line(alpha = 0.05) +
+      facet_grid(cause ~ measure, scales = "free_y") +
+      scale_y_continuous(name     = "Cancer-specific rates (per 100,000)",
+                         labels   = scales::label_comma(scale = 1e5),
+                         n.breaks = 3) +
+      # theme_minimal() +
+      theme_caviz +
+      theme(aspect.ratio    = 1 / 3,
+            legend.position = "bottom",
+            strip.text.y    = element_text(color = "black", angle = 0))
+
+ggsave(filename = "../outputs/diagnostics/rates_1year_all_cohorts.png",
+       width = 6, height = 10)
+```
+
+```{r}
+country_epi %>% 
+      filter(location == "Uganda",
+             sex      == "Female",
+             # cause %in% c("Breast cancer", "Cervical cancer", "Pancreatic cancer"),
+             measure %in% c("Incidence", "Deaths")) %>% 
+      mutate(cohort = year - age) %>% 
+      filter(cohort %in% seq(1960, 2000, 5)) %>%
+      # filter(between(age, 40, 79)) %>%
+      mutate(measure = factor(measure, levels = c("Incidence", "Deaths"))) %>%
+      mutate(cohort = as.character(cohort)) %>% 
+      
+      ggplot(aes(x = age,
+                 y = pred_rates,
+                 color = cohort,
+                 group = cohort)) +
+      geom_line(alpha = 0.3) +
+      facet_grid(cause ~ measure, scales = "free_y") +
+      scale_y_continuous(name     = "Cancer-specific rates (per 100,000)",
+                         labels   = scales::label_comma(scale = 1e5),
+                         # trans    = 'log10',
+                         n.breaks = 3) +
+      # theme_minimal() +
+      theme_caviz +
+      theme(aspect.ratio    = 1 / 3,
+            legend.position = "bottom",
+            strip.text.y    = element_text(color = "black", angle = 0))
+
+ggsave(filename = "../outputs/diagnostics/rates_1year_all_cohorts_col_log.png",
+       width = 6, height = 12)
+```
+
+```{r}
+full_join(
+      x  = country_epi %>% 
+            # filter(cause == cause2[3]) %>% 
+            filter(location == "Uganda",
+                   sex      == "Female",
+                   measure %in% c("Incidence", "Deaths")) %>% 
+            rename(rate = pred_rates) %>% 
+            # pivot_wider(id_cols = c(location, sex, year, age, pop, cause),
+            #             names_from = measure,
+            #             values_from = pred_rates) %>% 
+            # rename(inc_rate = Incidence, cdeath_rate = Deaths) %>% 
+            mutate(source = "GBD"),
+      
+      y  = bsln_markov_trace %>% 
+            filter(sex == "Female") %>% 
+            split(.$cause) %>%
+            map(.x = .,
+                .f = ~ calc_markov_state_deltas_dt(markov_trace = .x)) %>%
+            list_rbind() %>%
+            pivot_longer(cols = c(inc_rate, cdeath_rate),
+                         names_to = "measure",
+                         values_to = "rate") %>% 
+            mutate(measure = recode_values(measure,
+                                           "inc_rate"    ~ "Incidence",
+                                           "cdeath_rate" ~ "Deaths",
+                                           default = NA_character_)) %>% 
+            # filter(cause == cause2[3]) %>% 
+            # mutate(rate = rate / 1e5) %>%
+            mutate(source = "Markov"),
+      
+      by = join_by(location, sex, year, age, cause, measure, rate, source)
+) %>% 
+      select(location, sex, year, age, cause, measure, rate, source) %>% 
+      mutate(measure = factor(measure, levels = c("Incidence", "Deaths"))) %>%
+      mutate(cohort = as.character(year - age)) %>% 
+      
+      # filter(age == 0) %>% 
+      filter(cause %in% c(cause1[2],
+                          cause1[4],
+                          cause2[1],
+                          cause2[3],
+                          cause3[1]),
+             sex == "Female",
+             cohort %in% c(1960, 1980, 2000),
+             year <= reference_year) %>% 
+      
+      mutate(cause = recode_values(cause,
+                                   cause1[2] ~ "Esoph.",
+                                   cause1[4] ~ "Liver",
+                                   cause2[1] ~ "Breast",
+                                   cause2[3] ~ "Lung",
+                                   cause3[1] ~ "Cervix",
+                                   cause3[2] ~ "CRC",
+                                   default = NA_character_)) %>% 
+      
+      # filter(source == "Markov") %>% 
+      # filter(measure == "Deaths") %>% 
+      
+      # filter(age == 1,
+      #        sex == "Female",
+      #        year == 2001,
+      #        cause == "Breast cancer",
+      #        source == "GBD")
+      
+      # count(age, sex, year, cause, measure, source) %>% 
+      
+      ggplot(aes(x = year - 2000,
+                 y = rate,
+                 color = source,
+                 group = interaction(source, cohort))) +
+      geom_line() +
+      scale_y_continuous(name     = "Cancer-specific rates\n(per 100,000)",
+                         labels   = scales::label_comma(scale = 1e5),
+                         trans    = 'log10',
+                         n.breaks = 3) +
+      facet_grid(measure + cohort ~ cause, scale = "free_y") +
+      # facet_wrap(. ~ measure, scale = "free_y") +
+      labs(x = "Year (post 2000)") +
+      theme_caviz +
+      theme(aspect.ratio    = 1 / 3,
+            legend.position = "bottom",
+            strip.text.y    = element_text(color = "black", angle = 0))
+```
+
+#### Without Markov Correction
+
+```{r}
+full_join(
+      x  = country_epi %>% 
+            filter(location == "Uganda",
+                   sex      == "Female",
+                   measure %in% c("Incidence", "Deaths")) %>% 
+            rename(rate = Rate) %>% #pred_rates) %>% 
+            mutate(cohort = as.character(year - age)) %>% 
+            mutate(source = "GBD"),
+      
+      y  = bsln_markov_trace %>% 
+            filter(sex == "Female") %>% 
+            calc_epi_rates_markov(markov_inpt = .) %>% 
+            pivot_longer(cols = c(inc_rate, cfr),
+                         names_to = "measure",
+                         values_to = "rate") %>% 
+            mutate(measure = recode_values(measure,
+                                           "inc_rate" ~ "Incidence",
+                                           "cfr"      ~ "Deaths",
+                                           default = NA_character_)) %>% 
+            mutate(source = "Markov"),
+      
+      by = join_by(location, sex, year, age, cohort, cause, measure, rate, source)
+) %>% 
+      select(location, sex, year, age, cohort, cause, measure, rate, source) %>% 
+      mutate(measure = factor(measure, levels = c("Incidence", "Deaths"))) %>%
+      
+      filter(cause %in% c(cause1[1],
+                          cause1[2],
+                          cause1[4],
+                          cause1[7],
+                          cause1[8],
+                          cause1[9],
+                          cause1[10] #,
+                          # cause2[1],
+                          # cause2[3],
+                          # cause3[1],
+                          ),
+             sex == "Female",
+             cohort %in% seq(1960, 2000, 10),
+             measure == "Incidence", # "Deaths", # 
+             year <= reference_year) %>% 
+      
+      mutate(cause = recode_values(cause,
+                                   cause1[1] ~ "Bladder",
+                                   cause1[2] ~ "Esoph.",
+                                   cause1[4] ~ "Liver",
+                                   cause1[7] ~ "Ovary",
+                                   cause1[8] ~ "Pancreas",
+                                   cause1[9] ~ "Stomach",
+                                   cause1[10] ~ "Thyroid",
+                                   cause2[1] ~ "Breast",
+                                   cause2[3] ~ "Lung",
+                                   cause3[1] ~ "Cervix",
+                                   cause3[2] ~ "CRC",
+                                   default = NA_character_)) %>% 
+      
+      ggplot(aes(x = year - 2000,
+                 y = rate,
+                 color = source,
+                 group = interaction(source, cohort))) +
+      geom_line() +
+      scale_y_continuous(name     = "Cancer-specific rates\n(per 100,000)",
+                         labels   = scales::label_comma(scale = 1e5),
+                         trans    = 'log10',
+                         n.breaks = 3) +
+      facet_grid(cause ~ measure + cohort, scale = "free_y") +
+      # facet_wrap(. ~ measure, scale = "free_y") +
+      labs(x = "Year (post 2000)") +
+      theme_caviz +
+      theme(aspect.ratio    = 1 / 4,
+            legend.position = "bottom",
+            strip.text.y    = element_text(color = "black", angle = 0))
+```
+
+```{r}
+## Deep dive
+bsln_markov_trace %>% 
+      mutate(cohort = year - age) %>% 
+      filter(sex == "Female" & cause == cause1[4] & cohort == 1980) %>% 
+      # mutate(plcl = plcl - lag(plcl, default = 0)) %>% 
+      filter(year <= 2020) %>% 
+      
+      calc_epi_rates_markov(markov_inpt = .) %>% 
+      
+      # ggplot(aes(x = year, y = plcl / pwell)) +
+      ggplot(aes(x = year, y = inc_rate)) +
+      geom_line() +
+      scale_y_continuous(trans = "log10") +
+      theme_caviz
+```
+
+```{r}
+read.csv(paste0("../../Data/GBD 2021/16 cancer types/split/gbd_epi_",
+                "China",
+                ".csv")) %>% 
+      
+# country_epi %>% 
+      mutate(cohort = year - age) %>% 
+      filter(sex      == "Female",
+             measure == "Incidence") %>% 
+      filter(cause %in% cause1[c(1, 2, 4, 7, 8, 9, 10)]) %>% 
+      # filter(cohort %in% seq(1960, 2000, 5)) %>%
+      filter(age %in% seq(40, 75, 5)) %>%
+      filter(year <= reference_year) %>% 
+      # mutate(cohort = as.character(cohort)) %>%
+      mutate(age = as.character(age)) %>%
+      rename(rate = pred_rates) %>% # Rate) %>% #
+      
+      mutate(cause = recode_values(cause,
+                                   cause1[1] ~ "Bladder",
+                                   cause1[2] ~ "Esoph.",
+                                   cause1[4] ~ "Liver",
+                                   cause1[7] ~ "Ovary",
+                                   cause1[8] ~ "Pancreas",
+                                   cause1[9] ~ "Stomach",
+                                   cause1[10] ~ "Thyroid",
+                                   cause2[1] ~ "Breast",
+                                   cause2[3] ~ "Lung",
+                                   cause3[1] ~ "Cervix",
+                                   cause3[2] ~ "CRC",
+                                   default = NA_character_)) %>% 
+      
+      # ggplot(aes(x = year, y = plcl / pwell)) +
+      ggplot(aes(x = year, y = rate, colour = cause, group = cause)) +
+      geom_line() +
+      scale_x_continuous(breaks = seq(2000, 2020, 10)) +
+      scale_y_continuous(n.breaks = 3,
+                         trans = "log10") +
+      # facet_grid(cause ~ cohort, scale = "free_y") +
+      facet_grid(cause ~ age, scale = "free_y") +
+      guides(color = "none") +
+      theme_caviz +
+      theme(aspect.ratio = 1 / 3,
+            axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 10),
+            legend.position = "bottom",
+            strip.text.y    = element_text(color = "black", angle = 0))
+```
+
+```{r}
+reduce(.x = list(read.csv(paste0("../../Data/GBD 2021/16 cancer types/split/gbd_epi_",
+                                 "China",
+                                 ".csv")),
+                 read.csv(paste0("../../Data/GBD 2021/16 cancer types/split/gbd_epi_",
+                                 "United States of America",
+                                 ".csv")),
+                read.csv(paste0("../../Data/GBD 2021/16 cancer types/split/gbd_epi_",
+                                "Uganda",
+                                ".csv")),
+                read.csv(paste0("../../Data/GBD 2021/16 cancer types/split/gbd_epi_",
+                                "India",
+                                ".csv"))),
+       .f = full_join) %>% 
+      
+      mutate(cohort = year - age) %>% 
+      filter(sex     == "Female",
+             measure == "Incidence") %>% 
+      filter(cause %in% cause1[c(1, 2, 4, 7, 8, 9, 10)]) %>% 
+      # filter(cohort %in% seq(1960, 2000, 5)) %>%
+      filter(age %in% seq(40, 75, 5)) %>%
+      filter(year == reference_year) %>% 
+      # mutate(cohort = as.character(cohort)) %>%
+      mutate(age = as.character(age)) %>%
+      rename(rate = pred_rates) %>% # Rate) %>% #
+      
+      mutate(cause = recode_values(cause,
+                                   cause1[1] ~ "Bladder",
+                                   cause1[2] ~ "Esoph.",
+                                   cause1[4] ~ "Liver",
+                                   cause1[7] ~ "Ovary",
+                                   cause1[8] ~ "Pancreas",
+                                   cause1[9] ~ "Stomach",
+                                   cause1[10] ~ "Thyroid",
+                                   cause2[1] ~ "Breast",
+                                   cause2[3] ~ "Lung",
+                                   cause3[1] ~ "Cervix",
+                                   cause3[2] ~ "CRC",
+                                   default = NA_character_)) %>% 
+      
+      ggplot(aes(x = rate, colour = location, group = location, fill = location)) +
+      geom_histogram(alpha = 0.3) +
+      scale_x_continuous(name = "Incidence rate (per 100,000)",
+                         labels = scales::label_number(accuracy = 1, scale = 1e5),
+                         n.breaks = 3) +
+      scale_y_continuous(n.breaks = 2) +
+      # facet_grid(cause ~ cohort, scale = "free_y") +
+      facet_grid(cause ~ age, scale = "free_y") +
+      # guides(color = "none") +
+      theme_caviz +
+      theme(aspect.ratio = 1 / 4,
+            axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 10),
+            legend.position = "bottom",
+            strip.text.y    = element_text(color = "black", angle = 0))
+```
+
+```{r}
+reduce(.x = list(read.csv(paste0("../../Data/GBD 2021/16 cancer types/split/gbd_epi_",
+                                 "China",
+                                 ".csv")),
+                 read.csv(paste0("../../Data/GBD 2021/16 cancer types/split/gbd_epi_",
+                                 "United States of America",
+                                 ".csv")),
+                read.csv(paste0("../../Data/GBD 2021/16 cancer types/split/gbd_epi_",
+                                "Uganda",
+                                ".csv")),
+                read.csv(paste0("../../Data/GBD 2021/16 cancer types/split/gbd_epi_",
+                                "India",
+                                ".csv"))),
+       .f = full_join) %>% 
+      
+      mutate(cohort = year - age) %>% 
+      filter(sex     == "Female",
+             measure == "Incidence") %>% 
+      filter(cause %in% cause1[c(1, 2, 4, 7, 8, 9, 10)]) %>%
+      # filter(cohort %in% seq(1960, 2000, 5)) %>%
+      filter(age %in% seq(40, 75, 5)) %>%
+      filter(year <= reference_year) %>% 
+      # mutate(cohort = as.character(cohort)) %>%
+      mutate(age = as.character(age)) %>%
+      rename(rate = pred_rates) %>% # Rate) %>% #
+      
+      mutate(cause = recode_values(cause,
+                                   cause1[1] ~ "Bladder",
+                                   cause1[2] ~ "Esoph.",
+                                   cause1[4] ~ "Liver",
+                                   cause1[7] ~ "Ovary",
+                                   cause1[8] ~ "Pancreas",
+                                   cause1[9] ~ "Stomach",
+                                   cause1[10] ~ "Thyroid",
+                                   cause2[1] ~ "Breast",
+                                   cause2[3] ~ "Lung",
+                                   cause3[1] ~ "Cervix",
+                                   cause3[2] ~ "CRC",
+                                   default = NA_character_)) %>% 
+      
+      group_by(cohort, sex, cause) %>% 
+      mutate(diff = rate - rate[location == "United States of America"]) %>% 
+      
+      ggplot(aes(x = year, y = diff,
+                 colour = location, group = location, fill = location)) +
+      # geom_histogram(alpha = 0.3) +
+      geom_line() +
+      scale_x_continuous(name = "Year",
+                         n.breaks = 3) +
+      scale_y_continuous(name = "Difference in incidence rates (from the US)",
+                         n.breaks = 2,
+                         labels = scales::label_number(accuracy = 1, scale = 1e5),
+                         # trans = "log10"
+                         ) +
+      # facet_grid(cause ~ cohort, scale = "free_y") +
+      facet_grid(cause ~ age, scale = "free_y") +
+      # guides(color = "none") +
+      theme_caviz +
+      theme(aspect.ratio = 1 / 4,
+            axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 10),
+            legend.position = "bottom",
+            strip.text.y    = element_text(color = "black", angle = 0))
+```
+
+```{r}
+full_join(
+      x  = country_epi %>% 
+            # filter(cause == cause2[3]) %>% 
+            filter(location == "Uganda",
+                   sex      == "Female",
+                   measure %in% c("Incidence", "Deaths")) %>% 
+            rename(rate = pred_rates) %>% 
+            # pivot_wider(id_cols = c(location, sex, year, age, pop, cause),
+            #             names_from = measure,
+            #             values_from = pred_rates) %>% 
+            # rename(inc_rate = Incidence, cdeath_rate = Deaths) %>% 
+            mutate(source = "GBD"),
+      
+      y  = bsln_pop_proj_markov %>% # bsln_markov_trace %>% 
+            filter(sex == "Female") %>% 
+            # split(.$cause) %>% 
+            # map(.x = .,
+            #     .f = ~ calc_markov_state_deltas_dt(markov_trace = .x)) %>% 
+            # list_rbind() %>% 
+            pivot_longer(cols = c(i_rate, d_rate),
+                         names_to = "measure",
+                         values_to = "rate") %>% 
+            mutate(measure = recode_values(measure,
+                                           "i_rate" ~ "Incidence",
+                                           "d_rate" ~ "Deaths",
+                                           default = NA_character_)) %>% 
+            # filter(cause == cause2[3]) %>% 
+            # mutate(rate = rate / 1e5) %>%
+            mutate(source = "Markov"),
+      
+      by = join_by(location, sex, year, age, cause, measure, rate, source)
+) %>% 
+      select(location, sex, year, age, cause, measure, rate, source) %>% 
+      mutate(measure = factor(measure, levels = c("Incidence", "Deaths"))) %>%
+      mutate(cohort = as.character(year - age)) %>% 
+      
+      # filter(age == 0) %>% 
+      filter(cause %in% cause2,
+             sex == "Female",
+             cohort %in% c(1960, 1980, 2000),
+             year < reference_year) %>% 
+      
+      # filter(source == "Markov") %>% 
+      
+      # filter(age == 1,
+      #        sex == "Female",
+      #        year == 2001,
+      #        cause == "Breast cancer",
+      #        source == "GBD")
+      
+      # count(age, sex, year, cause, measure, source) %>% 
+      
+      ggplot(aes(x = year, y = rate, color = source, group = interaction(source, cohort))) +
+      geom_line() +
+      scale_y_continuous(name     = "Cancer-specific rates (per 100,000)",
+                         labels   = scales::label_comma(scale = 1e5),
+                         n.breaks = 3) +
+      facet_grid(cause ~ measure, scale = "free_y") +
+      # facet_wrap(. ~ measure, scale = "free_y") +
+      theme_caviz +
+      theme(#aspect.ratio    = 1 / 3,
+            legend.position = "bottom",
+            strip.text.y    = element_text(color = "black", angle = 0))
+```
+
+```{r}
+full_join(
+      x  = country_epi %>% 
+            # filter(cause == cause2[3]) %>% 
+            filter(location == "Uganda",
+                   sex      == "Female",
+                   measure %in% c("Incidence", "Deaths")) %>% 
+            rename(rate = pred_rates) %>% 
+            mutate(source = "GBD"),
+      
+      y  = bsln_pop_proj_markov %>% # bsln_markov_trace %>% 
+            filter(sex == "Female") %>% 
+            rename(pop = Nx) %>% 
+            mutate(source = "Markov"),
+      
+      by = join_by(location, sex, year, age, cause, pop, source)
+) %>% 
+      select(location, sex, year, age, pop, source) %>% 
+      mutate(cohort = as.character(year - age)) %>% 
+      
+      unique() %>% 
+      
+      # filter(age == 0) %>% 
+      filter(sex == "Female",
+             cohort %in% seq(1960, 2000, 5),
+             year <= reference_year) %>% 
+      
+      # filter(source == "Markov") %>% 
+      
+      # filter(age == 1,
+      #        sex == "Female",
+      #        year == 2001,
+      #        cause == "Breast cancer",
+      #        source == "GBD")
+      
+      # count(age, sex, year, cause, measure, source) %>% 
+      
+      ggplot(aes(x = year - 2000,
+                 y = pop,
+                 color = source,
+                 group = source)) +
+      geom_line() +
+      scale_x_continuous(name   = "Year (post 2000)") +
+      scale_y_continuous(name   = "Total pop counts (in thousands)",
+                         labels = scales::label_number(scale = 1e-3)) +
+      facet_wrap(. ~ cohort, scale = "free_y") +
+      # facet_wrap(. ~ measure, scale = "free_y") +
+      theme_caviz +
+      theme(#aspect.ratio    = 1 / 3,
+            legend.position = "bottom",
+            strip.text.y    = element_text(color = "black", angle = 0))
+```
+
+```{r}
+bsln_tps_raw %>% 
+      select(cause:age, lcl_d, dst_d) %>% 
+      pivot_longer(cols = ends_with("_d"),
+                   names_to = "tp") %>% 
+      filter(sex == "Female",
+             case_when(cause %in% cause1 ~ tp == "lcl_d",
+                       TRUE              ~ tp == "dst_d")) %>% 
+      # filter(dst_d < 0.01)
+      
+      ggplot(aes(x = age, y = value)) +
+      geom_point(alpha = 0.01) +
+      facet_wrap(. ~ cause, scales = "free_y") +
+      labs(x = "Age", y = "TP to death\n(lcl_d in category 1, dst_d otherwise)") +
+      theme_minimal()
+```
+
+```{r}
+bsln_tps_raw %>% 
+      filter(year == 2019) %>% 
+      select(cause:age, lcl_d, dst_d) %>% 
+      pivot_longer(cols = ends_with("_d"),
+                   names_to = "tp") %>% 
+      filter(sex == "Female",
+             case_when(cause %in% cause1 ~ tp == "lcl_d",
+                       TRUE              ~ tp == "dst_d")) %>% 
+      # filter(dst_d < 0.01)
+      
+      ggplot(aes(x = age, y = value)) +
+      geom_point(alpha = 0.2) +
+      facet_wrap(. ~ cause, scales = "free_y") +
+      labs(x = "Age", y = "TP to death\n(lcl_d in category 1, dst_d otherwise)") +
+      theme_minimal()
+```
+
+## Call with Renu 2026/2/20
+
+### Checking GBD amcx and prev add up to Nx
+
+```{r}
+reduce(.x = list(country_incd %>% 
+                       # filter(age == 45,
+                       #        # year == 2000,
+                       #        sex == "Female") %>% 
+                       select(!all_of(c("log_fitted_val", "measure"))),
+                 country_prev %>% 
+                       # filter(age == 45,
+                       #        # year == 2000,
+                       #        sex == "Female") %>% 
+                       select(!all_of(c("log_fitted_val", "measure"))),
+                 country_mort %>% 
+                       # filter(age == 45,
+                       #        # year == 2000,
+                       #        sex == "Female") %>% 
+                       select(!all_of(c("log_fitted_val", "measure"))),
+                 country_acmx %>% 
+                       # filter(age == 45,
+                       #        sex == "Female") %>% 
+                       select(!all_of(c("cause", "log_fitted_val", "measure")))),
+       .f = full_join) %>% 
+      mutate(cohort = year - age) %>% 
+      filter(sex == "Female",
+             cohort == 1980) %>% 
+      
+      pivot_longer(cols = c(cix, cpx, cmx, acmx),
+                   names_to = "rate",
+                   values_to = "val") %>% 
+      
+      mutate(val_p = rate_to_prob(time = 1, rate = val)) %>% 
+      
+      split(.$cause) %>% 
+      map(.x = .,
+          .f = ~ .x %>% 
+                ggplot(aes(x = year, y = val, col = rate, group = rate)) +
+                geom_line() +
+                # facet_wrap(. ~ cause, scale = "free_y") +
+                scale_y_continuous(name   = "Rate (per 100,000)",
+                                   labels = scales::label_number(scale = 1e5),
+                                   trans  = "log10"
+                                   ) +
+                theme_caviz +
+                theme(aspect.ratio = 1 / 3,
+                      legend.position = "bottom"))
+      
+      
+```
+
+```{r}
+reduce(.x = list(country_incd %>% 
+                       select(!all_of(c("log_fitted_val", "measure"))),
+                 country_prev %>% 
+                       select(!all_of(c("log_fitted_val", "measure"))),
+                 country_mort %>% 
+                       select(!all_of(c("log_fitted_val", "measure"))),
+                 country_acmx %>% 
+                       select(!all_of(c("cause", "log_fitted_val", "measure")))),
+       .f = full_join) %>% 
+      mutate(cohort = year - age) %>% 
+      filter(case_when(cause == cause2[2] ~ sex == "Male",
+                       TRUE               ~ sex == "Female")) %>% 
+      
+      filter(cohort == 1980) %>% 
+      
+      # mutate(across(.cols = c(cix, cpx, cmx, acmx),
+      #               .fns  = ~ rate_to_prob(time = 1, rate = .))) %>% 
+      # mutate(tot_dist = cix + cpx + cmx + acmx)
+      
+      # filter()
+      
+      pivot_longer(cols = c(cix, cpx, cmx, acmx),
+                   names_to = "rate",
+                   values_to = "val") %>%
+      mutate(cause = recode(cause, !!!cx_lab)) %>% 
+      
+      filter(rate != "cix") %>% 
+      
+      ggplot(aes(x = year, y = val, col = rate, group = rate)) +
+      geom_line() +
+      facet_wrap(. ~ cause, scale = "free_y") +
+      scale_y_continuous(name   = "Rate (per 100,000)",
+                         labels = scales::label_number(scale = 1e5),
+                         n.breaks = 3,
+                         # trans  = "log10"
+                         ) +
+      scale_color_manual(values = c("#C6DABF", "#88D498", "#114B5F")) +
+      theme_caviz +
+      theme(aspect.ratio = 1 / 3,
+            legend.position = "bottom")
+```
+
+```{r}
+reduce(.x = list(country_nx %>% 
+                       select(all_of(c(uid_vec[-4], "Nx"))),
+                 country_prev %>% 
+                       select(all_of(c(uid_vec, "cPx"))),
+                 country_mort %>% 
+                       select(all_of(c(uid_vec, "cDx"))),
+                 country_acmx %>% 
+                       select(all_of(c(uid_vec[-4], "acDx")))),
+       .f = full_join) %>% 
+      mutate(cohort = year - age) %>% 
+      
+      filter(case_when(cause == cause2[2] ~ sex == "Male",
+                       TRUE               ~ sex == "Female")) %>% 
+      
+      filter(cohort == 1980) %>% 
+      
+      # mutate(across(.cols = c(cix, cpx, cmx, acmx),
+      #               .fns  = ~ rate_to_prob(time = 1, rate = .))) %>% 
+      
+      group_by(across(all_of(uid_vec))) %>% 
+      mutate(cpx  = cPx / Nx,
+             cmx  = cDx / Nx,
+             acmx = acDx / Nx) %>% 
+      mutate(well = 1 - acmx,
+             bgmx = acmx - cmx) %>% 
+      ungroup() %>% 
+      
+      pivot_longer(cols = c(well, cpx, cmx, bgmx),
+                   names_to = "metric",
+                   values_to = "prop") %>% 
+      mutate(cause = recode(cause, !!!cx_lab)) %>% 
+      
+      filter(metric != "well") %>% 
+      # mutate
+      
+      ggplot(aes(x = year, y = prop, fill = metric, col = metric, group = metric)) +
+      # geom_line() +
+      geom_area() +
+      facet_wrap(. ~ cause, scale = "free_y") +
+      scale_y_continuous(name   = "Proportion (per 1000)",
+                         labels = scales::label_number(scale = 1e3),
+                         n.breaks = 3,
+                         # trans  = "log10"
+                         ) +
+      scale_fill_manual(values = c("#F3E9D2", "#88D498", "#114B5F")) +
+      scale_color_manual(values = c("#F3E9D2", "#88D498", "#114B5F")) +
+      theme_caviz +
+      theme(aspect.ratio = 1 / 3,
+            legend.position = "bottom",
+            axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 10))
+```
+
+### Checking Numbers instead of Rates
+
+```{r}
+reduce(.x = list(country_incd %>% 
+                       select(!all_of(c("log_fitted_val", "measure"))),
+                 country_prev %>% 
+                       select(!all_of(c("log_fitted_val", "measure"))),
+                 country_mort %>% 
+                       select(!all_of(c("log_fitted_val", "measure"))),
+                 country_acmx %>% 
+                       select(!all_of(c("cause", "log_fitted_val", "measure")))),
+       .f = full_join) %>% 
+      mutate(cohort = year - age) %>% 
+      filter(sex == "Female",
+             cohort == 1980) %>% 
+      
+      pivot_longer(cols = c(cIx, cPx, cDx, acDx), # Nx,
+                   names_to = "metric",
+                   values_to = "count") %>% 
+      
+      mutate(rate = count / Nx) %>% 
+      
+      split(.$cause) %>% 
+      map(.x = .,
+          .f = ~ .x %>% 
+                ggplot(aes(x = year, y = rate, col = metric, group = metric)) +
+                geom_line() +
+                # facet_wrap(. ~ cause, scale = "free_y") +
+                scale_y_continuous(name   = "Rate (per 100,000)",
+                                   labels = scales::label_number(scale = 1e5),
+                                   trans  = "log10"
+                                   ) +
+                theme_caviz +
+                theme(aspect.ratio = 1 / 3,
+                      legend.position = "bottom"))
+```
+
+## Compare HSD with and without Markov Correction
+
+```{r}
+full_join(
+      x  = start_hstate_dist %>% mutate(markov = TRUE),
+      y  = start_hstate_dist_no_markov %>% mutate(markov = FALSE)
+) %>% 
+      filter(case_when(cause == cause2[2] ~ sex == "Male",
+                       TRUE               ~ sex == "Female")) %>% 
+      pivot_longer(cols = pwell:pbgdx,
+                   names_to = "hstate",
+                   values_to = "prop") %>% 
+      group_by(age, year, sex, location, cause, hstate) %>% 
+      reframe(prop_diff = prop[markov] - prop[!markov]) %>% 
+      
+      filter(year == sim_start_year,
+             cause %in% c(cause1[4], cause2[1], cause3[1])) %>% 
+      
+      ggplot(aes(x = age, y = prop_diff, color = hstate, group = hstate)) +
+      geom_line() +
+      scale_y_continuous(name = "Difference in starting HS distribution\nbetween w/out Markov correction") +
+      facet_wrap(. ~ cause, nrow = 1) +
+      theme_caviz +
+      theme(aspect.ratio = 3 / 1)
+```
+
+## Compare Markovs
+
+```{r}
+full_join(
+      x  = bsln_markov_trace %>% mutate(scen = "bsln"),
+      y  = intv_markov_trace %>% mutate(scen = "intv")
+) %>% 
+      filter(cause == cause3[1],
+             sex == "Female",
+             year == reference_year) %>% 
+      
+      ggplot(aes(x = age, y = cdeath_rate, col = scen, group = scen)) +
+      geom_line() +
+      facet_wrap(. ~ scen) +
+      theme_caviz
+```
+
+```{r}
+full_join(
+      x  = bsln_pop_projection, #%>% mutate(scen = "bsln"),
+      y  = intv_pop_projection #%>% mutate(scen = "intv")
+) %>% 
+      filter(# cause == cause3[1],
+             sex == "Female",
+             year == reference_year + 1) %>% 
+      
+      ggplot(aes(x = age, y = cdeath_rate, col = scen, group = scen)) +
+      geom_line() +
+      facet_wrap(. ~ scen) +
+      theme_caviz
+```
+
+## On the plane
+
+```{r}
+bsln_markov_trace %>% 
+      mutate(cohort = year - age) %>% 
+      filter(case_when(cause == cause2[2] ~ sex == "Male",
+                       TRUE               ~ sex == "Female"),
+             cohort == 1980) %>% 
+      pivot_longer(cols = pwell:pbgdx,
+                   names_to = "hstate",
+                   values_to = "tp") %>% 
+      
+      filter(hstate %!in% c("pwell", "pbgdx")) %>% 
+      
+      ggplot(aes(x = year, y = tp, col = hstate, group = hstate)) +
+      geom_line() +
+      scale_y_continuous(n.breaks = 3) +
+      facet_wrap(. ~ cause, scales = "free_y") +
+      theme_caviz +
+      theme(aspect.ratio = 1 / 4,
+            legend.position = "bottom")
+```
+
+```{r}
+bsln_tps %>% # names()
+      mutate(cohort = year - age) %>% 
+      filter(sex == "Female",
+             # cohort == 1980,
+             age == 45,
+             cause == cause3[2]) %>% 
+      pivot_longer(cols = c(w_lcl, lcl_rgn, rgn_dst, dst_d),
+                   names_to = "tp",
+                   values_to = "val") %>% 
+      
+      ggplot(aes(x = year, y = val, col = tp, group = tp)) +
+      geom_line() +
+      theme_caviz +
+      theme(legend.position = "bottom")
+```
+
+```{r}
+start_hstate_dist %>% 
+      mutate(cohort = year - age) %>% 
+      filter(cause %in% c(cause1[4], cause2[1], cause3),
+             sex == "Female",
+             cohort %in% seq(1960, 1990, 10)) %>% 
+      pivot_longer(cols = pwell:pbgdx,
+                   names_to = "hstate",
+                   values_to = "prop") %>% 
+      
+      ggplot(aes(x = year, y = prop, group = hstate, colour = hstate)) +
+      geom_line() +
+      scale_y_continuous(n.breaks = 3) +
+                         # trans = "log10") +
+      facet_grid(cohort ~ cause) +
+      theme_caviz +
+      theme(legend.position = "bottom",
+            aspect.ratio = 1 / 3)
+```
+
+```{r}
+start_hstate_dist %>% 
+      mutate(cohort = year - age) %>% 
+      # filter(cause %in% c(cause1[4], cause2[1], cause3),
+      #        sex == "Female",
+      #        cohort %in% seq(1960, 1990, 10)) %>% 
+      # pivot_longer(cols = pwell:pbgdx,
+      #              names_to = "hstate",
+      #              values_to = "tp") %>% 
+      
+      filter(case_when(cause == cause2[2] ~ sex == "Male",
+                       TRUE               ~ sex == "Female")) %>% 
+      # filter(case_when(cause == cause2[2] ~ age <  78,
+      #                  TRUE               ~ age <= 95)) %>%
+      
+      # select(sex) %>% unique()
+      
+      group_by(age, year, sex, cause, location) %>% 
+      mutate(val = pwell + pprc + plcl + prgn + pdst + pcdx + pbgdx,
+              plaus = val == 1,
+              marker = ifelse(plaus, "o", "x")) %>% 
+      
+      # filter(cause %in% c(cause1[1], cause3))
+      # # filter(year == 2000,
+      # #        age == 45) %>%
+      # filter(val < 0.5)
+      
+      ggplot(aes(x = year, y = val, group = marker, colour = marker)) +
+      geom_line() +
+      scale_y_continuous(n.breaks = 3) +
+                         # trans = "log10") +
+      facet_wrap(. ~ cause) +
+      theme_caviz +
+      theme(legend.position = "bottom",
+            aspect.ratio = 1 / 3)
+```
+
+```{r}
+start_hstate_dist %>% 
+      filter(case_when(cause == cause2[2] ~ sex == "Male",
+                       TRUE               ~ sex == "Female")) %>% 
+      # filter(case_when(cause == cause2[2] ~ age <  78,
+      #                  TRUE               ~ age <= 95)) %>%
+      
+      mutate(val = pwell + pprc + plcl + prgn + pdst + pcdx + pbgdx,
+             plaus = val == 1,
+             marker = ifelse(plaus, "o", "x")) %>% 
+      
+      filter(year == 2000) %>% 
+      # filter(cause == cause2[2]) %>%
+      # filter(year == 2000,
+      #        age == 45) %>%
+      # filter(val < 0.75) %>% 
+      filter(pwell < 0) %>% 
+      
+      count(cause, age)
+```
+
+```{r}
+start_hstate_dist %>% 
+      filter(cause == cause1[1],
+             sex == "Female",
+             age == 95,
+             year == 2000) %>% 
+      # mutate(p_cDx = pmin(pmax(cDx / Nx, 1), 0)) %>% 
+      mutate(p_cDx = pmin(pmax(cDx / Nx, 0), 1))
+```
+
+```{r}
+markov_correction %>% 
+      filter(cause == cause1[1],
+             sex == "Female",
+             age == 95,
+             year == 2000) #%>% 
+      # mutate(p_cDx = pmin(pmax(cDx / Nx, 1), 0)) %>% 
+      # mutate(p_cDx = pmin(pmax(cDx / Nx, 0), 1))
+```
+
+```{r}
+# Cohorts
+tp_primers %>% 
+      mutate(cohort = year - age) %>% 
+      filter(cause %in% c(cause1[4], cause2[1], cause3),
+             sex == "Female",
+             cohort %in% seq(1960, 2000, 10)) %>% 
+      mutate(cause = recode_values(cause,
+                                   cause1[4] ~ "Liver",
+                                   cause2[1] ~ "Breast",
+                                   cause3[1] ~ "Cervix",
+                                   cause3[2] ~ "CRC")) %>% 
+      pivot_longer(cols = cix:bgmx,
+                   names_to = "measure",
+                   values_to = "val") %>% 
+      
+      # filter(measure %!in% c("acmx", "bgmx")) %>% 
+      filter(measure %in% c("cix", "cmx", "acmx")) %>% 
+      
+      ggplot(aes(x = year, y = val, group = measure, colour = measure)) +
+      geom_line() +
+      scale_y_continuous(name = "Rate (per 100,000)",
+                         labels = scales::label_comma(scale = 1e5),
+                         n.breaks = 3, #) +
+                         trans = "log10") +
+      facet_grid(cohort ~ cause, scales = "free_y") +
+      theme_caviz +
+      theme(legend.position = "bottom",
+            aspect.ratio = 1 / 3,
+            strip.text.y.right = element_text(colour = "black", size = 10),
+            axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 10))
+```
+
+```{r}
+# Age
+bsln_tps %>% 
+      mutate(cohort = year - age) %>% 
+      filter(cause %in% c(cause1[4], cause2[1], cause3),
+             sex == "Female",
+             # cohort %in% seq(1960, 2000, 10),
+             age %in% seq(40, 70, 10)) %>% 
+      mutate(cause = recode_values(cause,
+                                   cause1[4] ~ "Liver",
+                                   cause2[1] ~ "Breast",
+                                   cause3[1] ~ "Cervix",
+                                   cause3[2] ~ "CRC")) %>% 
+      pivot_longer(cols = cix:bgmx,
+                   names_to = "measure",
+                   values_to = "val") %>% 
+      
+      # filter(measure %!in% c("acmx", "bgmx")) %>% 
+      filter(measure %in% c("cix", "cmx", "acmx")) %>% 
+      
+      ggplot(aes(x = year, y = val, group = measure, colour = measure)) +
+      geom_line() +
+      scale_y_continuous(name = "Rate (per 100,000)",
+                         labels = scales::label_comma(scale = 1e5),
+                         n.breaks = 3, #) +
+                         trans = "log10") +
+      facet_grid(age ~ cause, scales = "free_y") +
+      theme_caviz +
+      theme(legend.position = "bottom",
+            aspect.ratio = 1 / 3,
+            strip.text.y.right = element_text(colour = "black", size = 10),
+            axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 10))
+```
+
+```{r}
+tp_primers %>% 
+      mutate(cohort = year - age) %>% 
+      filter(#cause %in% c(cause1[4], cause2[1], cause3),
+             sex == "Female",
+             cohort %in% seq(1960, 2000, 10)) %>% 
+      mutate(cause = recode_values(cause,
+                                   cause1[4] ~ "Liver",
+                                   cause2[1] ~ "Breast",
+                                   cause3[1] ~ "Cervix",
+                                   cause3[2] ~ "CRC")) %>% 
+      # pivot_longer(cols = cix:bgmx,
+      #              names_to = "measure",
+      #              values_to = "val") %>% 
+      
+      mutate(diff = acmx - cmx) %>% 
+      select(diff) %>% 
+      pull() %>% 
+      range()
+      
+      # # filter(measure %!in% c("acmx", "bgmx")) %>% 
+      # filter(measure %in% c("cmx", "acmx")) %>% 
+      
+      ggplot(aes(x = year, y = diff)) +
+      geom_line() +
+      scale_y_continuous(name = "Rate (per 100,000)",
+                         # labels = scales::label_comma(scale = 1e5),
+                         n.breaks = 3) +
+      facet_grid(cohort ~ cause, scales = "free_y") +
+      theme_caviz +
+      theme(legend.position = "bottom",
+            aspect.ratio = 1 / 3,
+            strip.text.y.right = element_text(colour = "black", size = 10),
+            axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 10))
+```
+
+## Checks:
+
+### 1) CMX vs. ACMX
+
+** Prostate cancer, 90+
+
+```{r}
+full_join(x  = country_mort %>% select(!all_of(c("log_fitted_val", "measure"))),
+          y  = country_acmx %>% select(!all_of(c("log_fitted_val", "cause", "measure"))),
+          by = join_by(location, sex, year, age, pop, age_gp)) %>%
+      mutate(diff = acmx - cmx) %>% 
+      filter(diff < 0) %>%
+      # count(cause, age)
+      # select(diff) %>% 
+      # pull() %>% 
+      # range()
+      filter(#year == sim_start_year,
+             #age %in% seq(40, 70, 5),
+             case_when(cause == cause2[2] ~ sex == "Male",
+                       TRUE               ~ sex == "Female")) %>% 
+      mutate(age = as.character(age)) %>% 
+      # select(diff) %>% 
+      ggplot(aes(x = year, y = diff, color = age, group = age)) +
+      geom_line() +
+      scale_y_continuous(n.breaks = 3) +
+      # facet_wrap(. ~ cause) +
+      theme_caviz +
+      theme(legend.position = "bottom",
+            aspect.ratio = 1 / 5,
+            # strip.text.y.right = element_text(colour = "black", size = 10),
+            axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 10))
+```
+
+### 2) BSLN TPs
+
+```{r}
+bsln_tps %>% 
+      mutate(cohort = year - age) %>% 
+      filter(case_when(cause == cause2[2] ~ sex == "Male",
+                       TRUE               ~ sex == "Female"),
+             cohort == 1980) %>% 
+      pivot_longer(cols = w_prc:dst_do,
+                   names_to = "tp",
+                   values_to = "val") %>% 
+      
+      filter(case_when(cause %in% cause1            ~ tp %in% c("w_lcl", "lcl_d"),
+                       cause %in% c(cause2, cause3) ~ tp %in% c("w_prc", "w_lcl",
+                                                                "prc_lcl",
+                                                                "rgn_dst", "dst_d"))) %>% 
+      
+      ggplot(aes(x = year, y = val, col = tp, group = tp)) +
+      geom_line() +
+      scale_y_continuous(n.breaks = 3) +
+      facet_wrap(. ~ cause, scales = "free_y") +
+      theme_caviz +
+      theme(aspect.ratio = 1 / 4,
+            legend.position = "bottom",
+            axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 10))
+```
+
+```{r}
+bsln_tps %>% 
+      mutate(cohort = year - age) %>% 
+      filter(case_when(cause == cause2[2] ~ sex == "Male",
+                       TRUE               ~ sex == "Female"),
+             cohort == 1980) %>% 
+      pivot_longer(cols = w_prc:dst_do,
+                   names_to = "tp",
+                   values_to = "val") %>% 
+      
+      filter(case_when(cause %in% cause1            ~ tp %in% c("w_lcl", "lcl_d"),
+                       cause %in% c(cause2, cause3) ~ tp %in% c("w_prc", "w_lcl",
+                                                                "prc_lcl",
+                                                                "rgn_dst", "dst_d",
+                                                                "dst_do"))) %>% 
+      
+      filter(cause %in% cause3) %>% 
+      
+      ggplot(aes(x = year, y = val, col = tp, group = tp)) +
+      geom_line() +
+      scale_y_continuous(n.breaks = 3) +
+      facet_wrap(. ~ cause, scales = "free_y") +
+      theme_caviz +
+      theme(aspect.ratio = 1 / 4,
+            legend.position = "bottom")
+```
+
+```{r}
+bsln_tps %>% 
+      mutate(cohort = year - age) %>% 
+      pivot_longer(cols = w_prc:dst_do,
+                   names_to = "tp",
+                   values_to = "val") %>% 
+      filter(val > 1)
+```
+
+### Examining TP rowSums
+
+```{r}
+tp_rowsums <- bsln_tps %>% 
+      mutate(cohort = year - age) %>% 
+      group_by(age, year, cohort, sex, cause, location) %>% 
+      reframe(well = rowSums(pick(starts_with("w_"))),
+              prc  = rowSums(pick(starts_with("prc_"))),
+              lcl  = rowSums(pick(starts_with("lcl_"))),
+              rgn  = rowSums(pick(starts_with("rgn_"))),
+              dst  = rowSums(pick(starts_with("dst_"))),
+              d    = rowSums(pick(starts_with("d_"))),
+              do   = rowSums(pick(starts_with("do_")))) %>% 
+      
+      pivot_longer(cols = well:do,
+                   names_to = "hstate",
+                   values_to = "tp_val") %>% 
+      count(age, sex, cause, hstate, tp_val) 
+
+tp_rowsums %>% 
+      # filter(tp_val %!in% c(0, 1)) %>% 
+      filter(cause %!in% cause3) %>% 
+      filter(!near(tp_val, 0) & !near(tp_val, 1)) %>% 
+      view()
+```
+
+## Examining `calc_indiv_tp_vec`
+
+```{r}
+test_hsd_stg <- full_join(x = start_hstate_dist,
+                          y = bsln_stg_dist) %>% 
+      filter(age == 55, sex == "Female", cause == cause1[4], year == 2000) %>% 
+      mutate(category = 1,
+             input_tp0 = 0.005,
+             input_tp2 = 0.3,
+             input_tp3 = 0.4)
+
+test_epi <- reduce(
+      .x = list(country_incd %>% select(all_of(c(uid_vec, "cix"))),
+                country_prev %>% select(all_of(c(uid_vec, "cpx"))),
+                country_mort %>% select(all_of(c(uid_vec, "cmx"))),
+                country_acmx %>% select(all_of(c(uid_vec[-4], "acmx")))),
+      .f = full_join) %>% 
+      mutate(bgmx = acmx - cmx) %>% 
+      filter(age == 55, sex == "Female", cause == cause1[4], year == 2000)
+
+test_hsd_stg_epi <- test_epi[test_hsd_stg, on = .(location, sex, year, age, cause)]
+
+t(test_hsd_stg_epi)
+# test_hsd_stg <- data.table::as.data.table(test_hsd_stg)
+
+test_indiv_tp_vec <- test_hsd_stg_epi[, c("w_w", "w_prc",   "w_lcl",   "w_rgn",   "w_dst",   "w_d",   "w_do",
+                           "prc_prc", "prc_lcl",                                "prc_do",
+                                      "lcl_lcl", "lcl_rgn",            "lcl_d", "lcl_do",
+                                                 "rgn_rgn", "rgn_dst",          "rgn_do",
+                                                            "dst_dst", "dst_d", "dst_do") :=
+                  calc_indiv_tp_vec(cat       = category,
+                                    s0        = precancer,
+                                    s1        = local,
+                                    s2        = regional,
+                                    s3        = distant,
+                                    w_sick    = cix,
+                                    prev      = cpx,
+                                    sick_d    = cmx,
+                                    bgmx      = bgmx,
+                                    solve_tp0 = input_tp0,
+                                    solve_tp2 = input_tp2,
+                                    solve_tp3 = input_tp3),
+             by = .(location, cause, sex, year, age)]
+
+test_indiv_tp_cat <- test_hsd_stg_epi[, c("w_w", "w_prc",   "w_lcl",                           "w_do",
+                                          "prc_prc", "prc_lcl",                                "prc_do",
+                                                     "lcl_lcl", "lcl_rgn",            "lcl_d", "lcl_do",
+                                                                "rgn_rgn", "rgn_dst",          "rgn_do",
+                                                                           "dst_dst", "dst_d", "dst_do") :=
+                  calc_indiv_tp_cat(cat       = category,
+                                    s0        = precancer,
+                                    s1        = local,
+                                    s2        = regional,
+                                    s3        = distant,
+                                    w_sick    = cix,
+                                    prev      = cpx,
+                                    sick_d    = cmx,
+                                    bgmx      = bgmx,
+                                    solve_tp0 = input_tp0,
+                                    solve_tp2 = input_tp2,
+                                    solve_tp3 = input_tp3),
+             by = .(location, cause, sex, year, age)]
+
+t(test_indiv_tp_cat) #%>% as.data.frame()
+```
+
+```{r}
+calc_indiv_tp_cat(cat       = 1,
+                  s0        = 0,
+                  s1        = 1,
+                  s2        = 0,
+                  s3        = 0,
+                  w_sick    = 0.0001057003,
+                  prev      = 0.0001237225,
+                  sick_d    = 0.0001051507,
+                  bgmx      = 0.02762172,
+                  solve_tp0 = 0.005,
+                  solve_tp2 = 0.3,
+                  solve_tp3 = 0.4)["w_w"] %>% class()
+      unlist() %>% t() %>% t()
+```
+
+```{r}
+test_indiv_tp_vec %>% 
+      mutate(cohort = year - age) %>% 
+      group_by(age, year, cohort, sex, cause, location) %>% 
+      reframe(well = rowSums(pick(starts_with("w_"))),
+              prc  = rowSums(pick(starts_with("prc_"))),
+              lcl  = rowSums(pick(starts_with("lcl_"))),
+              rgn  = rowSums(pick(starts_with("rgn_"))),
+              dst  = rowSums(pick(starts_with("dst_"))),
+              d    = rowSums(pick(starts_with("d_"))),
+              do   = rowSums(pick(starts_with("do_")))) %>% 
+      
+      pivot_longer(cols = well:do,
+                   names_to = "hstate",
+                   values_to = "tp_val") %>% 
+      count(age, sex, cause, hstate, tp_val)
+```
+
+```{r}
+test_indiv_tp_cat %>% 
+      mutate(cohort = year - age) %>% 
+      group_by(age, year, cohort, sex, cause, location) %>% 
+      reframe(well = rowSums(pick(starts_with("w_"))),
+              prc  = rowSums(pick(starts_with("prc_"))),
+              lcl  = rowSums(pick(starts_with("lcl_"))),
+              rgn  = rowSums(pick(starts_with("rgn_"))),
+              dst  = rowSums(pick(starts_with("dst_"))),
+              d    = rowSums(pick(starts_with("d_"))),
+              do   = rowSums(pick(starts_with("do_")))) %>% 
+      
+      pivot_longer(cols = well:do,
+                   names_to = "hstate",
+                   values_to = "tp_val") %>% 
+      count(age, sex, cause, hstate, tp_val) 
+```
+

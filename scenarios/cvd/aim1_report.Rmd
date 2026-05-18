@@ -93,8 +93,6 @@ int_order <- c(
   "Sodium Reduction",
   "Trans-Fat Elimination",
   "Statin Therapy",
-  "HTN + Sodium",
-  "HTN + Sodium + TFA",
   "All Interventions"
 )
 
@@ -350,9 +348,9 @@ The model evaluates seven intervention scenarios against a business-as-usual (BA
 | Scenario | Intervention | Key Parameters |
 |----------|-------------|----------------|
 | `bp_only` | **Antihypertensive Therapy** | Country-specific HTN control targets (aspirational); linear scale-up from baseline to target, 2026--2040. Effect sizes from Ettehad et al. applied per BP bin. |
-| `sodium_only` | **Sodium Reduction** | Currently parameterised with zero effect (`salteff = 0`); infrastructure is in place for future activation of a 30% reduction target. |
+| `sodium_only` | **Sodium Reduction** | Infrastructure is in place for future activation of a 30% reduction target. |
 | `tfa_only` | **Trans-Fat Elimination** | Elimination of trans-fat intake (target 0% of energy from TFA); policy start year 2028. Affects IHD case fatality via GBD-based age-specific relative risks. |
-| `statins_only` | **Statin Therapy** | Scale-up to 50% coverage among eligible adults by 2030; full adherence assumed. Reduces IHD and ischemic stroke incidence and case fatality. |
+| `statins_only` | **Statin Therapy** | Scale-up to 60% coverage among eligible adults by 2050; full adherence assumed. Reduces IHD and ischemic stroke incidence and case fatality. |
 
 ## Combination Scenarios
 
@@ -929,6 +927,10 @@ dt_bod[, `:=`(deaths_averted = base_deaths - deaths,
 dt_bod <- merge(dt_bod,
                 countries_dt[, .(location, region, location_income)],
                 by = "location", all.x = TRUE)
+
+# Filer by int_order
+dt_bod <- dt_bod[intervention %in% c("b.a.u", int_order)]
+
 ```
 
 ## Table --- Burden of Disease Averted by Intervention Scenario
@@ -1099,6 +1101,10 @@ econ_scen_lbl <- c(
 
 dt_econ <- dt_econ[scenario %in% names(econ_scen_lbl)]
 dt_econ[, intervention := factor(econ_scen_lbl[scenario], levels = int_order)]
+
+# Filer by int_order
+dt_econ <- dt_econ[intervention %in% c("b.a.u", int_order)]
+
 ```
 
 ## Table --- Economic Value of Deaths Averted (VSL and VSLY, Primary Estimate)

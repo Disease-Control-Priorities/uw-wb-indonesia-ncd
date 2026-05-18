@@ -1,0 +1,334 @@
+---
+title: "Outputs"
+author: "Mohamed Albirair"
+date: "`r Sys.Date()`"
+output:
+      html_document:
+            toc: true
+            toc_float:
+                  collapsed: false
+            toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+```{r}
+## load packages
+pacman::p_load(tidyverse)
+
+# Load settings
+y <- yaml::read_yaml("../../settings.yml")
+
+# Home folder
+# y <- list()
+y$home_dir <- "../"
+
+# R code, inputs, and outputs
+if (!exists("root")){
+      root <- y$home_dir
+}
+
+y$fnx_dir     <- paste0(root, "fnx")
+y$inputs_dir  <- paste0(root, "inputs")
+y$outputs_dir <- paste0(root, "outputs")
+y$scripts_dir <- paste0(root, "scripts")
+
+# Source functions
+list.files(path       = y$fnx_dir,
+           pattern    = "\\.R$",
+           full.names = TRUE) %>%
+      walk(.f        = safely(.f = ~ source(.x, echo = FALSE)),
+           .progress = TRUE)
+
+# URLs
+# `not it`
+source(y$not_in)
+
+# ggplot theme_caviz
+source(y$theme_caviz)
+
+## Basic scenario-defining input values
+load("../inputs/all-param.RData")
+load("../inputs/gbd_wb_data.RData")
+```
+
+```{r}
+scrollable <- function(df) {
+      # https://stackoverflow.com/questions/45849433/horizontal-scrolling-in-rmarkdown
+      kableExtra::kable(df, "html") %>% 
+            kableExtra::kable_styling("striped") %>% 
+            kableExtra::scroll_box(height = "600px")
+}
+```
+
+# Read Country-Specific Data
+
+```{r, eval=FALSE}
+##-----Load Country-Specific parameters---------------------------------------##
+scen_input_param <- read_sim_param(path_input = paste0(y$inputs_dir, y$scen_input_file))
+inputs           <- scen_input_param$input_param
+country_select   <- names(inputs)
+country_setting  <- pull(inputs)[1] # pull(income_setting[match(country_select, income_setting$location), "setting"])
+
+sim_start_year   <- y$sim_start_year
+sim_end_year     <- y$sim_end_year
+reference_year   <- y$reference_year
+all_sim_years    <- sim_start_year:sim_end_year
+
+
+##-----Load country-specific data---------------------------------------------##
+country_epi <- load_country_dt(file_input    = paste0(y$inputs_dir, "/gbd_wb_data.RData"),
+                               obj_input     = "gbd",
+                               country_input = country_select)
+
+country_acm <- load_country_dt(file_input    = paste0(y$inputs_dir, "/gbd_wb_data.RData"),
+                               obj_input     = "gbd_acm",
+                               country_input = country_select)
+
+country_frt <- load_country_data(file_input    = paste0(y$inputs_dir, "/gbd_wb_data.RData"),
+                                 obj_input     = "gbd_fert",
+                                 country_input = country_select) %>%
+      frt_list_to_dt(.)
+
+
+##-----Extract case counts in the first simulation year-----------------------##
+n_cases <- calc_metric(country_dt   = country_epi,
+                       measure_inpt = "Prevalence",
+                       counts_name  = "cPx",
+                       rate_name    = "cpx",
+                       add_Nx       = FALSE)
+
+##-----Extract cause-specific death counts and mortality rates for the init year
+n_cmx_deaths <- calc_metric(country_dt   = country_epi,
+                            measure_inpt = "Deaths",
+                            counts_name  = "cDx",
+                            rate_name    = "cmx",
+                            add_Nx       = FALSE)
+
+
+##-----Extract all-cause mortality rates, counts and tot pop counts for the init year
+n_mx_N_acm <- calc_metric(country_dt   = country_acm,
+                          measure_inpt = "Deaths",
+                          counts_name  = "acDx",
+                          rate_name    = "acmx",
+                          add_Nx       = TRUE)
+
+##-----Correct prevalence estimates and account for deaths in previous years----##
+markov_correction <- gen_markov_correction(acm_inpt = n_mx_N_acm,
+                                           epi_inpt = n_cmx_deaths)
+
+#------------------------------------------------------------------------------#
+
+if (!dir.exists(paste0("../inputs/RData/", country_select, "/intv/"))) {
+      dir.create(path = paste0("../inputs/RData/", country_select, "/"),
+                 recursive = TRUE)
+}
+
+## Save for performance testing
+save(country_select, country_setting,
+     sim_start_year, sim_end_year, reference_year, all_sim_years,
+     country_epi, country_acm, country_frt,
+     n_cases, n_cmx_deaths, n_mx_N_acm,
+     markov_correction,
+
+     file = paste0("../inputs/RData/", country_select , "/", country_select, "_param.RData"))
+
+```
+
+# Baseline Scenario
+
+```{r, eval=FALSE}
+## Baseline stage distribution
+bsln_stg_dist     <- scen_input_param$bsln_cascade_stg_dist %>%
+      select(cause, precancer, local, regional, distant)
+
+## Initial Health State Distribution (in the Simulation Starting Year)
+start_hstate_dist <- calc_start_hstate_dist_dt()
+
+## TP Primers
+tp_primers        <- extract_tps_primers_dt()
+
+## Baseline Scenario TPs
+bsln_tps          <- calc_bsln_tps_dt()
+
+## Baseline Scenario Markov Trace
+# Rprof("run_usual_model_two.out")
+bsln_markov_trace <- project_markov_trace_dt(tps_inpt = bsln_tps)
+# Rprof(NULL)
+# summaryRprof("run_usual_model_two.out")
+# dir.create(path = "R/outputs/diagnostics")
+# sink(file = "R/outputs/diagnostics/")
+
+##-----Save all---------------------------------------------------------------##
+
+if (!dir.exists(paste0("../inputs/RData/", country_select, "/intv/"))) {
+      dir.create(path = paste0("../inputs/RData/", country_select, "/bsln/"),
+                 recursive = TRUE)
+}
+
+## Save for country baseline scenario
+save(country_select, country_setting,
+     bsln_stg_dist,
+     start_hstate_dist,
+     bsln_tps,
+     bsln_markov_trace,
+
+     file = paste0("../inputs/RData/",
+                   country_select,
+                   "/bsln/",
+                   country_select, "_bsln.RData"))
+```
+
+# Intervention Scenario
+
+```{r, eval=FALSE}
+scaleup_start_year <- pull(inputs)[2]
+scaleup_end_year   <- pull(inputs)[3]
+
+## Identify target cancer types
+target_cancers     <- scen_input_param$target_cancers
+screenable_cancers <- c(cause2[1], cause3) # Breast, Cvx, CRC
+
+## Process Intervention Scenario-Defining Inputs
+intv_modif_rr <- process_intv_scen_inputs(screen_scaleup = FALSE)
+
+## Intervention Scenario TPs
+intv_tps <- calc_intv_tps()
+
+## Baseline Scenario Markov Trace
+intv_markov_trace <- project_markov_trace_dt(tps_inpt = intv_tps)
+
+
+##-----Save all---------------------------------------------------------------##
+
+if (!dir.exists(paste0("../inputs/RData/", country_select, "/intv/"))) {
+      dir.create(path = paste0("../inputs/RData/", country_select, "/intv/"),
+                 recursive = TRUE)
+}
+
+## Save for country baseline scenario
+save(country_select, country_setting,
+     intv_modif_rr,
+     intv_tps,
+     intv_markov_trace,
+
+     file = paste0("../inputs/RData/",
+                   country_select,
+                   "/intv/",
+                   country_select, "_intv.RData"))
+```
+
+# Output Visualizations
+
+```{r}
+load("RData/United States of America/bsln/United States of America_bsln.RData")
+load("RData/United States of America/intv/United States of America_intv.RData")
+
+subset_cancers <- c(cause2[1], cause3[1], cause2[3], cause2[2], cause3[2], cause1[2], cause1[7])
+```
+
+```{r}
+full_join(
+      x  = full_join(
+            x  = bsln_markov_trace %>% 
+                  mutate(cohort = year - age) %>% 
+                  mutate(prev  = plcl + prgn + pdst,
+                         lprev = prev - lag(prev, default = first(prev)),
+                         lplcl = plcl - lag(plcl, default = first(plcl)),
+                         lpcdx = pcdx - lag(pcdx, default = first(pcdx)),
+                         .by = c(cohort, sex, cause, location)) %>% 
+                  mutate(scen = "bsln"),
+            y  = bsln_pop_projection,
+            by = join_by(age, year, sex, location, scen)
+      ) %>% 
+            filter(cause %in% subset_cancers) %>% 
+            mutate(prev = prev * 1e5,
+                   cdeaths = lpcdx * Nx),
+      
+      y  = full_join(
+            x  = intv_markov_trace %>% 
+                  mutate(cohort = year - age) %>% 
+                  mutate(prev  = plcl + prgn + pdst,
+                         lprev = prev - lag(prev, default = first(prev)),
+                         lplcl = plcl - lag(plcl, default = first(plcl)),
+                         lpcdx = pcdx - lag(pcdx, default = first(pcdx)),
+                         .by = c(cohort, sex, cause, location)) %>% 
+                  mutate(scen = "intv"),
+            y  = intv_pop_projection,
+            by = join_by(age, year, sex, location, scen)
+      ) %>% 
+            filter(cause %in% subset_cancers) %>% 
+            mutate(prev = prev * 1e5,
+                   cdeaths = lpcdx * Nx)
+) %>% 
+      pivot_longer(cols = c(prev, cdeaths),
+                   names_to = "metric",
+                   values_to = "value") %>% 
+      filter(case_when(cause == cause2[2] ~ sex == "Male",
+                       TRUE               ~ sex == "Female"),
+             age %in% 50) %>% 
+      mutate(age = as.character(age)) %>% 
+      
+      split(.$cause) %>% 
+      
+      map(.x = .,
+          .f = function(x) {
+                cancer <- x$cause
+                
+                max_vals <- x %>% 
+                      group_by(metric) %>% 
+                      reframe(max_val = max(value, na.rm = TRUE))
+                
+                x %>% 
+                      ggplot(aes(x = year, y = value, group = scen, color = scen)) +
+                      geom_line() +
+                      facet_wrap(. ~ factor(metric,
+                                            levels = c("prev", "cdeaths"),
+                                            labels = c("Cause prevalence (per 100,000)",
+                                                       "No. of cause-specific deaths"))) + # scales = "free_y"
+                      labs(title = cancer) +
+                      theme_minimal() +
+                      theme(legend.position = "bottom",
+                            strip.text.y.right = element_text(angle = 0))
+          })
+      
+      
+```
+
+```{r}
+full_join(
+      x  = bsln_markov_trace %>% 
+            mutate(cohort = year - age) %>% 
+            mutate(prev  = plcl + prgn + pdst,
+                   lprev = prev - lag(prev, default = first(prev)),
+                   lplcl = plcl - lag(plcl, default = first(plcl)),
+                   lpcdx = pcdx - lag(pcdx, default = first(pcdx)),
+                   .by = c(cohort, sex, cause, location)) %>% 
+            mutate(scen = "bsln") %>% 
+            filter(cause %in% subset_cancers),
+      
+      y  = intv_markov_trace %>% 
+            mutate(cohort = year - age) %>% 
+            mutate(prev  = plcl + prgn + pdst,
+                   lprev = prev - lag(prev, default = first(prev)),
+                   lplcl = plcl - lag(plcl, default = first(plcl)),
+                   lpcdx = pcdx - lag(pcdx, default = first(pcdx)),
+                   .by = c(cohort, sex, cause, location)) %>% 
+            mutate(scen = "intv") %>% 
+            filter(cause %in% subset_cancers)
+) %>% 
+      pivot_longer(cols = c(prev, pcd),
+                   names_to = "metric",
+                   values_to = "value") %>% 
+      filter(sex == "Female",
+             age %in% seq(40, 90, 10)) %>% 
+      
+      ggplot(aes(x = year, y = value, group = age, color = age)) +
+      geom_line() +
+      facet_grid(cause ~ metric, scales = "free_y") +
+      theme_minimal() +
+      theme(legend.position = "bottom")
+```
+

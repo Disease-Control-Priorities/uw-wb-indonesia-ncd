@@ -1,0 +1,177 @@
+% ============================================================
+%  beamer_preamble.tex  (RTSL Assessment Beamer slide deck)
+%  - Default Beamer look + colored callout boxes
+%  - UW Purple accents for bullets/titles
+%  - Custom uncertaintyblock environment
+% ============================================================
+
+% -- Beamer theme (keep default look) ----------------------------------------
+\usetheme{default}
+\usecolortheme{default}
+\usefonttheme{professionalfonts}
+
+% -- XeLaTeX fonts (requires xelatex engine) ----------------------------------
+\usepackage{fontspec}
+\setmainfont{Calibri}[
+  BoldFont       = Calibri Bold,
+  ItalicFont     = Calibri Italic,
+  BoldItalicFont = Calibri Bold Italic
+]
+\setsansfont{Calibri}
+\setmonofont{Courier New}
+
+% -- Packages -----------------------------------------------------------------
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{soul}
+\usepackage{colortbl}
+\usepackage{array}
+\usepackage{graphicx}
+\usepackage{ragged2e}
+\usepackage{longtable}
+\usepackage{tabu}
+\usepackage{microtype}
+\usepackage{hyperref}
+\usepackage{tikz}
+
+% -- Larger default font for donor/funder audience ----------------------------
+% Presentation is delivered live; increase base font size for readability.
+\setbeamerfont{normal text}{size=\large}
+\setbeamerfont{title}{size=\huge,series=\bfseries}
+\setbeamerfont{subtitle}{size=\Large}
+\setbeamerfont{frametitle}{size=\LARGE,series=\bfseries}
+\setbeamerfont{framesubtitle}{size=\large}
+\setbeamerfont{block title}{size=\large,series=\bfseries}
+\setbeamerfont{block title alerted}{size=\large,series=\bfseries}
+\setbeamerfont{block title example}{size=\large,series=\bfseries}
+\setbeamerfont{itemize/enumerate body}{size=\large}
+\setbeamerfont{itemize/enumerate subbody}{size=\normalsize}
+\setbeamerfont{caption}{size=\small}
+\AtBeginDocument{\large}
+
+% -- Project colour palette ---------------------------------------------------
+\definecolor{uwpurple}{HTML}{4B2E83}
+\definecolor{uwgold}{HTML}{85754D}
+\definecolor{rtslblue}{HTML}{2171B5}
+\definecolor{rtslgreen}{HTML}{74C476}
+\definecolor{rtslred}{HTML}{E31A1C}
+\definecolor{rtslpurple}{HTML}{6A3D9A}
+\definecolor{baugrey}{HTML}{999999}
+\definecolor{highlightblue}{HTML}{DBEAFE}
+\definecolor{uncertaintyyellow}{HTML}{FFF3CD}
+\definecolor{uncertaintyborder}{HTML}{856404}
+
+% -- Title & structure colors -------------------------------------------------
+\setbeamercolor{structure}{fg=uwpurple}
+\setbeamercolor{title}{fg=uwpurple}
+\setbeamercolor{subtitle}{fg=uwpurple}
+\setbeamercolor{author}{fg=black}
+\setbeamercolor{date}{fg=black}
+\setbeamercolor{institute}{fg=black}
+\setbeamercolor{frametitle}{fg=uwpurple}
+\setbeamercolor{normal text}{fg=black}
+
+% -- Colored blocks (callout boxes) -------------------------------------------
+% block = theme color (definitions)
+\setbeamercolor{block title}{bg=baugrey!15, fg=black}
+\setbeamercolor{block body}{bg=baugrey!6}
+
+% alertblock = red (open questions / pending decisions)
+\setbeamercolor{block title alerted}{bg=red!15, fg=red!70!black}
+\setbeamercolor{block body alerted}{bg=red!6}
+
+% exampleblock = green (key takeaways)
+\setbeamercolor{block title example}{bg=rtslgreen!18, fg=rtslgreen!80!black}
+\setbeamercolor{block body example}{bg=rtslgreen!6}
+
+% Custom: uncertaintyblock = amber (uncertainties / sensitivity caveats)
+\newenvironment{uncertaintyblock}[1]{%
+  \setbeamercolor{block title}{bg=uncertaintyyellow, fg=uncertaintyborder}%
+  \setbeamercolor{block body}{bg=uncertaintyyellow!30}%
+  \begin{block}{#1}%
+}{\end{block}}
+
+% -- Bullet style -------------------------------------------------------------
+\setbeamertemplate{itemize item}{\textcolor{uwpurple}{\textbullet}}
+\setbeamertemplate{itemize subitem}{\textcolor{uwpurple}{--}}
+\setbeamertemplate{enumerate item}{\textcolor{uwpurple}{\insertenumlabel.}}
+
+% -- Footer -------------------------------------------------------------------
+% \setbeamertemplate{footline}{%
+%   \leavevmode
+%   \hbox{%
+%     \begin{beamercolorbox}[wd=0.45\paperwidth, ht=2.25ex, dp=1ex, left]{author in head/foot}%
+%       \hspace{1em}\usebeamerfont{author in head/foot}%
+%       \textcolor{black!60}{\footnotesize RTSL -- UW Assessment}%
+%     \end{beamercolorbox}%
+%     \begin{beamercolorbox}[wd=0.45\paperwidth, ht=2.25ex, dp=1ex, center]{title in head/foot}%
+%       \usebeamerfont{title in head/foot}%
+%       \textcolor{black!60}{\footnotesize CVD Program Impact}%
+%     \end{beamercolorbox}%
+%     \begin{beamercolorbox}[wd=0.10\paperwidth, ht=2.25ex, dp=1ex, right]{date in head/foot}%
+%       \usebeamerfont{date in head/foot}%
+%       \textcolor{black!60}{\footnotesize \insertframenumber{}/\inserttotalframenumber}%
+%       \hspace{0.5em}%
+%     \end{beamercolorbox}%
+%   }%
+%   \vskip0pt%
+% }
+\setbeamertemplate{navigation symbols}{}
+
+% -- Footer -------------------------------------------------------------------
+\setbeamertemplate{footline}{%
+  \leavevmode
+  \hbox{%
+    \begin{beamercolorbox}[wd=0.45\paperwidth, ht=2.25ex, dp=1ex, left]{author in head/foot}%
+      \hspace{1em}\usebeamerfont{author in head/foot}%
+      \textcolor{black!60}{\footnotesize RTSL -- UW Assessment}%
+    \end{beamercolorbox}%
+    \begin{beamercolorbox}[wd=0.45\paperwidth, ht=2.25ex, dp=1ex, center]{title in head/foot}%
+      \usebeamerfont{title in head/foot}%
+      \textcolor{black!60}{\footnotesize CVD Program Impact}%
+    \end{beamercolorbox}%
+    \begin{beamercolorbox}[wd=0.10\paperwidth, ht=2.25ex, dp=1ex, right]{date in head/foot}%
+      \usebeamerfont{date in head/foot}%
+      \textcolor{black!60}{\footnotesize \insertframenumber{}/\inserttotalframenumber}%
+      \hspace{0.5em}%
+    \end{beamercolorbox}%
+  }%
+  \vskip0pt%
+}
+\setbeamertemplate{navigation symbols}{}
+
+% -- UW logo in bottom-right corner of every slide ----------------------------
+% Uses tikz overlay so logo floats in the corner without pushing content.
+% Reserve a small bottom margin via footline to avoid overlap with slide body.
+% \setbeamertemplate{footline}{%
+%   \leavevmode\vspace*{0.9cm}%
+% }
+%
+% \addtobeamertemplate{background canvas}{}{%
+%   \begin{tikzpicture}[remember picture, overlay]
+%     \node[anchor=south east, xshift=-0.25cm, yshift=0.2cm]
+%       at (current page.south east)
+%       {\includegraphics[height=0.65cm,keepaspectratio]{uw-logo.png}};
+%   \end{tikzpicture}%
+% }
+
+
+\addtobeamertemplate{background canvas}{}{%
+  \begin{tikzpicture}[remember picture, overlay]
+    \node[anchor=south east, xshift=-0.25cm, yshift=0.2cm]
+      at (current page.south east)
+      {\includegraphics[height=0.65cm,keepaspectratio]{uw-logo.png}};
+  \end{tikzpicture}%
+}
+
+% -- Section slide (auto-generated by # headers) ------------------------------
+\AtBeginSection[]{%
+  \begin{frame}
+    \vfill
+    \centering
+    \begin{beamercolorbox}[sep=8pt, center, shadow=false, rounded=true]{block title}
+      \usebeamerfont{title}\insertsectionhead\par
+    \end{beamercolorbox}
+    \vfill
+  \end{frame}
+}

@@ -1,0 +1,1236 @@
+---
+title: "Cancer Modeling Inputs and Calculations"
+author: "Mohamed Albirair"
+date: "`r Sys.Date()`"
+output:
+      html_document:
+            toc: true
+            toc_float:
+                  collapsed: false
+            toc_depth: 3
+            number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+```{r, eval=TRUE}
+## load packages
+pacman::p_load(tidyverse)
+
+# Load settings
+z <- yaml::read_yaml("../../settings.yml")
+
+# Home folder
+# z <- list()
+z$home_dir <- "../"
+
+# R code, inputs, and outputs
+if (!exists("root")){
+      root <- z$home_dir
+}
+
+z$fnx_dir     <- paste0(root, "fnx")
+z$inputs_dir  <- paste0(root, "input")
+z$outputs_dir <- paste0(root, "outputs")
+z$scripts_dir <- paste0(root, "scripts")
+
+# Fast sourcing
+loc_fnx <- list.files(path       = z$fnx_dir,
+                      pattern    = "\\.R$",
+                      full.names = TRUE)
+
+for (i in loc_fnx) {
+      source(i, echo = FALSE)
+}
+
+# URLs
+# `not it`
+source(z$not_in)
+
+# ggplot theme_caviz
+source(z$theme_caviz)
+## Basic scenario-defining input values
+# load("../inputs/all-baseline-data.RData")
+# load("../inputs/RData/Uganda/bsln/Uganda_bsln_input.RData")
+```
+
+```{r, eval=TRUE}
+scrollable <- function(df) {
+      # https://stackoverflow.com/questions/45849433/horizontal-scrolling-in-rmarkdown
+      kableExtra::kable(df, "html") %>% 
+            kableExtra::kable_styling("striped") %>% 
+            kableExtra::scroll_box(height = "600px")
+}
+```
+
+# Data Prep
+
+```{r, eval=TRUE}
+# Create location mapping vector for fast lookup
+location_map <- c(
+      "Bolivia (Plurinational State of)"      = "Bolivia",
+      "Brunei Darussalam"                     = "Brunei",
+      "Cabo Verde"                            = "Cape Verde",
+      "Côte d'Ivoire"                         = "Cote d'Ivoire",
+      "Czechia"                               = "Czech Republic",
+      "Federated States of Micronesia"        = "Micronesia",
+      "Republic of Moldova"                   = "Moldova",
+      "Micronesia (Federated States of)"      = "Micronesia",
+      "Iran (Islamic Republic of)"            = "Iran",
+      "Lao People's Democratic Republic"      = "Laos",
+      "North Macedonia"                       = "Macedonia",
+      "Democratic People's Republic of Korea" = "North Korea",
+      "Republic of Korea"                     = "South Korea",
+      "Syrian Arab Republic"                  = "Syria",
+      "Swaziland"                             = "Eswatini",
+      "United Republic of Tanzania"           = "Tanzania",
+      "Taiwan (Province of China)"            = "Taiwan",
+      "The Bahamas"                           = "Bahamas",
+      "The Gambia"                            = "Gambia",
+      "Venezuela (Bolivarian Republic of)"    = "Venezuela",
+      "Viet Nam"                              = "Vietnam",
+      "Virgin Islands, U.S."                  = "Virgin Islands",
+      "United States"                         = "United States of America",
+      "United States Virgin Islands"          = "Virgin Islands"
+)
+
+## Cancer Models
+
+# Most basic model (well, sick, dead)
+cause1 <- sort(c("Uterine cancer",
+                 "Esophageal cancer",
+                 "Thyroid cancer",
+                 "Stomach cancer",
+                 "Liver cancer",
+                 "Pancreatic cancer",
+                 "Ovarian cancer",
+                 "Bladder cancer",
+                 "Lip and oral cavity cancer",
+                 "Nasopharynx cancer",
+                 "Other pharynx cancer"))       # 11 cancer types
+
+# Staged model (well, local, regional, distant, dead)
+# Screening-amenable cancers
+cause2 <- sort(c("Tracheal, bronchus, and lung cancer",
+                 "Prostate cancer",
+                 "Breast cancer"))
+
+# Staged model with pre-cancerous lesions
+cause3 <- sort(c("Cervical cancer",
+                 "Colon and rectum cancer"))
+
+# Female-only cancer types
+female_cancers <- c("Cervical cancer", "Ovarian cancer", "Uterine cancer")
+```
+
+# Read Data
+
+```{r}
+## This is much faster way for loading the data--only keeping the chunks below for referencing
+
+# Build a temporary environment and load the large object data
+env <- new.env()
+load("../inputs/gbd_dt.RData", envir = env)
+
+# Return the value of the named object
+gbd_pop             <- get("gbd_pop", envir = env)
+gbd_pop_5yr         <- get("gbd_pop_5yr", envir = env)
+gbd_epi_5yr         <- get("gbd_epi_5yr", envir = env)
+age_models_dt       <- get("age_models_dt", envir = env)
+age_models_pop_dt   <- get("age_models_pop_dt", envir = env)
+gbd_epi_1yr_predict <- get("gbd_epi_1yr_predict", envir = env)
+```
+
+## GBD Pop
+
+```{r, eval=FALSE}
+## Population Counts Data
+# https://vizhub.healthdata.org/gbd-results?params=gbd-api-2021-permalink/3931936f370fdaf18adfca2089680981
+
+pop_zip_files <- list.files(path       = "../../Data/GBD 2021/Pop/",
+                            pattern    = "\\.zip$",
+                            full.names = TRUE)
+
+gbd_pop_raw <- data.table::rbindlist(l         = lapply(X   = pop_zip_files,
+                                                        FUN = read_csv_from_zip),
+                                     fill      = TRUE,
+                                     use.names = TRUE)
+
+## Cancer-Specific Epidemiological Data
+# Sep 2025: https://vizhub.healthdata.org/gbd-results?params=gbd-api-2021-permalink/df6164cc40d2ac450659826f45ba1661
+# Additional <1 age groups: https://vizhub.healthdata.org/gbd-results?params=gbd-api-2021-permalink/2ed3b5e1505a7cfff44ad2730a065a97
+
+zip_files <- list.files(path       = "../../Data/GBD 2021/16 cancer types/",
+                        pattern    = "\\.zip$",
+                        full.names = TRUE)
+
+gbd_epi_raw <- data.table::rbindlist(l         = lapply(X   = zip_files,
+                                                        FUN = read_csv_from_zip),
+                                     fill      = TRUE,
+                                     use.names = TRUE)
+```
+
+### GBD Pop: 1Y Age Groups
+
+```{r, eval=FALSE}
+# Convert to data.table for merging
+location_map_dt <- data.table::data.table(
+      old_name = names(location_map),
+      new_name = unname(location_map)
+)
+
+# Prep a separate copy of target dt
+gbd_pop <- data.table::copy(gbd_pop_raw)
+
+gbd_pop <- gbd_pop[
+      # Rename age to age_cat
+      , `:=` (age_cat = age)
+][
+      # Convert age categories (much faster than case_when)
+      , age := data.table::fcase(
+            age_cat %in% c("<28 days",
+                           "1-5 months",
+                           "6-11 months"), 0.01,
+            age_cat == "<1 year",          0.00,
+            age_cat == "12-23 months",     1.00,
+            age_cat == "2-4 years",        3.01,
+            age_cat == "<5 years",         4.01,
+            default = as.numeric(str_extract(age_cat, "\\d+"))
+      )
+][
+      # Remove unwanted age groups
+      age %!in% c(0.01, 3.01, 4.01),
+][
+      # Sort efficiently
+      order(location, year, age)
+]
+
+gbd_pop[location_map_dt, location := i.new_name, on = .(location = old_name)]
+```
+
+### GBD Pop: 5Y Age Groups
+
+```{r, eval=FALSE}
+data.table::setDT(gbd_pop)
+
+gbd_pop_5yr <- gbd_pop[
+      , .(pop = sum(val)),
+      by = .(
+            location, year, sex,
+            age_gp = cut(
+                  age,
+                  breaks = c(-Inf, seq(5, 95, 5), Inf),
+                  labels = c("<5 years",
+                             paste0(seq(5, 90, 5), "-", seq(9, 94, 5), " years"),
+                             "95+ years"),
+                  right = FALSE
+            )
+      )
+][
+      , age := data.table::fifelse(
+            age_gp == "<5 years", 0, as.numeric(str_extract(age_gp, "\\d+"))
+      )
+]
+```
+
+## GBD Epi Data
+
+```{r, eval=FALSE}
+# Prep a separate copy of target dt
+gbd_epi_5yr <- data.table::copy(gbd_epi_raw)
+
+gbd_epi_5yr <- gbd_epi_5yr[
+      # Apply sex-specific filtering first to reduce data size
+      (cause %in% female_cancers & sex == "Female") |
+            (cause == cause2[2] & sex == "Male") |
+            (!(cause %in% female_cancers) & cause != cause2[2])
+][
+      # Map locations
+      , location := data.table::fcoalesce(location_map[location], location)
+][
+      # Rename age to age_cat
+      , age_cat := age
+][
+      # Convert age categories (much faster than case_when)
+      , age := data.table::fcase(
+            age_cat %in% c("<28 days",
+                           "1-5 months",
+                           "6-11 months"), 0.01,
+            age_cat == "<1 year",          0.10,
+            age_cat == "12-23 months",     1.00,
+            age_cat == "2-4 years",        3.01,
+            age_cat == "<5 years",         0.00,
+            default = as.numeric(str_extract(age, "^\\d+"))
+      )
+][
+      # Remove unwanted age groups#--------------------------------------------# TBU
+      age %!in% c(0.01, 0.10, 1.00, 3.01)
+][
+      , age_mid := data.table::fcase(
+            age < 95, age + 2.5,
+            default = age
+      )
+][
+      , age_gp := cut(
+            age,
+            breaks = c(-Inf, seq(5, 95, 5), Inf),
+            labels = c("<5 years",
+                       paste0(seq(5, 90, 5), "-", seq(9, 94, 5), " years"),
+                       "95+ years"),
+            right = FALSE
+      )
+][
+      , val := data.table::fifelse(is.na(val), 0, val)
+][
+      # Sort efficiently
+      order(location, year, age, measure, metric)
+]
+```
+
+### GBD Epi: 1Y Interpolation
+
+#### Step 1: Build `log(Metric) ~ Age` Models
+
+```{r, eval=FALSE}
+age_models_dt <- gbd_epi_5yr[
+      metric == "Rate" &
+            year %in% c(z$sim_start_year, z$reference_year) &
+            age_mid < 95,
+      .(location, sex, year, cause, measure, age = age_mid,  # removed original age to run the model on age_mid
+        log_val = log(data.table::fifelse(val == 0, 1e-16, val)))        # Converted log(val == 0)
+][
+      , .(model = list(lm(log_val ~ age, data = .SD))),
+      by = .(location, sex, year, cause, measure)
+]
+```
+
+```{r}
+# Check:
+nrow(age_models_dt) / 
+      length(unique(age_models_dt$location)) /  # 204 locations
+      nrow(count(age_models_dt, sex, cause)) /  # 28: 12 * 2 + 3 female + 1 male
+      length(unique(age_models_dt$year)) /      # 2: 2000 sim start year & 2019 ref year
+      length(unique(age_models_dt$measure))     # 3: incid, prev, mort
+```
+
+#### Step 2: Incorporate 1Y Age-Group Pop Counts
+
+```{r, eval=FALSE}
+age_models_pop_dt <- gbd_pop[
+      year %in% c(z$sim_start_year, z$reference_year),
+      .(location, sex, year, age, pop = val) # year
+][
+      age_models_dt,
+      on = .(location, sex, year),
+      allow.cartesian = TRUE  # Explicitly allow the cartesian product
+]
+```
+
+```{r}
+# Check:
+nrow(age_models_pop_dt) / 
+      length(unique(age_models_pop_dt$location)) /  # 204 locations
+      nrow(count(age_models_pop_dt, sex, cause)) /  # 28: 12 * 2 + 3 female + 1 male
+      length(unique(age_models_pop_dt$age)) /       # 96 1-year age groups
+      length(unique(age_models_pop_dt$year)) /      # 2: 2000 sim start year & 2019 ref year
+      length(unique(age_models_pop_dt$measure))     # 3: incid, prev, mort
+```
+
+#### Step 3: Predict 1Y Age-Groups Rates and Counts
+
+```{r, eval=FALSE}
+# gbd_epi_1yr_predict <- data.table::copy(age_models_pop_dt)
+gbd_epi_1yr_predict <- age_models_pop_dt
+
+gbd_epi_1yr_predict[
+      , log_fitted_val := {
+            if (!is.null(model[[1]])) {
+                  predict(model[[1]], newdata = .SD) 
+            } else NA_real_
+      },
+      by = .(location, sex, cause, year, measure)
+][
+      , pred_rates := exp(log_fitted_val)              # Calculate predicted rates
+][
+      , pred_cases := exp(log_fitted_val * pop / 1e5)  # Calculate predicted cases
+][
+      , model := NULL  # Remove model column
+][
+      , age_gp := cut(
+            age,
+            breaks = c(-Inf, seq(5, 95, 5), Inf),
+            labels = c("<5 years",
+                       paste0(seq(5, 90, 5), "-", seq(9, 94, 5), " years"),
+                       "95+ years"),
+            right = FALSE
+      )
+]
+```
+
+```{r}
+# Check:
+nrow(gbd_epi_1yr_predict) / 
+      length(unique(gbd_epi_1yr_predict$location)) /  # 204 locations
+      nrow(count(gbd_epi_1yr_predict, sex, cause)) /  # 28: 12 * 2 + 3 female + 1 male
+      length(unique(gbd_epi_1yr_predict$age)) /       # 96 1-year age groups
+      length(unique(gbd_epi_1yr_predict$year)) /      # 2: 2000 sim start year & 2019 ref year
+      length(unique(gbd_epi_1yr_predict$measure))     # 3: incid, prev, mort
+```
+
+# Outputs
+
+## Predicted `Log(Rates)`
+
+```{r}
+gbd_epi_1yr_predict %>%
+      filter(sex == "Female",
+             cause %in% c(cause2[-2], cause3[2]),
+             location == "Uganda",
+             measure != "Prevalence",
+             year == 2019) %>%
+
+      ggplot() +
+      geom_hline(yintercept = 0, linetype = 2, color = "darkred") +
+      geom_line(aes(x = age, y = log(pred_rates)), linetype = 1, color = "green") +
+      facet_grid(cause ~ measure, scales = "free_y") +  # Free y-axis scales
+      labs(title = "Age-Value Regression Lines by Group",
+           x = "Age", y = "Log value") +
+      theme_caviz
+```
+
+## Predicted Rates
+
+```{r}
+gbd_epi_1yr_predict %>%
+      filter(sex == "Female",
+             cause %in% c(cause2[-2], cause3[2]),
+             location == "Uganda",
+             measure != "Prevalence",
+             year == 2019) %>% 
+      mutate(cause = case_match(cause,
+                                cause2[1] ~ "Breast",
+                                cause2[3] ~ "Lung",
+                                cause3[2] ~ "CRC",
+                                .default = NA)) %>% 
+
+      ggplot() +
+      geom_hline(yintercept = 0, linetype = 2, color = "darkred") +
+      geom_line(aes(x = age, y = pred_rates), linetype = 1, color = "green") +
+      scale_y_continuous(labels = scales::label_number(scale = 1e-5, suffix = "K")) +
+      facet_grid(cause ~ measure, scales = "free_y") +  # Free y-axis scales
+      labs(title = "Rates (per 100K) among Females in Uganda, 2019",
+           x = "Age", y = "Rate (per 100K)") +
+      theme_caviz +
+      theme(strip.text.y = element_blank()) +
+      theme(strip.text.y = element_text(size = 12, angle = 0))
+```
+
+## Predicted Counts
+
+```{r}
+gbd_epi_1yr_predict %>%
+      filter(sex == "Female",
+             cause %in% c(cause2[-2], cause3[2]),
+             location == "Uganda",
+             measure != "Prevalence",
+             year == 2019) %>% 
+      mutate(cause = case_match(cause,
+                                cause2[1] ~ "Breast",
+                                cause2[3] ~ "Lung",
+                                cause3[2] ~ "CRC",
+                                .default = NA)) %>% 
+      # mutate(calc_pred_cases = pred_rates * pop / 1e5) %>% 
+
+      ggplot() +
+      geom_hline(yintercept = 0, linetype = 2, color = "darkred") +
+      geom_line(aes(x = age, y = pred_cases), linetype = 1, color = "green") +
+      facet_grid(cause ~ measure, scales = "free_y") +  # Free y-axis scales
+      labs(title = "Case counts among Females in Uganda, 2019",
+           x = "Age", y = "Case counts") +
+      theme_caviz +
+      theme(strip.text.y = element_blank()) +
+      theme(strip.text.y = element_text(size = 12, angle = 0))
+```
+
+## Comparision: GBD vs. Predicted Values
+
+```{r}
+gbd_calc_compr <- left_join(
+
+      # Linear model predicted counts (incid and deaths), all ages
+      x  = gbd_epi_1yr_predict %>% 
+            filter(year == 2019) %>% 
+            select(!c(pop, log_fitted_val)) %>% 
+            pivot_longer(cols = starts_with("pred_"),
+                         names_to = "metric",
+                         values_to = "pred_val") %>% 
+            mutate(metric = ifelse(metric == "pred_rates", "Rate", "Number")),
+                   # source = "Pred"),
+
+      # GBD calculated counts (incid and deaths), all ages
+      y = gbd_epi_5yr %>% 
+            filter(year == 2019) %>% 
+            select(!c(age, upper, lower, age_cat)), # %>% 
+            # mutate(source = "GBD"),
+
+      by = join_by(measure, location, year, cause, sex, age_gp, metric)
+) %>% 
+      pivot_longer(cols = ends_with("val"),
+                   names_to = "source",
+                   values_to = "val") %>% 
+      mutate(source = ifelse(source == "pred_val", "Pred", "GBD"))
+      # mutate(counts_diff = pred_cases - val,
+      #        counts_ratio = pred_cases / val)
+```
+
+### Observed vs. Predicted Rates
+
+#### Incidence
+
+```{r}
+subset_example <- gbd_calc_compr %>% 
+      filter(sex == "Female",
+             location %in% c("Uganda", "United States of America", "India", "China"))
+
+# https://forum.posit.co/t/adding-manual-legend-to-ggplot2/41651/3
+scale_col <- c("GBD" = "blue", "Pred" = "green")
+
+subset_example %>% 
+      split(.$location) %>% 
+      map(.x = .,
+          .f = ~ .x %>% 
+                ggplot() +
+                geom_hline(yintercept = 0, linetype = 2, color = "darkred") +
+                geom_point(data = .x %>% 
+                                 filter(source == "GBD",
+                                        measure == "Incidence",
+                                        metric == "Rate"),
+                           mapping = aes(x = age_mid, y = log(val / 1e5), color = "GBD")) +
+                geom_line(data = .x %>% 
+                                filter(source == "Pred",
+                                       measure == "Incidence",
+                                       metric == "Rate"),
+                          mapping = aes(x = age, y = log(val / 1e5), color = "Pred")) +
+                scale_color_manual(values = scale_col,
+                                   guide = guide_legend()) +
+                facet_wrap(. ~ cause, scales = "free_y") +  # Free y-axis scales
+                labs(title = "(Log) Predicted Incidence vs. GBD (Log) Incidence Rates",
+                     subtitle = paste0(unique(.x$location), ", Females, 2019"),
+                     x = "Age", y = " (Log) Incidence rate",
+                     color = NULL) +
+                theme_minimal() +
+                theme(strip.text.y = element_blank()) +
+                theme(strip.text.y = element_text(size = 12, angle = 0),
+                      legend.position = "bottom"))
+```
+
+#### Mortality
+
+```{r}
+subset_example %>% 
+      split(.$location) %>% 
+      map(.x = .,
+          .f = ~ .x %>% 
+                ggplot() +
+                geom_hline(yintercept = 0, linetype = 2, color = "darkred") +
+                geom_point(data = .x %>% 
+                                 filter(source == "GBD",
+                                        measure == "Deaths",
+                                        metric == "Rate"),
+                           mapping = aes(x = age_mid, y = log(val / 1e5), color = "GBD")) +
+                geom_line(data = .x %>% 
+                                filter(source == "Pred",
+                                       measure == "Deaths",
+                                       metric == "Rate"),
+                          mapping = aes(x = age, y = log(val / 1e5), color = "Pred")) +
+                scale_color_manual(values = scale_col,
+                                   guide = guide_legend()) +
+                facet_wrap(. ~ cause, scales = "free_y") +  # Free y-axis scales
+                labs(title = "(Log) Predicted Mortality vs. GBD (Log) Mortality Rates",
+                     subtitle = paste0(unique(.x$location), ", Females, 2019"),
+                     x = "Age", y = "(Log) Mortality rate",
+                     color = NULL) +
+                theme_minimal() +
+                theme(strip.text.y = element_blank()) +
+                theme(strip.text.y = element_text(size = 12, angle = 0),
+                      legend.position = "bottom"))
+```
+
+### Observed vs. Predicted Counts
+
+#### Incidence
+
+```{r}
+subset_example <- gbd_calc_compr %>% 
+      filter(sex == "Female",
+             location %in% c("Uganda", "United States of America", "India", "China"))
+
+# https://forum.posit.co/t/adding-manual-legend-to-ggplot2/41651/3
+scale_col <- c("GBD" = "blue", "Pred" = "red")
+
+# subset_example %>%
+#       filter(measure == "Incidence", 
+#              location == "Uganda",
+#              cause == cause2[1],
+#              source == "Pred",
+#              age == 79,
+#              metric == "Rate")
+
+subset_example %>% 
+      # Use the same incidence and mortality rates for 80+ as for 79
+      mutate(val = ifelse(source == "Pred" & metric == "Rate" & age >= 80,
+                          val[source == "Pred" & metric == "Rate" & age == 79], val),
+             .by = c(measure, location, cause, sex, year)) %>% 
+
+      left_join(x  = .,
+                y  = gbd_pop %>% select(location, sex, year, age, pop = val),
+                by = join_by(location, sex, year, age)) %>%
+      # mutate(val = ifelse(source == "Pred" & metric == "Number" & age >= 80,
+      #                     val[source == "Pred" & metric == "Rate" & age == 79] * pop, val),
+      #        .by = c(measure, location, cause, sex, year)) %>%
+      mutate(val = ifelse(measure == "Number", val * pop, val)) %>%
+      
+      # filter(location == "Uganda", cause == cause2[1], source == "Pred", age >= 60)
+      # filter(location == "Uganda") %>%
+      
+      split(.$location) %>% 
+      map(.x = .,
+          .f = ~ .x %>% 
+                ggplot() +
+                geom_hline(yintercept = 0, linetype = 2, color = "darkred") +
+                geom_point(data = .x %>% 
+                                 filter(source == "GBD",
+                                        measure == "Incidence",
+                                        metric == "Number"),
+                           mapping = aes(x = age_mid, y = val, color = "GBD")) +
+                geom_line(data = .x %>% 
+                                filter(source == "Pred",
+                                       measure == "Incidence",
+                                       metric == "Number"),
+                          mapping = aes(x = age, y = val, color = "Pred")) +
+                scale_color_manual(values = scale_col,
+                                   guide = guide_legend()) +
+                facet_wrap(. ~ cause, scales = "free_y") +  # Free y-axis scales
+                labs(title = "Predicted Incident vs. GBD Incidence Counts",
+                     subtitle = paste0(unique(.x$location), ", Females, 2019"),
+                     x = "Age", y = "Case count",
+                     color = NULL) +
+                theme_minimal() +
+                theme(strip.text.y = element_blank()) +
+                theme(strip.text.y = element_text(size = 12, angle = 0),
+                      legend.position = "bottom"))
+```
+
+#### Mortality
+
+```{r}
+subset_example %>% 
+      # Use the same incidence and mortality rates for 80+ as for 79
+      mutate(val = ifelse(source == "Pred" & metric == "Rate" & age >= 80,
+                          val[source == "Pred" & metric == "Rate" & age == 79], val),
+             .by = c(measure, location, cause, sex, year)) %>% 
+
+      left_join(x  = .,
+                y  = gbd_pop %>% select(location, sex, year, age, pop = val),
+                by = join_by(location, sex, year, age)) %>%
+      # mutate(val = ifelse(source == "Pred" & metric == "Number" & age >= 80,
+      #                     val[source == "Pred" & metric == "Rate" & age == 79] * pop, val),
+      #        .by = c(measure, location, cause, sex, year)) %>%
+      mutate(val = ifelse(measure == "Number", val * pop, val)) %>%
+      
+      split(.$location) %>% 
+      map(.x = .,
+          .f = ~ .x %>% 
+                ggplot() +
+                geom_hline(yintercept = 0, linetype = 2, color = "darkred") +
+                geom_point(data = .x %>% 
+                                 filter(source == "GBD",
+                                        measure == "Deaths",
+                                        metric == "Number"),
+                           mapping = aes(x = age_mid, y = val, color = "GBD")) +
+                geom_line(data = .x %>% 
+                                filter(source == "Pred",
+                                       measure == "Deaths",
+                                       metric == "Number"),
+                          mapping = aes(x = age, y = val, color = "Pred")) +
+                scale_color_manual(values = scale_col,
+                                   guide = guide_legend()) +
+                facet_wrap(. ~ cause, scales = "free_y") +  # Free y-axis scales
+                labs(title = "Predicted Mortality vs. GBD Mortality Counts",
+                     subtitle = paste0(unique(.x$location), ", Females, 2019"),
+                     x = "Age", y = "Death count",
+                     color = NULL) +
+                theme_minimal() +
+                theme(strip.text.y = element_blank()) +
+                theme(strip.text.y = element_text(size = 12, angle = 0),
+                      legend.position = "bottom"))
+```
+
+#### 5-Year Counts
+
+##### Incidence
+
+```{r}
+subset_example %>% 
+      # Use the same incidence and mortality rates for 80+ as for 79
+      mutate(val = ifelse(source == "Pred" & metric == "Rate" & age >= 80,
+                          val[source == "Pred" & metric == "Rate" & age == 79], val),
+             .by = c(measure, location, cause, sex, year)) %>% 
+
+      left_join(x  = .,
+                y  = gbd_pop %>% select(location, sex, year, age, pop = val),
+                by = join_by(location, sex, year, age)) %>%
+      # mutate(val = ifelse(source == "Pred" & metric == "Number" & age >= 80,
+      #                     val[source == "Pred" & metric == "Rate" & age == 79] * pop, val),
+      #        .by = c(measure, location, cause, sex, year)) %>%
+      mutate(val = ifelse(measure == "Number", val * pop, val)) %>% 
+      
+      # Convert to 5-year age groups
+      filter(metric == "Number") %>% 
+      group_by(measure, metric, location, cause, sex, year, age_gp, source) %>% 
+      reframe(val = ifelse(source == "Pred", sum(val), unique(val)),
+              age_mid = unique(age_mid)) %>% 
+      
+      # filter(location == "Uganda", cause == cause2[1], source == "Pred", age >= 60)
+      # filter(location == "Uganda") %>%
+      
+      split(.$location) %>% 
+      map(.x = .,
+          .f = ~ .x %>% 
+                ggplot() +
+                geom_hline(yintercept = 0, linetype = 2, color = "darkred") +
+                geom_point(data = .x %>% 
+                                 filter(source == "GBD",
+                                        measure == "Incidence",
+                                        metric == "Number"),
+                           mapping = aes(x = age_mid, y = val, color = "GBD")) +
+                geom_point(data = .x %>% 
+                                filter(source == "Pred",
+                                       measure == "Incidence",
+                                       metric == "Number"),
+                          mapping = aes(x = age_mid, y = val, color = "Pred")) +
+                scale_color_manual(values = scale_col,
+                                   guide = guide_legend()) +
+                facet_wrap(. ~ cause, scales = "free_y") +  # Free y-axis scales
+                labs(title = "Predicted Incident vs. GBD Incidence Counts",
+                     subtitle = paste0(unique(.x$location), ", Females, 2019"),
+                     x = "Age", y = "Case count",
+                     color = NULL) +
+                theme_minimal() +
+                theme(strip.text.y = element_blank()) +
+                theme(strip.text.y = element_text(size = 12, angle = 0),
+                      legend.position = "bottom"))
+```
+
+#### Deaths
+
+```{r}
+subset_example %>% 
+      # Use the same incidence and mortality rates for 80+ as for 79
+      mutate(val = ifelse(source == "Pred" & metric == "Rate" & age >= 80,
+                          val[source == "Pred" & metric == "Rate" & age == 79], val),
+             .by = c(measure, location, cause, sex, year)) %>% 
+
+      left_join(x  = .,
+                y  = gbd_pop %>% select(location, sex, year, age, pop = val),
+                by = join_by(location, sex, year, age)) %>%
+      # mutate(val = ifelse(source == "Pred" & metric == "Number" & age >= 80,
+      #                     val[source == "Pred" & metric == "Rate" & age == 79] * pop, val),
+      #        .by = c(measure, location, cause, sex, year)) %>%
+      mutate(val = ifelse(measure == "Number", val * pop, val)) %>%
+      
+      # Convert to 5-year age groups
+      filter(metric == "Number") %>% 
+      group_by(measure, metric, location, cause, sex, year, age_gp, source) %>% 
+      reframe(val = ifelse(source == "Pred", sum(val), unique(val)),
+              age_mid = unique(age_mid)) %>% 
+      
+      
+      split(.$location) %>% 
+      map(.x = .,
+          .f = ~ .x %>% 
+                ggplot() +
+                geom_hline(yintercept = 0, linetype = 2, color = "darkred") +
+                geom_point(data = .x %>% 
+                                 filter(source == "GBD",
+                                        measure == "Deaths",
+                                        metric == "Number"),
+                           mapping = aes(x = age_mid, y = val, color = "GBD")) +
+                geom_point(data = .x %>% 
+                                filter(source == "Pred",
+                                       measure == "Deaths",
+                                       metric == "Number"),
+                          mapping = aes(x = age_mid, y = val, color = "Pred")) +
+                scale_color_manual(values = scale_col,
+                                   guide = guide_legend()) +
+                facet_wrap(. ~ cause, scales = "free_y") +  # Free y-axis scales
+                labs(title = "Predicted Mortality vs. GBD Mortality Counts",
+                     subtitle = paste0(unique(.x$location), ", Females, 2019"),
+                     x = "Age", y = "Death count",
+                     color = NULL) +
+                theme_minimal() +
+                theme(strip.text.y = element_blank()) +
+                theme(strip.text.y = element_text(size = 12, angle = 0),
+                      legend.position = "bottom"))
+```
+
+### ACM
+
+```{r}
+# gbd_acm_1yr_predict
+
+gbd_acm_calc_compr <- left_join(
+
+      # Linear model predicted counts (incid and deaths), all ages
+      x  = gbd_acm_1yr_predict %>% 
+            filter(year == 2019) %>% 
+            select(!c(pop, log_fitted_val)) %>% 
+            pivot_longer(cols = starts_with("pred_"),
+                         names_to = "metric",
+                         values_to = "pred_val") %>% 
+            mutate(metric = ifelse(metric == "pred_rates", "Rate", "Number")) %>% 
+            
+            mutate(age_gp = cut(
+                  age,
+                  breaks = c(-Inf, seq(5, 95, 5), Inf),
+                  labels = c("<5 years",
+                             paste0(seq(5, 90, 5), "-", seq(9, 94, 5), " years"),
+                             "95+ years"),
+                  right = FALSE
+            )),
+                   # source = "Pred"),
+
+      # GBD calculated acm counts, all ages
+      y = gbd_acm_5yr %>% #altern_acm_raw %>% # 
+            filter(year == 2019) %>%
+            # left_join(x  = .,
+            #           y  = gbd_acm_raw %>% 
+            #                 rename(age_cat = age) %>% 
+            #                 filter(age_cat %in% c("<1 year"))) %>% 
+            # mutate(age_gp = case_when(age %in% c("<28 days",
+            #                                      "1-5 months",
+            #                                      "6-11 months")  ~ "<1 year",
+            #                           age %in% c("12-23 months",
+            #                                      "2-4 years")    ~ "1-5 years",
+            #                           TRUE                       ~ age)) %>%
+            
+            mutate(age_gp = cut(
+                  age,
+                  breaks = c(-Inf, seq(5, 95, 5), Inf),
+                  labels = c("<5 years",
+                             paste0(seq(5, 90, 5), "-", seq(9, 94, 5), " years"),
+                             "95+ years"),
+                  right = FALSE
+            )) %>% 
+            
+            select(!c(age, upper, lower)),
+            # select(!c(age, upper, lower)),
+            # mutate(source = "GBD"),
+
+      by = join_by(measure, location, year, cause, sex, metric, age_gp)
+) %>% 
+      pivot_longer(cols = ends_with("val"),
+                   names_to = "source",
+                   values_to = "val") %>% 
+      mutate(source = ifelse(source == "pred_val", "Pred", "GBD"))
+```
+
+```{r}
+acm_subset_example <- gbd_acm_calc_compr %>% 
+      filter(sex == "Female",
+             location %in% c("Uganda", "United States of America", "India", "China"))
+```
+
+#### 5-Year Death Rates
+
+```{r}
+acm_subset_example %>% 
+      # Use the same incidence and mortality rates for 80+ as for 79
+      # mutate(val = ifelse(source == "Pred" & metric == "Rate" & age >= 80,
+      #                     val[source == "Pred" & metric == "Rate" & age == 79], val),
+      #        .by = c(measure, location, cause, sex, year)) %>% 
+
+      # left_join(x  = .,
+      #           y  = gbd_pop %>% select(location, sex, year, age, pop = val),
+      #           by = join_by(location, sex, year, age)) %>%
+      # mutate(val = ifelse(source == "Pred" & metric == "Number" & age >= 80,
+      #                     val[source == "Pred" & metric == "Rate" & age == 79] * pop, val),
+      #        .by = c(measure, location, cause, sex, year)) %>%
+      # mutate(val = ifelse(measure == "Number", val * pop, val)) %>% 
+      
+      filter(metric == "Rate") %>% 
+      
+      split(.$location) %>% 
+      map(.x = .,
+          .f = ~ .x %>% 
+                ggplot() +
+                geom_hline(yintercept = 0, linetype = 2, color = "darkred") +
+                geom_point(data = .x %>% 
+                                 filter(source == "GBD"),
+                           mapping = aes(x = age_mid, y = val, color = "GBD")) +
+                geom_line(data = .x %>% 
+                                filter(source == "Pred"),
+                          mapping = aes(x = age, y = val, color = "Pred")) +
+                scale_color_manual(values = scale_col,
+                                   guide = guide_legend()) +
+                scale_y_continuous(limits = c(0, 35e3),
+                                   breaks = seq(0, 3e4, 1e4),
+                                   labels = scales::label_comma()) +
+                facet_wrap(. ~ cause, scales = "free_y") +  # Free y-axis scales
+                labs(title = "Predicted Mortality vs. GBD Mortality Rates",
+                     subtitle = paste0(unique(.x$location), ", Females, 2019"),
+                     x = "Age", y = "Mortality rate (per 100K)",
+                     color = NULL) +
+                theme_minimal() +
+                theme(strip.text.y = element_blank()) +
+                theme(strip.text.y = element_text(size = 12, angle = 0),
+                      legend.position = "bottom"))
+```
+
+```{r}
+altern_acm_raw <- gbd_acm_raw %>% 
+      filter(year == 2019) %>% 
+      filter(metric == "Rate") %>% 
+      filter(location %in% c("Uganda", "China", "India", "United States of America")) %>% 
+      mutate(age_fct = factor(age,
+                              levels = uniq_raw_age[c(22, 25, 26, 17, 21,
+                                                      1:16, 18:20, 23)])) %>% 
+      # mutate(age_mid = ifelse(grep("^\\d+-\\d+ years$|^\\d+\\+ years$", age, value = TRUE), as.numeric(parse_number(age)) + 2.5, ))
+      
+      mutate(age_mid = case_when(age == "<28 days"    ~ 15 / 30 / 12,
+                                 age == "1-5 months"  ~ 3 / 12,
+                                 age == "6-11 months" ~ 8.5 / 12,
+                                 age == "<1 year"     ~ 0.5,
+                                 age == "2-4 years"   ~ 3,
+                                 age == "<5 years"    ~ 2.5,
+                                 TRUE                 ~ 
+                                       as.numeric(parse_number(age)) + 2.5))
+```
+
+```{r}
+uniq_raw_age <- unique(gbd_acm_raw$age)
+
+left_join(
+      x  = gbd_acm_raw %>% 
+            filter(year == 2019) %>% 
+            filter(metric == "Rate") %>% 
+            filter(location %in% c("Uganda", "China", "India", "United States of America")) %>% 
+            mutate(age_fct = factor(age,
+                                    levels = uniq_raw_age[c(22, 25, 26, 17, 21,
+                                                            1:16, 18:20, 23)])) %>% 
+            # mutate(age_mid = ifelse(grep("^\\d+-\\d+ years$|^\\d+\\+ years$", age, value = TRUE), as.numeric(parse_number(age)) + 2.5, ))
+            
+            mutate(age_mid = case_when(age == "<28 days"    ~ 15 / 30 / 12,
+                                       age == "1-5 months"  ~ 3 / 12,
+                                       age == "6-11 months" ~ 8.5 / 12,
+                                       age == "<1 year"     ~ 0.5,
+                                       age == "2-4 years"   ~ 3,
+                                       age == "<5 years"    ~ 2.5,
+                                       TRUE                 ~ 
+                                             as.numeric(parse_number(age)) + 2.5)),
+      
+      y = gbd_acm_5yr %>% 
+            filter(year == 2019) %>% 
+            filter(age_cat %!in% c("<28 days", "1-5 months", "6-11 months",
+                                  "12-23 months")) %>% 
+            select(!c(age, upper, lower, age_cat))
+) %>% 
+      
+      # filter(between(age_mid, 25, 40))
+      
+      ggplot(mapping = aes(x = age_mid, y = val, color = sex)) +
+      geom_hline(yintercept = 0, linetype = 2, color = "darkred") +
+      geom_point(alpha = 0.35) +
+      # geom_line(data = .x %>% 
+      #                 filter(source == "Pred",
+      #                        measure == "Deaths",
+      #                        metric == "Rate"),
+      #           mapping = aes(x = age, y = val, color = "Pred")) +
+      # scale_color_manual(values = scale_col,
+      #                    guide = guide_legend()) +
+      facet_wrap(. ~ location) +  # Free y-axis scales
+      labs(title = "Predicted Mortality vs. GBD Mortality Counts",
+           # subtitle = paste0(unique(.x$location), ", Females, 2019"),
+           x = "Age", y = "Mortality rate (per 100K)",
+           color = NULL) +
+      theme_minimal() +
+      theme(strip.text.y = element_blank()) +
+      theme(strip.text.y = element_text(size = 12, angle = 0),
+            legend.position = "bottom")
+```
+
+#### 5-Year Death Counts
+
+```{r}
+acm_subset_example %>% 
+      filter(#source == "GBD",
+             metric == "Number",
+             age_gp %in% c("<1 year", "1-5 years", "5-9 years"))
+```
+
+```{r}
+acm_subset_example %>% 
+      # Use the same incidence and mortality rates for 80+ as for 79
+      # mutate(val = ifelse(source == "Pred" & metric == "Rate" & age >= 80,
+      #                     val[source == "Pred" & metric == "Rate" & age == 79], val),
+      #        .by = c(measure, location, cause, sex, year)) %>% 
+
+      # left_join(x  = .,
+      #           y  = gbd_pop %>% select(location, sex, year, age, pop = val),
+      #           by = join_by(location, sex, year, age)) %>%
+      
+      # mutate(val = ifelse(source == "Pred" & metric == "Number" & age >= 80,
+      #                     val[source == "Pred" & metric == "Rate" & age == 79] * pop, val),
+      #        .by = c(measure, location, cause, sex, year)) %>%
+      filter(metric == "Number") %>% 
+      
+      # mutate(val = ifelse(test = metric == "Rate" & source == "Pred",
+      #                     yes  = val * pop / 1e5,
+      #                     no   = val)) %>% 
+      # filter(case_when(source == "GBD" ~ metric == "Number"))
+      
+      # Convert to 5-year age groups
+      filter(age_cat %!in% c("<28 days", "1-5 months", "6-11 months",
+                            "<1 year", "12-23 months", "2-4 years")) %>% 
+      
+      # mutate(age_gp = cut(
+      #       age,
+      #       breaks = c(-Inf, seq(5, 95, 5), Inf),
+      #       labels = c("<5 years",
+      #                  paste0(seq(5, 90, 5), "-", seq(9, 94, 5), " years"),
+      #                  "95+ years"),
+      #       right = FALSE
+      # )) %>% 
+      
+      # filter(location == "Uganda", sex == "Female", year == 2019, age < 15)
+      
+      # Check:
+      # split(.$measure, .$metric, .$location, .$cause, .$sex, .$year, .$age_gp) %>% 
+      # map(.x = .,
+      #     .f = ~ .x %>% 
+      #           filter(source == "GBD") %>% 
+      #           select(val) %>% 
+      #           pull() %>% 
+      #           table())
+      
+      # filter(age < 15)
+      # 
+      # select(age_mid) %>% 
+      # unique()
+
+      group_by(measure, metric, location, cause, sex, year, age_gp, source) %>% 
+      reframe(val = ifelse(
+            test = source == "Pred",
+            yes  = sum(val),
+            no   = mean(val))) %>% 
+      unique() %>% 
+      
+      mutate(age_mid = case_when(age_gp == "<5 years"  ~ 2.5,
+                                 TRUE                  ~ as.numeric(parse_number(as.character(age_gp))) + 2.5)) %>%
+      # filter(location == "Uganda", cause == cause2[1], source == "Pred", age >= 60)
+      # filter(location == "Uganda") %>%
+      
+      split(.$location) %>% 
+      map(.x = .,
+          .f = ~ .x %>% 
+                ggplot() +
+                geom_hline(yintercept = 0, linetype = 2, color = "darkred") +
+                geom_point(data = .x %>% 
+                                 filter(source == "GBD"),
+                           mapping = aes(x = age_mid, y = val, color = "GBD")) +
+                geom_point(data = .x %>% 
+                                filter(source == "Pred"),
+                          mapping = aes(x = age_mid, y = val, color = "Pred")) +
+                scale_color_manual(values = scale_col,
+                                   guide = guide_legend()) +
+                scale_y_continuous(# limits = c(0, 13e5),
+                                   # breaks = seq(0, 1.25e6, 25e4),
+                                   labels = scales::label_comma()) +
+                facet_wrap(. ~ cause, scales = "free_y") +  # Free y-axis scales
+                labs(title = "Predicted vs. GBD Incidence Counts",
+                     subtitle = paste0(unique(.x$location), ", Females, 2019"),
+                     x = "Age", y = "Death count",
+                     color = NULL) +
+                theme_minimal() +
+                theme(strip.text.y = element_blank()) +
+                theme(strip.text.y = element_text(size = 12, angle = 0),
+                      legend.position = "bottom"))
+```
+
+
+#### Subset Cancers
+
+```{r}
+uganda_example_subset <- gbd_calc_compr %>% 
+      filter(sex == "Female",
+             cause %in% c(cause2[-2], cause3[2]),
+             location == "Uganda") %>% 
+      filter(measure != "Prevalence") %>% 
+      mutate(cause = case_match(cause,
+                                cause2[1] ~ "Breast",
+                                cause2[3] ~ "Lung",
+                                cause3[2] ~ "CRC",
+                                .default = NA))
+
+      
+uganda_example_subset %>% 
+      ggplot() +
+      geom_hline(yintercept = 0, linetype = 2, color = "darkred") +
+      geom_point(data = uganda_example_subset %>% 
+                       filter(source == "GBD") %>% 
+                       filter(metric == "Rate"),
+                 mapping = aes(x = age_mid, y = val), color = "blue", alpha = 0.6) +
+      geom_line(data = uganda_example_subset %>% 
+                       filter(source == "Pred") %>% 
+                       filter(metric == "Rate"),
+                 mapping = aes(x = age, y = val), color = "green") +
+      # geom_smooth(method = "lm", se = TRUE, alpha = 0.2) +
+      facet_grid(cause ~ measure, scales = "free_y") +  # Free y-axis scales
+      labs(title = "Predicted cases vs. GBD Rates",
+           subtitle = "Uganda, Females, 2019",
+           x = "Age", y = "Value") +
+      theme_caviz +
+      theme(strip.text.y = element_blank()) +
+      theme(strip.text.y = element_text(size = 12, angle = 0))
+```
+
+```{r}
+# check:
+nrow(uganda_example_subset) /                          # 2304 rows
+      length(unique(uganda_example_subset$age)) /      # 96 single-year ages
+      length(unique(uganda_example_subset$cause)) /    # 3 causes
+      length(unique(uganda_example_subset$measure)) /  # 2 measures: deaths and incid
+      length(unique(uganda_example_subset$metric)) /   # 2 metrics: rate and count
+      length(unique(uganda_example_subset$source))     # 2 sources: GBD and pred
+```
+
+
+### Observed vs. Predicted Case Counts
+
+```{r}
+uganda_example_subset %>% 
+      ggplot() +
+      geom_hline(yintercept = 0, linetype = 2, color = "darkred") +
+      geom_point(data = uganda_example_subset %>% 
+                       filter(source == "GBD") %>% 
+                       filter(metric == "Number"),
+                 mapping = aes(x = age_mid, y = val, color = "GBD"), alpha = 0.6) +
+      geom_line(data = uganda_example_subset %>% 
+                      filter(source == "Pred") %>% 
+                       filter(metric == "Number"),
+                 mapping = aes(x = age, y = val, color = "Pred")) +
+      scale_color_manual(values = scale_col,
+                         guide = guide_legend()) +
+      facet_grid(cause ~ measure, scales = "free_y") +  # Free y-axis scales
+      labs(title = "Predicted cases vs. GBD case counts",
+           subtitle = "Uganda, Females, 2019",
+           x = "Age", y = "Value") +
+      theme_caviz +
+      theme(strip.text.y = element_blank()) +
+      theme(strip.text.y = element_text(size = 12, angle = 0),
+            legend.position = "bottom")
+```
+
+### Observed vs. Predicted Case `Log(Counts)`
+
+```{r}
+uganda_example_subset %>% 
+      ggplot() +
+      geom_hline(yintercept = 0, linetype = 2, color = "darkred") +
+      geom_point(data = uganda_example_subset %>% 
+                       filter(source == "GBD") %>% 
+                       filter(metric == "Number"),
+                 mapping = aes(x = age_mid, y = log(val), color = "GBD"), alpha = 0.6) +
+      geom_line(data = uganda_example_subset %>% 
+                      filter(source == "Pred") %>% 
+                       filter(metric == "Number"),
+                 mapping = aes(x = age, y = log(val), color = "Pred")) +
+      scale_color_manual(values = scale_col,
+                         guide = guide_legend()) +
+      facet_grid(cause ~ measure, scales = "free_y") +  # Free y-axis scales
+      labs(title = "Log predicted cases vs. GBD log case counts",
+           subtitle = "Uganda, Females, 2019",
+           x = "Age", y = "Value") +
+      theme_caviz +
+      theme(strip.text.y = element_blank()) +
+      theme(strip.text.y = element_text(size = 12, angle = 0),
+            legend.position = "bottom")
+```
+
+### Histogram of Case Counts
+
+```{r}
+gbd_calc_compr %>% 
+      group_by(measure, location, cause, sex, source) %>%
+      reframe(tot_cases = sum(val, na.rm = TRUE)) %>% 
+      
+      pivot_wider(id_cols = c(measure, location, cause, sex),
+                  names_from = source,
+                  values_from = tot_cases) %>% 
+      
+      ggplot() +
+      geom_histogram(aes(x = GBD, fill = "GBD"), alpha = 0.5, position = "identity") +
+      geom_histogram(aes(x = Pred, fill = "Pred"), alpha = 0.5, position = "identity") +
+      scale_x_continuous(breaks = seq(0, 2e7, 5e6),
+                         labels = scales::label_comma(scale = 1e-6, suffix = "M")) +
+      scale_fill_manual(values = scale_col,
+                        guide = guide_legend()) +
+      facet_wrap(. ~ cause) +
+      labs(x = "Case counts",
+           fill = NULL) +
+      theme_minimal() +
+      theme(legend.position = "bottom")
+```
+
+### Histogram of Difference in Case Counts
+
+```{r}
+gbd_calc_compr %>% 
+      group_by(measure, location, cause, sex, source) %>%
+      reframe(tot_cases = sum(val, na.rm = TRUE)) %>% 
+      
+      pivot_wider(id_cols = c(measure, location, cause, sex),
+                  names_from = source,
+                  values_from = tot_cases) %>% 
+      mutate(counts_diff = Pred - GBD,
+             counts_ratio = Pred / GBD) %>% 
+      
+      # reframe(range(counts_diff))
+      
+      ggplot() +
+      geom_histogram(aes(x = counts_diff), alpha = 0.5, position = "identity", fill = "red") +
+      # geom_histogram(aes(x = counts_ratio), alpha = 0.5, position = "identity", fill = "blue") +
+      scale_x_continuous(breaks = seq(-14e6, 12e6, 6e6),
+                         labels = scales::label_comma(scale = 1e-6, suffix = "M")) +
+      facet_wrap(. ~ cause) +
+      labs(x = "Counts difference between GBD and predictions") +
+      theme_minimal()
+```
+
+### Histogram of Case Counts Ratios
+
+```{r}
+gbd_calc_compr %>% 
+      group_by(measure, location, cause, sex, source) %>%
+      reframe(tot_cases = sum(val, na.rm = TRUE)) %>% 
+      
+      pivot_wider(id_cols = c(measure, location, cause, sex),
+                  names_from = source,
+                  values_from = tot_cases) %>% 
+      mutate(counts_diff = Pred - GBD,
+             counts_ratio = Pred / GBD) %>% 
+      
+      # reframe(range(counts_diff))
+      
+      ggplot() +
+      # geom_histogram(aes(x = counts_diff), alpha = 0.5, position = "identity", fill = "red") +
+      geom_histogram(aes(x = counts_ratio), alpha = 0.5, position = "identity", fill = "blue") +
+      # scale_x_continuous(breaks = seq(0, 1.75e3, 500),
+      #                    labels = scales::label_comma(scale = 1e-3, suffix = "K")) +
+      facet_wrap(. ~ cause) +
+      labs(x = "Counts Ratio (predictions to GBD)") +
+      theme_minimal()
+```
+

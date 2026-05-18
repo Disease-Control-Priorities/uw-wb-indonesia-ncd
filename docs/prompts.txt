@@ -1,0 +1,33 @@
+You are an expert in R Markdown, Slidy presentations, scientific communication, and quantitative modeling. I will provide two R Markdown files: (1) the mathematical model equations and (2) the data, code, and outputs of my model in R.
+
+Using both files as source material, create a complete executive-style R Markdown slide deck using the Slidy presentation format. The slide deck should be self-contained, reproducible, and structured for a 20–30 minute executive briefing.
+
+Requirements:
+
+1. Use R Markdown with output: slidy_presentation.
+2. Integrate content from both Rmd files: 
+   - Mathematical model equations (clean, readable, minimal notation)
+   - Data sources, preprocessing, and model outputs (figures, tables, scenarios)
+3. Organize the slide deck into the following sections:
+   - Title slide
+   - Motivation and problem statement
+   - Aims and research questions
+   - Data sources and key variables
+   - Scenarios and assumptions
+   - Mathematical model (clear, simplified equations + intuition)
+   - Implementation in R (brief, high-level)
+   - Results (figures, tables, comparisons across scenarios)
+   - Discussion and interpretation
+   - Limitations
+   - Next steps and recommendations
+4. Use concise executive-style text: short bullets, minimal equations, clear takeaways.
+5. Include color-coded callout boxes for:
+   - Questions
+   - Definitions
+   - Key takeaways
+   - Uncertainties or pending decisions
+6. Include citations in a simple, consistent format (BibTeX or inline).
+7. Include placeholders where needed (e.g., “Insert figure from model output here”).
+8. Produce the final output as a single R Markdown file that I can knit immediately.
+
+Wait for me to provide the two Rmd files before generating the slide deck.
