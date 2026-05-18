@@ -1,0 +1,662 @@
+---
+title: "Indonesia NCD Simulation Model"
+subtitle: "Technical Overview --- CVD and Cancer Markov Frameworks"
+author: "RTSL / University of Washington"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  beamer_presentation:
+    latex_engine: xelatex
+    includes:
+      in_header: beamer_preamble.tex
+    keep_tex: true
+    slide_level: 2
+bibliography: references.bib
+csl: https://raw.githubusercontent.com/citation-style-language/styles/master/apa.csl
+link-citations: true
+nocite: |
+  @Vollset2024, @ConsortiumRisk2023
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+<!-- ============================================================ -->
+<!-- PART 1 --- PROJECT OVERVIEW                                   -->
+<!-- ============================================================ -->
+
+# Part 1 --- Project Overview
+
+## Background and Motivation
+
+- Indonesia faces a growing NCD burden driven by population aging, high smoking prevalence, rising obesity, and limited screening access
+- CVD and cancer together account for over 50\% of premature mortality in Indonesia
+- Policy decisions require quantitative evidence on intervention scale-up trajectories and their expected health and economic returns
+
+\begin{keyinsight}[Why Markov?]
+Unlike system dynamics approaches (e.g., NCDSim), discrete-time Markov models allow transparent, state-by-state tracking of disease progression---making calibration to GBD and validation against observed rates straightforward.
+\end{keyinsight}
+
+## Aims and Scope
+
+\textbf{Primary aim:} Project health and economic outcomes of NCD policy packages in Indonesia from 2025 to 2050.
+
+\medskip
+
+\textbf{Two independent disease modules:}
+
+1. \textbf{CVD} --- IHD, ischemic stroke, hemorrhagic stroke, hypertensive heart disease
+2. \textbf{Cancer} --- 16 types from GBD 2021, in three analytic tiers
+
+\medskip
+
+\textbf{Policy levers modeled:}
+
+- Hypertension control scale-up (HEARTS)
+- Sodium reduction
+- Trans-fat elimination
+- Statin coverage expansion
+- Cancer screening (cervical, colorectal, breast)
+
+## Reproducible Research Workflow
+
+\begin{center}
+\textbf{Inputs} $\rightarrow$ \textbf{Scenario Definitions} $\rightarrow$ \textbf{Model Outputs} $\rightarrow$ \textbf{Documentation} $\rightarrow$ \textbf{Reports}
+\end{center}
+
+\bigskip
+
+| Stage | Source |
+|-------|--------|
+| Raw data | GBD 2023, UNWPP 2024, IHME, NCD-RisC, ETIHAD |
+| Scenarios | `04_define_interventions.R` / `settings.yml` |
+| Simulation | Markov engine per module |
+| Post-processing | DALYs, VSL/VSLY calculations |
+| Reporting | Beamer slides, R Markdown, policy briefs |
+
+\begin{methodsnote}
+All scenario definitions are code-driven and version-controlled---no manual spreadsheet steps in the analytic pipeline.
+\end{methodsnote}
+
+<!-- ============================================================ -->
+<!-- PART 2 --- TECHNICAL INFRASTRUCTURE                           -->
+<!-- ============================================================ -->
+
+# Part 2 --- Technical Infrastructure
+
+## Agentic Coding Approach
+
+- Development assisted by Claude Code (Anthropic) for code generation, review, and documentation
+- AI-assisted workflow embedded in version control via \texttt{CLAUDE.md} project instructions
+- Enables rapid iteration on intervention logic and scenario definitions while maintaining auditability
+
+\begin{keyinsight}
+The agentic approach accelerates development of complex modules (e.g., 850+ line HTN control logic) while preserving human oversight through structured code review and calibration checks.
+\end{keyinsight}
+
+## Reproducibility Infrastructure
+
+\textbf{What is currently in place:}
+
+- Organized directory layout: \texttt{data/raw}, \texttt{data/interim}, \texttt{data/processed}
+- Configuration via \texttt{settings.yml} (cancer) and flag variables (CVD)
+- Numbered script execution order (00--08 for CVD; 00--06 for cancer)
+- Intermediate \texttt{.rds} checkpoints at each pipeline stage
+- Remote function sourcing with local fallback paths
+
+\medskip
+
+\textbf{Not yet in place:}
+
+- No \texttt{renv.lock} --- dependencies installed manually
+- No formal seed control for stochastic components
+- No containerized environment (Docker)
+
+\begin{cautionbox}[Reproducibility Gap]
+Adding \texttt{renv} lockfiles and a \texttt{Dockerfile} would close the main reproducibility gaps. These are planned but not yet implemented.
+\end{cautionbox}
+
+## Version Control and GitHub Workflow
+
+- Repository hosted on GitHub under \texttt{Disease-Control-Priorities}
+- Branch-based development with pull request reviews
+- \texttt{CLAUDE.md} serves as machine-readable project documentation, checked into version control
+- Raw data files excluded via \texttt{.gitignore}; processed \texttt{.rds} files tracked selectively
+
+\begin{methodsnote}[Data Governance]
+Raw GBD/UNWPP data are not stored in the repository. Analysts must obtain them independently and place them in \texttt{data/raw/}.
+\end{methodsnote}
+
+<!-- ============================================================ -->
+<!-- PART 3 --- METHODOLOGICAL OVERVIEW                            -->
+<!-- ============================================================ -->
+
+# Part 3 --- Methodological Overview
+
+## Full Model Architecture
+
+\begin{center}
+\textbf{Population} $\rightarrow$ \textbf{Risk Factors} $\rightarrow$ \textbf{Disease Models} $\rightarrow$ \textbf{Outcomes}
+\end{center}
+
+\bigskip
+
+\small
+| Component | Status | Key Data Source |
+|-----------|--------|-----------------|
+| Demography / Population | Scaffolding only | UNWPP 2024 |
+| Risk factor distributions | Implemented (CVD) | NCD-RisC, IHME DIET |
+| CVD natural history | Fully implemented | GBD 2023 |
+| Cancer natural history | Fully implemented | GBD 2021/2023 |
+| Health systems / treatment | Partial (coverage params) | ETIHAD, HEARTS |
+| Economic evaluation | Fully implemented | Robinson VSL, World Bank GNI |
+| Module integration | Separate pipelines | --- |
+
+\normalsize
+
+\begin{keyinsight}
+CVD and cancer modules run independently under a conditional independence assumption. No comorbidity interaction is modeled in v1.0.
+\end{keyinsight}
+
+## Core Model Logic: CVD
+
+\textbf{State space} (per age / sex / location / cause / year):
+
+$$\text{Susceptible} \rightarrow \text{Incident} \rightarrow \text{Prevalent} \rightarrow \text{Dead}$$
+
+\medskip
+
+- Transition probabilities calibrated to GBD 2023 incidence, prevalence, and mortality
+- Background mortality layered from UNWPP 2024 life tables
+- Secular trends in case fatality forecast via ARIMA (\texttt{forecast} package)
+
+\begin{methodsnote}
+Constraint enforced: $IR + BG_{mx} \leq 1$ for all age--sex--cause--year cells. Violations are flagged in \texttt{032\_adjustments.R} and corrected before simulation.
+\end{methodsnote}
+
+## Core Model Logic: Cancer
+
+\textbf{7-state Markov model} (per age / sex / location / cause / year):
+
+$$\text{Well} \rightarrow \text{Precancer} \rightarrow \text{Local} \rightarrow \text{Regional} \rightarrow \text{Distant} \rightarrow \text{Cancer Death}$$
+
+with absorbing background death state.
+
+\medskip
+
+\textbf{Three analytic tiers:}
+
+1. \textbf{Tier 1} (11 cancers) --- Incidence/mortality only (no staging)
+2. \textbf{Tier 2} (3 cancers) --- Staged: local, regional, distant
+3. \textbf{Tier 3} (2 cancers) --- Precancerous lesions modeled (cervix, CRC)
+
+\begin{methodsnote}
+Tier 3 cancers include screening interventions that shift stage distribution at diagnosis, directly affecting transition probabilities.
+\end{methodsnote}
+
+## Intervention Logic
+
+\textbf{CVD interventions} are applied multiplicatively to incidence rates:
+
+$$IR_{\text{treated}} = IR_{\text{baseline}} \times (1 - \text{coverage} \times RR_{\text{effect}})$$
+
+\medskip
+
+\textbf{Multi-intervention stacking order:}
+
+1. Sodium $\rightarrow$ BP distribution shift via \texttt{get.bp.prob()} coefficients
+2. Statins $\rightarrow$ direct IR reduction (RR from meta-analyses)
+3. TFA elimination $\rightarrow$ IR reduction via $RR = 1.28$ per 2\% energy from TFA
+4. HTN control $\rightarrow$ ETIHAD-based RR per 10 mmHg BP reduction
+
+\medskip
+
+\textbf{Cancer interventions:} Screening coverage expansion shifts stage distribution at diagnosis, reducing late-stage presentation and improving survival.
+
+## Economic Evaluation Framework
+
+\textbf{Value of Statistical Life (VSL)} approach [@Robinson2019VSL]:
+
+$$VSL_{\text{country}} = VSL_{\text{base}} \times \left(\frac{GNI_{\text{country}}}{GNI_{\text{base}}}\right)^{\varepsilon}$$
+
+\medskip
+
+- Three income elasticity scenarios: $\varepsilon = 1.0, 1.2, 1.5$ (primary: 1.2)
+- VSLY derived: $VSLY = VSL / \bar{e}$ (average adult life expectancy)
+- GDP growth projections from SSP2 scenario
+
+\begin{takeaway}
+Economic valuation converts deaths averted and DALYs prevented into monetary terms, enabling comparison across intervention packages and informing resource allocation decisions.
+\end{takeaway}
+
+## How Modules Integrate
+
+\textbf{Current state:} CVD and cancer pipelines run independently, producing separate outputs (deaths averted, DALYs, economic value).
+
+\medskip
+
+\textbf{Integration points:}
+
+- Shared demographic inputs (UNWPP 2024 population, life tables)
+- Shared economic framework (VSL/VSLY methodology)
+- Common reporting templates (Beamer, R Markdown)
+
+\medskip
+
+\textbf{Not yet integrated:}
+
+- No joint population projection feeding both models
+- No comorbidity or competing-risk adjustment across CVD and cancer
+- No unified scenario configuration file
+
+\begin{cautionbox}[Integration Pending]
+A formal integration layer---shared population module, unified scenario config, and joint output aggregation---is planned for v2.0.
+\end{cautionbox}
+
+<!-- ============================================================ -->
+<!-- PART 4 --- DETAILED MODULE SLIDES                             -->
+<!-- ============================================================ -->
+
+# Part 4 --- CVD Module Walkthrough
+
+## CVD Pipeline Architecture
+
+\small
+
+```
+00_run_model.R          (orchestrator + config flags)
+  |-- 01_utils.R        (BP control, TFA policy, age grouping)
+  |-- 02_load_inputs.R  (sources 021--023)
+  |   |-- 021_get_base_rates.R   (GBD 2023 extraction)
+  |   |-- 022_get_tps.R          (transition probabilities)
+  |   |-- 023_get_tps_bgmx.R     (background mortality trends)
+  |-- 03_calibration.R  (sources 031--032)
+  |   |-- 031_calibration.R      (calibrate to GBD)
+  |   |-- 032_adjustments.R      (IR + BG.mx <= 1)
+  |-- 04_define_interventions.R  (scenarios, ~57 KB)
+  |-- 05_build_baseline.R        (cohort assembly)
+  |-- 06_run_scenarios.R         (simulation engine, ~84 KB)
+  |-- 07_output_dalys.R          (YLL, YLD, DALYs)
+  |-- 08_economic_value_calculation.R  (VSL/VSLY)
+```
+
+\normalsize
+
+\begin{keyinsight}
+Configuration flags in \texttt{00\_run\_model.R} allow skipping expensive stages when intermediate \texttt{.rds} files already exist.
+\end{keyinsight}
+
+## CVD: Data Loading and Calibration
+
+\textbf{Data sources ingested:}
+
+- GBD 2023: cause-specific mortality, incidence, prevalence (4 CVD causes)
+- UNWPP 2024: population by age/sex, life expectancy, fertility
+- NCD-RisC: historical blood pressure distributions (1990--2019)
+- IHME DIET: sodium intake estimates
+
+\medskip
+
+\textbf{Calibration pipeline:}
+
+1. Extract single-year age rates (20--95) from 5-year GBD groups via interpolation
+2. Compute transition probabilities from rate-to-probability conversions
+3. Enforce $IR + BG_{mx} \leq 1$ constraint; flag and correct violations
+4. Forecast secular trends in case fatality using ARIMA
+
+\begin{methodsnote}
+Inline validation: \texttt{print(anyNA(data.out))} after every merge/join in \texttt{021\_get\_base\_rates.R}.
+\end{methodsnote}
+
+## CVD: Intervention Definitions
+
+\textbf{Four intervention families} defined in \texttt{04\_define\_interventions.R}:
+
+\small
+
+| Intervention | Scale-up | Target | Key Parameter |
+|-------------|----------|--------|---------------|
+| Sodium | Linear 2025--2030 | $-15\%$ / $-30\%$ | BP shift coefficients |
+| TFA | Linear to 0\% | Elimination | $RR = 1.28$ per 2\% TFA |
+| Statins | Linear / logistic to 2050 | 60\% coverage | LDL meta-analysis RRs |
+| HTN control | Quadratic (NCD-RisC fit) | 3 scenarios | ETIHAD RRs per 10 mmHg |
+
+\normalsize
+
+\medskip
+
+HTN control is the most complex module (~850 lines), fitting quadratic scale-up functions to historical NCD-RisC data and producing coverage trajectories (Business-as-usual, Progress, Aspirational).
+
+\begin{takeaway}
+Output: \texttt{covfxn2.csv} with columns for location, year, coverage scenario, absolute change, and annual rate of change.
+\end{takeaway}
+
+## CVD: Simulation Engine
+
+\texttt{06\_run\_scenarios.R} (~84 KB) is the primary simulation engine:
+
+- Iterates over all age/sex/location/cause/year combinations
+- Applies intervention effects via coverage-adjusted relative risk reductions
+- Supports parallel execution across intervention combinations
+- Outputs: deaths averted, incident cases prevented, prevalent cases
+
+\medskip
+
+\textbf{Intervention stacking} applies effects sequentially to avoid double-counting:
+
+1. Sodium $\rightarrow$ shifts BP distribution (population-level)
+2. Statins $\rightarrow$ reduces IR directly (individual-level)
+3. TFA $\rightarrow$ reduces IR via RR (population-level)
+4. HTN control $\rightarrow$ applies ETIHAD RR to treated fraction
+
+\medskip
+
+\textit{Insert figure placeholder: \texttt{output/slides/cvd\_scenario\_comparison.png} --- Deaths averted by intervention package, 2025--2050}
+
+## CVD: DALY and Economic Outputs
+
+\textbf{Burden calculation} (\texttt{07\_output\_dalys.R}):
+
+- YLL = deaths $\times$ residual life expectancy (UNWPP 2024)
+- YLD = prevalent cases $\times$ GBD disability weights (cause-specific)
+- DALYs = YLL + YLD, aggregated by age, sex, cause, year
+
+\medskip
+
+\textbf{Economic valuation} (\texttt{08\_economic\_value\_calculation.R}, ~42 KB):
+
+- VSL calibrated to Indonesia GNI with income elasticity $\varepsilon = 1.2$
+- GDP growth from SSP2 projections (IIASA)
+- Outputs: monetized value of deaths averted, DALYs prevented, cost per DALY averted
+
+\medskip
+
+\textit{Insert figure placeholder: \texttt{output/slides/cvd\_dalys\_averted.png} --- Cumulative DALYs averted by scenario}
+
+\textit{Insert figure placeholder: \texttt{output/slides/cvd\_economic\_value.png} --- Economic value of intervention packages}
+
+<!-- ============================================================ -->
+
+# Part 4 (cont.) --- Cancer Module Walkthrough
+
+## Cancer Pipeline Architecture
+
+\small
+
+```
+library.R               (setup, loads packages + fnx/)
+  |
+  |-- fnx/              (23 reusable functions)
+  |   |-- project_markov_trace_dt.R  (core projection)
+  |   |-- calc_bsln_tps_dt.R        (baseline TPs)
+  |   |-- calc_intv_tps.R           (intervention TPs)
+  |   |-- calc_metric_dt.R          (GBD extraction)
+  |   |-- run_ccpm.R                (cohort component projection)
+  |   |-- gen_lifetable.R           (abridged life tables)
+  |   |-- process_intv_scen_inputs.R (scenario processing)
+  |   +-- [16 other helpers]
+  |
+  |-- scripts/          (numbered execution)
+      |-- 00_read_data.R
+      |-- 01_process_country_param.R
+      |-- 02_process_bsln_scen.R
+      |-- 03_process_pop_proj_bsln_dt.R
+      |-- 04_process_intv_scen.R
+      |-- 05_process_pop_proj_intv_dt.R
+      +-- 06_dissertation_output.R
+```
+
+\normalsize
+
+## Cancer: Three-Tier System
+
+\textbf{16 cancer types} organized by analytic complexity:
+
+\medskip
+
+\textbf{Tier 1 --- Incidence/mortality only} (11 types):
+\small
+Uterine, esophageal, thyroid, stomach, liver, pancreatic, ovarian, bladder, lip/oral, nasopharynx, pharynx
+\normalsize
+
+\medskip
+
+\textbf{Tier 2 --- Staged} (3 types):
+\small
+Lung, prostate, breast (local $\rightarrow$ regional $\rightarrow$ distant)
+\normalsize
+
+\medskip
+
+\textbf{Tier 3 --- Precancerous lesions modeled} (2 types):
+\small
+Cervix, colorectal (well $\rightarrow$ precancer $\rightarrow$ local $\rightarrow$ regional $\rightarrow$ distant)
+\normalsize
+
+\begin{keyinsight}
+Tier 3 cancers are the primary targets for screening interventions, where early detection shifts stage distribution and reduces late-stage mortality.
+\end{keyinsight}
+
+## Cancer: Core Markov Projection
+
+\texttt{project\_markov\_trace\_dt.R} implements the core engine:
+
+- 7$\times$7 transition probability matrix per (location, sex, cause, year, age)
+- State vector: \texttt{pwell, pprc, plcl, prgn, pdst, pcdx, pbgdx}
+- Forward projection via matrix multiplication, year-by-year
+- Two absorbing states: cancer death, background death
+- Handles newborn cohort initialization for population projection
+
+\begin{methodsnote}
+Transition probabilities are first computed at calibration years, then expanded to the full projection period via \texttt{expand\_tps\_years\_dt.R}. Matrix corrections enforced by \texttt{correct\_markov.R}.
+\end{methodsnote}
+
+## Cancer: Key Functions
+
+\small
+
+| Function | Role |
+|----------|------|
+| \texttt{calc\_bsln\_tps\_dt} | Baseline TPs from stage distributions + GBD rates |
+| \texttt{calc\_intv\_tps} | Modify TPs for intervention scenarios |
+| \texttt{calc\_metric\_dt} | Extract incidence/prevalence/mortality from GBD |
+| \texttt{run\_ccpm} | Cohort component population projection |
+| \texttt{gen\_lifetable} | Standard abridged life table ($q_x, l_x, e_x, S_x$) |
+| \texttt{process\_intv\_scen\_inputs} | Parse scenario YAML/Excel inputs |
+| \texttt{frp\_fnx} | Finite rate projection and RR adjustments |
+| \texttt{calc\_start\_hstate\_dist\_dt} | Initial health state distribution |
+| \texttt{id\_target\_cc\_methods} | Identify cervical cancer screening methods |
+
+\normalsize
+
+\medskip
+
+\textit{Insert figure placeholder: \texttt{output/slides/cancer\_markov\_trace.png} --- Example Markov trace for cervical cancer (Tier 3)}
+
+## Cancer: Intervention Scenarios
+
+\textbf{Screening interventions} processed by \texttt{process\_intv\_scen\_inputs.R} (~17 KB):
+
+- Define target coverage, efficacy, and ramp-up schedule
+- Shift stage distribution at diagnosis (earlier detection)
+- Modify transition probabilities accordingly via \texttt{calc\_intv\_tps}
+
+\medskip
+
+\textbf{Population projection} via \texttt{run\_ccpm.R}:
+
+- Cohort component model: aging, births, deaths by age/sex
+- Baseline and intervention projections run separately
+- Difference yields intervention-attributable outcomes
+
+\medskip
+
+\textit{Insert figure placeholder: \texttt{output/slides/cancer\_stage\_shift.png} --- Stage distribution shift under screening scale-up}
+
+\begin{takeaway}
+Cancer outputs mirror the CVD structure: incident cases, deaths, DALYs under baseline vs.\ intervention, enabling consistent cross-module comparison.
+\end{takeaway}
+
+<!-- ============================================================ -->
+
+# Part 4 (cont.) --- Pending Modules
+
+## Demography Module
+
+\begin{cautionbox}[Module Pending]
+The \texttt{code/demography/} directory exists as a placeholder. No implementation is present.
+\end{cautionbox}
+
+\medskip
+
+\textbf{Planned scope:}
+
+- Unified population projection feeding both CVD and cancer modules
+- Cohort construction with age/sex-specific mortality, fertility, migration
+- Currently, each module handles demographics independently:
+    - CVD: loads UNWPP data in \texttt{05\_build\_baseline.R}
+    - Cancer: uses \texttt{run\_ccpm.R} for cohort component projection
+
+\medskip
+
+\textbf{Integration benefit:} A shared demography module would ensure consistent population denominators and avoid duplication.
+
+## Shared Utilities
+
+\begin{cautionbox}[Module Pending]
+The \texttt{code/utils/} directory exists as a placeholder. No shared utility functions are implemented.
+\end{cautionbox}
+
+\medskip
+
+\textbf{Candidate functions for extraction:}
+
+- Rate $\leftrightarrow$ probability converters (currently sourced remotely in cancer module)
+- Age-group harmonization (5-year $\leftrightarrow$ single-year)
+- GBD data loaders and standardizers
+- Common plotting themes and output formatters
+
+## Health Systems Module
+
+\begin{cautionbox}[Module Pending]
+No dedicated health systems module exists. Treatment and coverage parameters are embedded in intervention definitions.
+\end{cautionbox}
+
+\medskip
+
+\textbf{Current approach:}
+
+- CVD: coverage trajectories defined in \texttt{04\_define\_interventions.R} (quadratic fit to NCD-RisC historical data)
+- Cancer: screening coverage targets defined in scenario YAML/Excel inputs
+
+\medskip
+
+\textbf{What a dedicated module could add:}
+
+- Treatment adherence modeling
+- Health workforce constraints
+- Supply chain / medicine availability
+- Facility-level capacity modeling
+
+## Comorbidity and Competing Risks
+
+\begin{cautionbox}[Not Modeled in v1.0]
+CVD and cancer modules assume conditional independence. No comorbidity interaction or formal competing-risk adjustment is implemented.
+\end{cautionbox}
+
+\medskip
+
+\textbf{Implication:}
+
+- Deaths averted from one disease do not reduce the at-risk population for the other
+- Summing CVD + cancer results may overestimate total impact
+- Acceptable for single-disease policy evaluation; requires adjustment for combined NCD investment cases
+
+\medskip
+
+\textbf{Planned for v2.0:} Shared population with competing-risk mortality across disease modules.
+
+<!-- ============================================================ -->
+<!-- PART 5 --- CLOSING                                            -->
+<!-- ============================================================ -->
+
+# Part 5 --- Closing
+
+## Summary
+
+\begin{takeaway}[Summary]
+\begin{itemize}
+  \item Population-based discrete-time Markov framework for Indonesia NCD policy evaluation (2025--2050)
+  \item CVD module: 4 causes, 4 intervention families, calibrated to GBD 2023
+  \item Cancer module: 16 types in 3 tiers, screening interventions for Tier 3
+  \item Economic evaluation via VSL/VSLY with income elasticity scenarios
+  \item Agentic coding approach accelerates development while preserving auditability
+\end{itemize}
+\end{takeaway}
+
+## Next Steps and Pending Work
+
+\textbf{Near-term:}
+
+- Finalize cancer intervention scenario definitions
+- Generate publication-ready output figures for all modules
+- Add \texttt{renv.lock} for dependency management
+- Populate \texttt{docs/diagrams/} with model workflow visualizations
+
+\medskip
+
+\textbf{Medium-term:}
+
+- Implement shared demography module
+- Build formal integration layer (unified scenario config, joint output aggregation)
+- Add competing-risk adjustment for combined NCD estimates
+
+\medskip
+
+\textbf{Longer-term:}
+
+- Probabilistic sensitivity analysis (PSA)
+- Extend to additional NCD domains (diabetes, COPD)
+- Country adaptation toolkit for other LMICs
+
+## Key References
+
+\small
+
+Core methodology and data:
+
+- @Pickersgill2022 --- Global blood pressure target modeling
+- @Kontis2019 --- Public health interventions and lives saved
+- @Robinson2019VSL --- VSL methodology for global benefit-cost analysis
+- @Watkins2025SPC --- Single-pill combination therapies impact
+
+\medskip
+
+Data sources:
+
+- @Chong2024 --- Global CVD burden projections
+- @Filippini2021 --- Sodium--blood pressure dose-response
+- @Ettehad2016 --- Blood pressure lowering and CVD outcomes
+
+## {.plain}
+
+\vfill
+\begin{center}
+{\huge \textcolor{uwpurple}{Thank You}}
+
+\bigskip
+
+{\large Questions and Discussion}
+
+\bigskip
+
+\small
+RTSL / University of Washington\\
+Disease Control Priorities\\
+\texttt{github.com/Disease-Control-Priorities}
+\end{center}
+\vfill
+
+## References {.allowframebreaks}
+
+\footnotesize
