@@ -10,8 +10,9 @@ output:
       in_header: beamer_preamble.tex
     keep_tex: true
     slide_level: 2
+classoption: "aspectratio=169"
 bibliography: references.bib
-csl: https://raw.githubusercontent.com/citation-style-language/styles/master/apa.csl
+csl: apa.csl
 link-citations: true
 nocite: |
   @Vollset2024, @ConsortiumRisk2023

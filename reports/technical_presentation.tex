@@ -1,0 +1,1412 @@
+% Options for packages loaded elsewhere
+\PassOptionsToPackage{unicode}{hyperref}
+\PassOptionsToPackage{hyphens}{url}
+\documentclass[
+  ignorenonframetext,
+  aspectratio=169]{beamer}
+\newif\ifbibliography
+\usepackage{pgfpages}
+\setbeamertemplate{caption}[numbered]
+\setbeamertemplate{caption label separator}{: }
+\setbeamercolor{caption name}{fg=normal text.fg}
+\beamertemplatenavigationsymbolsempty
+% remove section numbering
+\setbeamertemplate{part page}{
+  \centering
+  \begin{beamercolorbox}[sep=16pt,center]{part title}
+    \usebeamerfont{part title}\insertpart\par
+  \end{beamercolorbox}
+}
+\setbeamertemplate{section page}{
+  \centering
+  \begin{beamercolorbox}[sep=12pt,center]{section title}
+    \usebeamerfont{section title}\insertsection\par
+  \end{beamercolorbox}
+}
+\setbeamertemplate{subsection page}{
+  \centering
+  \begin{beamercolorbox}[sep=8pt,center]{subsection title}
+    \usebeamerfont{subsection title}\insertsubsection\par
+  \end{beamercolorbox}
+}
+% Prevent slide breaks in the middle of a paragraph
+\widowpenalties 1 10000
+\raggedbottom
+\AtBeginPart{
+  \frame{\partpage}
+}
+\AtBeginSection{
+  \ifbibliography
+  \else
+    \frame{\sectionpage}
+  \fi
+}
+\AtBeginSubsection{
+  \frame{\subsectionpage}
+}
+\usepackage{iftex}
+\ifPDFTeX
+  \usepackage[T1]{fontenc}
+  \usepackage[utf8]{inputenc}
+  \usepackage{textcomp} % provide euro and other symbols
+\else % if luatex or xetex
+  \usepackage{unicode-math} % this also loads fontspec
+  \defaultfontfeatures{Scale=MatchLowercase}
+  \defaultfontfeatures[\rmfamily]{Ligatures=TeX,Scale=1}
+\fi
+\usepackage{lmodern}
+\ifPDFTeX\else
+  % xetex/luatex font selection
+\fi
+% Use upquote if available, for straight quotes in verbatim environments
+\IfFileExists{upquote.sty}{\usepackage{upquote}}{}
+\IfFileExists{microtype.sty}{% use microtype if available
+  \usepackage[]{microtype}
+  \UseMicrotypeSet[protrusion]{basicmath} % disable protrusion for tt fonts
+}{}
+\makeatletter
+\@ifundefined{KOMAClassName}{% if non-KOMA class
+  \IfFileExists{parskip.sty}{%
+    \usepackage{parskip}
+  }{% else
+    \setlength{\parindent}{0pt}
+    \setlength{\parskip}{6pt plus 2pt minus 1pt}}
+}{% if KOMA class
+  \KOMAoptions{parskip=half}}
+\makeatother
+\usepackage{longtable,booktabs,array}
+\usepackage{calc} % for calculating minipage widths
+\usepackage{caption}
+% Make caption package work with longtable
+\makeatletter
+\def\fnum@table{\tablename~\thetable}
+\makeatother
+% definitions for citeproc citations
+\NewDocumentCommand\citeproctext{}{}
+\NewDocumentCommand\citeproc{mm}{%
+  \begingroup\def\citeproctext{#2}\cite{#1}\endgroup}
+\makeatletter
+ % allow citations to break across lines
+ \let\@cite@ofmt\@firstofone
+ % avoid brackets around text for \cite:
+ \def\@biblabel#1{}
+ \def\@cite#1#2{{#1\if@tempswa , #2\fi}}
+\makeatother
+\newlength{\cslhangindent}
+\setlength{\cslhangindent}{1.5em}
+\newlength{\csllabelwidth}
+\setlength{\csllabelwidth}{3em}
+\newenvironment{CSLReferences}[2] % #1 hanging-indent, #2 entry-spacing
+ {\begin{list}{}{%
+  \setlength{\itemindent}{0pt}
+  \setlength{\leftmargin}{0pt}
+  \setlength{\parsep}{0pt}
+  % turn on hanging indent if param 1 is 1
+  \ifodd #1
+   \setlength{\leftmargin}{\cslhangindent}
+   \setlength{\itemindent}{-1\cslhangindent}
+  \fi
+  % set entry spacing
+  \setlength{\itemsep}{#2\baselineskip}}}
+ {\end{list}}
+\usepackage{calc}
+\newcommand{\CSLBlock}[1]{\hfill\break\parbox[t]{\linewidth}{\strut\ignorespaces#1\strut}}
+\newcommand{\CSLLeftMargin}[1]{\parbox[t]{\csllabelwidth}{\strut#1\strut}}
+\newcommand{\CSLRightInline}[1]{\parbox[t]{\linewidth - \csllabelwidth}{\strut#1\strut}}
+\newcommand{\CSLIndent}[1]{\hspace{\cslhangindent}#1}
+\setlength{\emergencystretch}{3em} % prevent overfull lines
+\providecommand{\tightlist}{%
+  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+% ============================================================
+%  beamer_preamble.tex  
+%  - Default Beamer look + colored callout boxes
+%  - UW Purple accents for bullets/titles
+%  - Custom uncertaintyblock environment
+% ============================================================
+
+% -- Beamer theme (keep default look) ----------------------------------------
+\usetheme{default}
+\usecolortheme{default}
+\usefonttheme{professionalfonts}
+
+% -- XeLaTeX fonts (requires xelatex engine) ----------------------------------
+\usepackage{fontspec}
+\setmainfont{Calibri}[
+  BoldFont       = Calibri Bold,
+  ItalicFont     = Calibri Italic,
+  BoldItalicFont = Calibri Bold Italic
+]
+\setsansfont{Calibri}
+\setmonofont{Courier New}
+
+% -- Packages -----------------------------------------------------------------
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{soul}
+\usepackage{colortbl}
+\usepackage{array}
+\usepackage{graphicx}
+\usepackage{ragged2e}
+\usepackage{longtable}
+\usepackage{tabu}
+\usepackage{microtype}
+\usepackage{hyperref}
+\usepackage{tikz}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage[most]{tcolorbox}
+
+% -- Larger default font for donor/funder audience ----------------------------
+% Presentation is delivered live; increase base font size for readability.
+\setbeamerfont{normal text}{size=\large}
+\setbeamerfont{title}{size=\huge,series=\bfseries}
+\setbeamerfont{subtitle}{size=\Large}
+\setbeamerfont{frametitle}{size=\LARGE,series=\bfseries}
+\setbeamerfont{framesubtitle}{size=\large}
+\setbeamerfont{block title}{size=\large,series=\bfseries}
+\setbeamerfont{block title alerted}{size=\large,series=\bfseries}
+\setbeamerfont{block title example}{size=\large,series=\bfseries}
+\setbeamerfont{itemize/enumerate body}{size=\large}
+\setbeamerfont{itemize/enumerate subbody}{size=\normalsize}
+\setbeamerfont{caption}{size=\small}
+\AtBeginDocument{\large}
+
+% -- Project colour palette ---------------------------------------------------
+\definecolor{uwpurple}{HTML}{4B2E83}
+\definecolor{uwgold}{HTML}{85754D}
+\definecolor{rtslblue}{HTML}{2171B5}
+\definecolor{rtslgreen}{HTML}{74C476}
+\definecolor{rtslred}{HTML}{E31A1C}
+\definecolor{rtslpurple}{HTML}{6A3D9A}
+\definecolor{baugrey}{HTML}{999999}
+\definecolor{highlightblue}{HTML}{DBEAFE}
+\definecolor{uncertaintyyellow}{HTML}{FFF3CD}
+\definecolor{uncertaintyborder}{HTML}{856404}
+
+% -- Title & structure colors -------------------------------------------------
+\setbeamercolor{structure}{fg=uwpurple}
+\setbeamercolor{title}{fg=uwpurple}
+\setbeamercolor{subtitle}{fg=uwpurple}
+\setbeamercolor{author}{fg=black}
+\setbeamercolor{date}{fg=black}
+\setbeamercolor{institute}{fg=black}
+\setbeamercolor{frametitle}{fg=uwpurple}
+\setbeamercolor{normal text}{fg=black}
+
+% -- Colored blocks (callout boxes) -------------------------------------------
+% block = theme color (definitions)
+\setbeamercolor{block title}{bg=baugrey!15, fg=black}
+\setbeamercolor{block body}{bg=baugrey!6}
+
+% alertblock = red (open questions / pending decisions)
+\setbeamercolor{block title alerted}{bg=red!15, fg=red!70!black}
+\setbeamercolor{block body alerted}{bg=red!6}
+
+% exampleblock = green (key takeaways)
+\setbeamercolor{block title example}{bg=rtslgreen!18, fg=rtslgreen!80!black}
+\setbeamercolor{block body example}{bg=rtslgreen!6}
+
+% Custom: uncertaintyblock = amber (uncertainties / sensitivity caveats)
+\newenvironment{uncertaintyblock}[1]{%
+  \setbeamercolor{block title}{bg=uncertaintyyellow, fg=uncertaintyborder}%
+  \setbeamercolor{block body}{bg=uncertaintyyellow!30}%
+  \begin{block}{#1}%
+}{\end{block}}
+
+% -- tcolorbox callout environments -------------------------------------------
+% Additional palette colors for callout boxes
+\definecolor{insightblue}{HTML}{1E6FBA}
+\definecolor{insightbluebg}{HTML}{DBEAFE}
+\definecolor{methodgreen}{HTML}{16803C}
+\definecolor{methodgreenbg}{HTML}{DCFCE7}
+\definecolor{cautionamber}{HTML}{92400E}
+\definecolor{cautionamberbg}{HTML}{FEF3C7}
+\definecolor{takeawaygrey}{HTML}{374151}
+\definecolor{takeawaygreybg}{HTML}{F3F4F6}
+
+% Key Insight (blue)
+\newtcolorbox{keyinsight}[1][Key Insight]{%
+  colback=insightbluebg, colframe=insightblue,
+  coltitle=white, fonttitle=\bfseries\normalsize,
+  title={#1}, boxrule=0.8pt, arc=2pt,
+  left=4pt, right=4pt, top=2pt, bottom=2pt,
+  before skip=4pt, after skip=4pt}
+
+% Methods Note (green)
+\newtcolorbox{methodsnote}[1][Methods Note]{%
+  colback=methodgreenbg, colframe=methodgreen,
+  coltitle=white, fonttitle=\bfseries\normalsize,
+  title={#1}, boxrule=0.8pt, arc=2pt,
+  left=4pt, right=4pt, top=2pt, bottom=2pt,
+  before skip=4pt, after skip=4pt}
+
+% Caution / Pending (amber)
+\newtcolorbox{cautionbox}[1][Pending]{%
+  colback=cautionamberbg, colframe=cautionamber,
+  coltitle=white, fonttitle=\bfseries\normalsize,
+  title={#1}, boxrule=0.8pt, arc=2pt,
+  left=4pt, right=4pt, top=2pt, bottom=2pt,
+  before skip=4pt, after skip=4pt}
+
+% Takeaway (dark grey)
+\newtcolorbox{takeaway}[1][Takeaway]{%
+  colback=takeawaygreybg, colframe=takeawaygrey,
+  coltitle=white, fonttitle=\bfseries\normalsize,
+  title={#1}, boxrule=0.8pt, arc=2pt,
+  left=4pt, right=4pt, top=2pt, bottom=2pt,
+  before skip=4pt, after skip=4pt}
+
+% -- Bullet style -------------------------------------------------------------
+\setbeamertemplate{itemize item}{\textcolor{uwpurple}{\textbullet}}
+\setbeamertemplate{itemize subitem}{\textcolor{uwpurple}{--}}
+\setbeamertemplate{enumerate item}{\textcolor{uwpurple}{\insertenumlabel.}}
+
+% -- Footer -------------------------------------------------------------------
+% \setbeamertemplate{footline}{%
+%   \leavevmode
+%   \hbox{%
+%     \begin{beamercolorbox}[wd=0.45\paperwidth, ht=2.25ex, dp=1ex, left]{author in head/foot}%
+%       \hspace{1em}\usebeamerfont{author in head/foot}%
+%       \textcolor{black!60}{\footnotesize RTSL -- UW Assessment}%
+%     \end{beamercolorbox}%
+%     \begin{beamercolorbox}[wd=0.45\paperwidth, ht=2.25ex, dp=1ex, center]{title in head/foot}%
+%       \usebeamerfont{title in head/foot}%
+%       \textcolor{black!60}{\footnotesize NCD Program Impact}%
+%     \end{beamercolorbox}%
+%     \begin{beamercolorbox}[wd=0.10\paperwidth, ht=2.25ex, dp=1ex, right]{date in head/foot}%
+%       \usebeamerfont{date in head/foot}%
+%       \textcolor{black!60}{\footnotesize \insertframenumber{}/\inserttotalframenumber}%
+%       \hspace{0.5em}%
+%     \end{beamercolorbox}%
+%   }%
+%   \vskip0pt%
+% }
+\setbeamertemplate{navigation symbols}{}
+
+% -- Footer -------------------------------------------------------------------
+\setbeamertemplate{footline}{%
+  \leavevmode
+  \hbox{%
+    \begin{beamercolorbox}[wd=0.45\paperwidth, ht=2.25ex, dp=1ex, left]{author in head/foot}%
+      \hspace{1em}\usebeamerfont{author in head/foot}%
+      \textcolor{black!60}{\footnotesize RTSL -- UW Assessment}%
+    \end{beamercolorbox}%
+    \begin{beamercolorbox}[wd=0.45\paperwidth, ht=2.25ex, dp=1ex, center]{title in head/foot}%
+      \usebeamerfont{title in head/foot}%
+      \textcolor{black!60}{\footnotesize NCD Program Impact}%
+    \end{beamercolorbox}%
+    \begin{beamercolorbox}[wd=0.10\paperwidth, ht=2.25ex, dp=1ex, right]{date in head/foot}%
+      \usebeamerfont{date in head/foot}%
+      \textcolor{black!60}{\footnotesize \insertframenumber{}/\inserttotalframenumber}%
+      \hspace{0.5em}%
+    \end{beamercolorbox}%
+  }%
+  \vskip0pt%
+}
+\setbeamertemplate{navigation symbols}{}
+
+% -- UW logo in bottom-right corner of every slide ----------------------------
+% Uses tikz overlay so logo floats in the corner without pushing content.
+% Reserve a small bottom margin via footline to avoid overlap with slide body.
+% \setbeamertemplate{footline}{%
+%   \leavevmode\vspace*{0.9cm}%
+% }
+%
+% \addtobeamertemplate{background canvas}{}{%
+%   \begin{tikzpicture}[remember picture, overlay]
+%     \node[anchor=south east, xshift=-0.25cm, yshift=0.2cm]
+%       at (current page.south east)
+%       {\includegraphics[height=0.65cm,keepaspectratio]{uw-logo.png}};
+%   \end{tikzpicture}%
+% }
+
+
+\addtobeamertemplate{background canvas}{}{%
+  \begin{tikzpicture}[remember picture, overlay]
+    \node[anchor=south east, xshift=-0.25cm, yshift=0.2cm]
+      at (current page.south east)
+      {\includegraphics[height=0.65cm,keepaspectratio]{uw-logo.png}};
+  \end{tikzpicture}%
+}
+
+% -- Section slide (auto-generated by # headers) ------------------------------
+\AtBeginSection[]{%
+  \begin{frame}
+    \vfill
+    \centering
+    \begin{beamercolorbox}[sep=8pt, center, shadow=false, rounded=true]{block title}
+      \usebeamerfont{title}\insertsectionhead\par
+    \end{beamercolorbox}
+    \vfill
+  \end{frame}
+}
+\usepackage{bookmark}
+\IfFileExists{xurl.sty}{\usepackage{xurl}}{} % add URL line breaks if available
+\urlstyle{same}
+\hypersetup{
+  pdftitle={Indonesia NCD Simulation Model},
+  pdfauthor={RTSL / University of Washington},
+  hidelinks,
+  pdfcreator={LaTeX via pandoc}}
+
+\title{Indonesia NCD Simulation Model}
+\subtitle{Technical Overview --- CVD and Cancer Markov Frameworks}
+\author{RTSL / University of Washington}
+\date{May 17, 2026}
+
+\begin{document}
+\frame{\titlepage}
+
+\begin{frame}
+\end{frame}
+
+\section{Part 1 --- Project Overview}\label{part-1-project-overview}
+
+\begin{frame}{Background and Motivation}
+\phantomsection\label{background-and-motivation}
+\begin{itemize}
+\tightlist
+\item
+  Indonesia faces a growing NCD burden driven by population aging, high
+  smoking prevalence, rising obesity, and limited screening access
+\item
+  CVD and cancer together account for over 50\% of premature mortality
+  in Indonesia
+\item
+  Policy decisions require quantitative evidence on intervention
+  scale-up trajectories and their expected health and economic returns
+\end{itemize}
+
+\begin{keyinsight}[Why Markov?]
+Unlike system dynamics approaches (e.g., NCDSim), discrete-time Markov models allow transparent, state-by-state tracking of disease progression---making calibration to GBD and validation against observed rates straightforward.
+\end{keyinsight}
+\end{frame}
+
+\begin{frame}{Aims and Scope}
+\phantomsection\label{aims-and-scope}
+\textbf{Primary aim:} Project health and economic outcomes of NCD policy
+packages in Indonesia from 2025 to 2050.
+
+\medskip
+
+\textbf{Two independent disease modules:}
+
+\begin{enumerate}
+\tightlist
+\item
+  \textbf{CVD} --- IHD, ischemic stroke, hemorrhagic stroke,
+  hypertensive heart disease
+\item
+  \textbf{Cancer} --- 16 types from GBD 2021, in three analytic tiers
+\end{enumerate}
+
+\medskip
+
+\textbf{Policy levers modeled:}
+
+\begin{itemize}
+\tightlist
+\item
+  Hypertension control scale-up (HEARTS)
+\item
+  Sodium reduction
+\item
+  Trans-fat elimination
+\item
+  Statin coverage expansion
+\item
+  Cancer screening (cervical, colorectal, breast)
+\end{itemize}
+\end{frame}
+
+\begin{frame}[fragile]{Reproducible Research Workflow}
+\phantomsection\label{reproducible-research-workflow}
+\begin{center}
+\textbf{Inputs} $\rightarrow$ \textbf{Scenario Definitions} $\rightarrow$ \textbf{Model Outputs} $\rightarrow$ \textbf{Documentation} $\rightarrow$ \textbf{Reports}
+\end{center}
+
+\bigskip
+
+\begin{longtable}[]{@{}ll@{}}
+\toprule\noalign{}
+Stage & Source \\
+\midrule\noalign{}
+\endhead
+Raw data & GBD 2023, UNWPP 2024, IHME, NCD-RisC, ETIHAD \\
+Scenarios & \texttt{04\_define\_interventions.R} /
+\texttt{settings.yml} \\
+Simulation & Markov engine per module \\
+Post-processing & DALYs, VSL/VSLY calculations \\
+Reporting & Beamer slides, R Markdown, policy briefs \\
+\bottomrule\noalign{}
+\end{longtable}
+
+\begin{methodsnote}
+All scenario definitions are code-driven and version-controlled---no manual spreadsheet steps in the analytic pipeline.
+\end{methodsnote}
+\end{frame}
+
+\section{Part 2 --- Technical
+Infrastructure}\label{part-2-technical-infrastructure}
+
+\begin{frame}{Agentic Coding Approach}
+\phantomsection\label{agentic-coding-approach}
+\begin{itemize}
+\tightlist
+\item
+  Development assisted by Claude Code (Anthropic) for code generation,
+  review, and documentation
+\item
+  AI-assisted workflow embedded in version control via
+  \texttt{CLAUDE.md} project instructions
+\item
+  Enables rapid iteration on intervention logic and scenario definitions
+  while maintaining auditability
+\end{itemize}
+
+\begin{keyinsight}
+The agentic approach accelerates development of complex modules (e.g., 850+ line HTN control logic) while preserving human oversight through structured code review and calibration checks.
+\end{keyinsight}
+\end{frame}
+
+\begin{frame}{Reproducibility Infrastructure}
+\phantomsection\label{reproducibility-infrastructure}
+\textbf{What is currently in place:}
+
+\begin{itemize}
+\tightlist
+\item
+  Organized directory layout: \texttt{data/raw}, \texttt{data/interim},
+  \texttt{data/processed}
+\item
+  Configuration via \texttt{settings.yml} (cancer) and flag variables
+  (CVD)
+\item
+  Numbered script execution order (00--08 for CVD; 00--06 for cancer)
+\item
+  Intermediate \texttt{.rds} checkpoints at each pipeline stage
+\item
+  Remote function sourcing with local fallback paths
+\end{itemize}
+
+\medskip
+
+\textbf{Not yet in place:}
+
+\begin{itemize}
+\tightlist
+\item
+  No \texttt{renv.lock} --- dependencies installed manually
+\item
+  No formal seed control for stochastic components
+\item
+  No containerized environment (Docker)
+\end{itemize}
+
+\begin{cautionbox}[Reproducibility Gap]
+Adding \texttt{renv} lockfiles and a \texttt{Dockerfile} would close the main reproducibility gaps. These are planned but not yet implemented.
+\end{cautionbox}
+\end{frame}
+
+\begin{frame}{Version Control and GitHub Workflow}
+\phantomsection\label{version-control-and-github-workflow}
+\begin{itemize}
+\tightlist
+\item
+  Repository hosted on GitHub under \texttt{Disease-Control-Priorities}
+\item
+  Branch-based development with pull request reviews
+\item
+  \texttt{CLAUDE.md} serves as machine-readable project documentation,
+  checked into version control
+\item
+  Raw data files excluded via \texttt{.gitignore}; processed
+  \texttt{.rds} files tracked selectively
+\end{itemize}
+
+\begin{methodsnote}[Data Governance]
+Raw GBD/UNWPP data are not stored in the repository. Analysts must obtain them independently and place them in \texttt{data/raw/}.
+\end{methodsnote}
+\end{frame}
+
+\section{Part 3 --- Methodological
+Overview}\label{part-3-methodological-overview}
+
+\begin{frame}{Full Model Architecture}
+\phantomsection\label{full-model-architecture}
+\begin{center}
+\textbf{Population} $\rightarrow$ \textbf{Risk Factors} $\rightarrow$ \textbf{Disease Models} $\rightarrow$ \textbf{Outcomes}
+\end{center}
+
+\bigskip
+
+\small
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3056}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.2222}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.4722}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Component
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Status
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Key Data Source
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+Demography / Population & Scaffolding only & UNWPP 2024 \\
+Risk factor distributions & Implemented (CVD) & NCD-RisC, IHME DIET \\
+CVD natural history & Fully implemented & GBD 2023 \\
+Cancer natural history & Fully implemented & GBD 2021/2023 \\
+Health systems / treatment & Partial (coverage params) & ETIHAD,
+HEARTS \\
+Economic evaluation & Fully implemented & Robinson VSL, World Bank
+GNI \\
+Module integration & Separate pipelines & --- \\
+\bottomrule\noalign{}
+\end{longtable}
+
+\normalsize
+
+\begin{keyinsight}
+CVD and cancer modules run independently under a conditional independence assumption. No comorbidity interaction is modeled in v1.0.
+\end{keyinsight}
+\end{frame}
+
+\begin{frame}{Core Model Logic: CVD}
+\phantomsection\label{core-model-logic-cvd}
+\textbf{State space} (per age / sex / location / cause / year):
+
+\[\text{Susceptible} \rightarrow \text{Incident} \rightarrow \text{Prevalent} \rightarrow \text{Dead}\]
+
+\medskip
+
+\begin{itemize}
+\tightlist
+\item
+  Transition probabilities calibrated to GBD 2023 incidence, prevalence,
+  and mortality
+\item
+  Background mortality layered from UNWPP 2024 life tables
+\item
+  Secular trends in case fatality forecast via ARIMA (\texttt{forecast}
+  package)
+\end{itemize}
+
+\begin{methodsnote}
+Constraint enforced: $IR + BG_{mx} \leq 1$ for all age--sex--cause--year cells. Violations are flagged in \texttt{032\_adjustments.R} and corrected before simulation.
+\end{methodsnote}
+\end{frame}
+
+\begin{frame}{Core Model Logic: Cancer}
+\phantomsection\label{core-model-logic-cancer}
+\textbf{7-state Markov model} (per age / sex / location / cause / year):
+
+\[\text{Well} \rightarrow \text{Precancer} \rightarrow \text{Local} \rightarrow \text{Regional} \rightarrow \text{Distant} \rightarrow \text{Cancer Death}\]
+
+with absorbing background death state.
+
+\medskip
+
+\textbf{Three analytic tiers:}
+
+\begin{enumerate}
+\tightlist
+\item
+  \textbf{Tier 1} (11 cancers) --- Incidence/mortality only (no staging)
+\item
+  \textbf{Tier 2} (3 cancers) --- Staged: local, regional, distant
+\item
+  \textbf{Tier 3} (2 cancers) --- Precancerous lesions modeled (cervix,
+  CRC)
+\end{enumerate}
+
+\begin{methodsnote}
+Tier 3 cancers include screening interventions that shift stage distribution at diagnosis, directly affecting transition probabilities.
+\end{methodsnote}
+\end{frame}
+
+\begin{frame}{Intervention Logic}
+\phantomsection\label{intervention-logic}
+\textbf{CVD interventions} are applied multiplicatively to incidence
+rates:
+
+\[IR_{\text{treated}} = IR_{\text{baseline}} \times (1 - \text{coverage} \times RR_{\text{effect}})\]
+
+\medskip
+
+\textbf{Multi-intervention stacking order:}
+
+\begin{enumerate}
+\tightlist
+\item
+  Sodium \(\rightarrow\) BP distribution shift via
+  \texttt{get.bp.prob()} coefficients
+\item
+  Statins \(\rightarrow\) direct IR reduction (RR from meta-analyses)
+\item
+  TFA elimination \(\rightarrow\) IR reduction via \(RR = 1.28\) per 2\%
+  energy from TFA
+\item
+  HTN control \(\rightarrow\) ETIHAD-based RR per 10 mmHg BP reduction
+\end{enumerate}
+
+\medskip
+
+\textbf{Cancer interventions:} Screening coverage expansion shifts stage
+distribution at diagnosis, reducing late-stage presentation and
+improving survival.
+\end{frame}
+
+\begin{frame}{Economic Evaluation Framework}
+\phantomsection\label{economic-evaluation-framework}
+\textbf{Value of Statistical Life (VSL)} approach
+(\citeproc{ref-Robinson2019VSL}{Robinson et al., 2019}):
+
+\[VSL_{\text{country}} = VSL_{\text{base}} \times \left(\frac{GNI_{\text{country}}}{GNI_{\text{base}}}\right)^{\varepsilon}\]
+
+\medskip
+
+\begin{itemize}
+\tightlist
+\item
+  Three income elasticity scenarios: \(\varepsilon = 1.0, 1.2, 1.5\)
+  (primary: 1.2)
+\item
+  VSLY derived: \(VSLY = VSL / \bar{e}\) (average adult life expectancy)
+\item
+  GDP growth projections from SSP2 scenario
+\end{itemize}
+
+\begin{takeaway}
+Economic valuation converts deaths averted and DALYs prevented into monetary terms, enabling comparison across intervention packages and informing resource allocation decisions.
+\end{takeaway}
+\end{frame}
+
+\begin{frame}{How Modules Integrate}
+\phantomsection\label{how-modules-integrate}
+\textbf{Current state:} CVD and cancer pipelines run independently,
+producing separate outputs (deaths averted, DALYs, economic value).
+
+\medskip
+
+\textbf{Integration points:}
+
+\begin{itemize}
+\tightlist
+\item
+  Shared demographic inputs (UNWPP 2024 population, life tables)
+\item
+  Shared economic framework (VSL/VSLY methodology)
+\item
+  Common reporting templates (Beamer, R Markdown)
+\end{itemize}
+
+\medskip
+
+\textbf{Not yet integrated:}
+
+\begin{itemize}
+\tightlist
+\item
+  No joint population projection feeding both models
+\item
+  No comorbidity or competing-risk adjustment across CVD and cancer
+\item
+  No unified scenario configuration file
+\end{itemize}
+
+\begin{cautionbox}[Integration Pending]
+A formal integration layer---shared population module, unified scenario config, and joint output aggregation---is planned for v2.0.
+\end{cautionbox}
+\end{frame}
+
+\section{Part 4 --- CVD Module
+Walkthrough}\label{part-4-cvd-module-walkthrough}
+
+\begin{frame}[fragile]{CVD Pipeline Architecture}
+\phantomsection\label{cvd-pipeline-architecture}
+\small
+
+\begin{verbatim}
+00_run_model.R          (orchestrator + config flags)
+  |-- 01_utils.R        (BP control, TFA policy, age grouping)
+  |-- 02_load_inputs.R  (sources 021--023)
+  |   |-- 021_get_base_rates.R   (GBD 2023 extraction)
+  |   |-- 022_get_tps.R          (transition probabilities)
+  |   |-- 023_get_tps_bgmx.R     (background mortality trends)
+  |-- 03_calibration.R  (sources 031--032)
+  |   |-- 031_calibration.R      (calibrate to GBD)
+  |   |-- 032_adjustments.R      (IR + BG.mx <= 1)
+  |-- 04_define_interventions.R  (scenarios, ~57 KB)
+  |-- 05_build_baseline.R        (cohort assembly)
+  |-- 06_run_scenarios.R         (simulation engine, ~84 KB)
+  |-- 07_output_dalys.R          (YLL, YLD, DALYs)
+  |-- 08_economic_value_calculation.R  (VSL/VSLY)
+\end{verbatim}
+
+\normalsize
+
+\begin{keyinsight}
+Configuration flags in \texttt{00\_run\_model.R} allow skipping expensive stages when intermediate \texttt{.rds} files already exist.
+\end{keyinsight}
+\end{frame}
+
+\begin{frame}{CVD: Data Loading and Calibration}
+\phantomsection\label{cvd-data-loading-and-calibration}
+\textbf{Data sources ingested:}
+
+\begin{itemize}
+\tightlist
+\item
+  GBD 2023: cause-specific mortality, incidence, prevalence (4 CVD
+  causes)
+\item
+  UNWPP 2024: population by age/sex, life expectancy, fertility
+\item
+  NCD-RisC: historical blood pressure distributions (1990--2019)
+\item
+  IHME DIET: sodium intake estimates
+\end{itemize}
+
+\medskip
+
+\textbf{Calibration pipeline:}
+
+\begin{enumerate}
+\tightlist
+\item
+  Extract single-year age rates (20--95) from 5-year GBD groups via
+  interpolation
+\item
+  Compute transition probabilities from rate-to-probability conversions
+\item
+  Enforce \(IR + BG_{mx} \leq 1\) constraint; flag and correct
+  violations
+\item
+  Forecast secular trends in case fatality using ARIMA
+\end{enumerate}
+
+\begin{methodsnote}
+Inline validation: \texttt{print(anyNA(data.out))} after every merge/join in \texttt{021\_get\_base\_rates.R}.
+\end{methodsnote}
+\end{frame}
+
+\begin{frame}{CVD: Intervention Definitions}
+\phantomsection\label{cvd-intervention-definitions}
+\textbf{Four intervention families} defined in
+\texttt{04\_define\_interventions.R}:
+
+\small
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2826}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2174}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.1739}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.3261}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Intervention
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Scale-up
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Target
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Key Parameter
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+Sodium & Linear 2025--2030 & \(-15\%\) / \(-30\%\) & BP shift
+coefficients \\
+TFA & Linear to 0\% & Elimination & \(RR = 1.28\) per 2\% TFA \\
+Statins & Linear / logistic to 2050 & 60\% coverage & LDL meta-analysis
+RRs \\
+HTN control & Quadratic (NCD-RisC fit) & 3 scenarios & ETIHAD RRs per 10
+mmHg \\
+\bottomrule\noalign{}
+\end{longtable}
+
+\normalsize
+
+\medskip
+
+HTN control is the most complex module (\textasciitilde850 lines),
+fitting quadratic scale-up functions to historical NCD-RisC data and
+producing coverage trajectories (Business-as-usual, Progress,
+Aspirational).
+
+\begin{takeaway}
+Output: \texttt{covfxn2.csv} with columns for location, year, coverage scenario, absolute change, and annual rate of change.
+\end{takeaway}
+\end{frame}
+
+\begin{frame}{CVD: Simulation Engine}
+\phantomsection\label{cvd-simulation-engine}
+\texttt{06\_run\_scenarios.R} (\textasciitilde84 KB) is the primary
+simulation engine:
+
+\begin{itemize}
+\tightlist
+\item
+  Iterates over all age/sex/location/cause/year combinations
+\item
+  Applies intervention effects via coverage-adjusted relative risk
+  reductions
+\item
+  Supports parallel execution across intervention combinations
+\item
+  Outputs: deaths averted, incident cases prevented, prevalent cases
+\end{itemize}
+
+\medskip
+
+\textbf{Intervention stacking} applies effects sequentially to avoid
+double-counting:
+
+\begin{enumerate}
+\tightlist
+\item
+  Sodium \(\rightarrow\) shifts BP distribution (population-level)
+\item
+  Statins \(\rightarrow\) reduces IR directly (individual-level)
+\item
+  TFA \(\rightarrow\) reduces IR via RR (population-level)
+\item
+  HTN control \(\rightarrow\) applies ETIHAD RR to treated fraction
+\end{enumerate}
+
+\medskip
+
+\textit{Insert figure placeholder: \texttt{output/slides/cvd\_scenario\_comparison.png} --- Deaths averted by intervention package, 2025--2050}
+\end{frame}
+
+\begin{frame}{CVD: DALY and Economic Outputs}
+\phantomsection\label{cvd-daly-and-economic-outputs}
+\textbf{Burden calculation} (\texttt{07\_output\_dalys.R}):
+
+\begin{itemize}
+\tightlist
+\item
+  YLL = deaths \(\times\) residual life expectancy (UNWPP 2024)
+\item
+  YLD = prevalent cases \(\times\) GBD disability weights
+  (cause-specific)
+\item
+  DALYs = YLL + YLD, aggregated by age, sex, cause, year
+\end{itemize}
+
+\medskip
+
+\textbf{Economic valuation}
+(\texttt{08\_economic\_value\_calculation.R}, \textasciitilde42 KB):
+
+\begin{itemize}
+\tightlist
+\item
+  VSL calibrated to Indonesia GNI with income elasticity
+  \(\varepsilon = 1.2\)
+\item
+  GDP growth from SSP2 projections (IIASA)
+\item
+  Outputs: monetized value of deaths averted, DALYs prevented, cost per
+  DALY averted
+\end{itemize}
+
+\medskip
+
+\textit{Insert figure placeholder: \texttt{output/slides/cvd\_dalys\_averted.png} --- Cumulative DALYs averted by scenario}
+
+\textit{Insert figure placeholder: \texttt{output/slides/cvd\_economic\_value.png} --- Economic value of intervention packages}
+\end{frame}
+
+\section{Part 4 (cont.) --- Cancer Module
+Walkthrough}\label{part-4-cont.-cancer-module-walkthrough}
+
+\begin{frame}[fragile]{Cancer Pipeline Architecture}
+\phantomsection\label{cancer-pipeline-architecture}
+\small
+
+\begin{verbatim}
+library.R               (setup, loads packages + fnx/)
+  |
+  |-- fnx/              (23 reusable functions)
+  |   |-- project_markov_trace_dt.R  (core projection)
+  |   |-- calc_bsln_tps_dt.R        (baseline TPs)
+  |   |-- calc_intv_tps.R           (intervention TPs)
+  |   |-- calc_metric_dt.R          (GBD extraction)
+  |   |-- run_ccpm.R                (cohort component projection)
+  |   |-- gen_lifetable.R           (abridged life tables)
+  |   |-- process_intv_scen_inputs.R (scenario processing)
+  |   +-- [16 other helpers]
+  |
+  |-- scripts/          (numbered execution)
+      |-- 00_read_data.R
+      |-- 01_process_country_param.R
+      |-- 02_process_bsln_scen.R
+      |-- 03_process_pop_proj_bsln_dt.R
+      |-- 04_process_intv_scen.R
+      |-- 05_process_pop_proj_intv_dt.R
+      +-- 06_dissertation_output.R
+\end{verbatim}
+
+\normalsize
+\end{frame}
+
+\begin{frame}{Cancer: Three-Tier System}
+\phantomsection\label{cancer-three-tier-system}
+\textbf{16 cancer types} organized by analytic complexity:
+
+\medskip
+
+\textbf{Tier 1 --- Incidence/mortality only} (11 types): \small Uterine,
+esophageal, thyroid, stomach, liver, pancreatic, ovarian, bladder,
+lip/oral, nasopharynx, pharynx \normalsize
+
+\medskip
+
+\textbf{Tier 2 --- Staged} (3 types): \small Lung, prostate, breast
+(local \(\rightarrow\) regional \(\rightarrow\) distant) \normalsize
+
+\medskip
+
+\textbf{Tier 3 --- Precancerous lesions modeled} (2 types): \small
+Cervix, colorectal (well \(\rightarrow\) precancer \(\rightarrow\) local
+\(\rightarrow\) regional \(\rightarrow\) distant) \normalsize
+
+\begin{keyinsight}
+Tier 3 cancers are the primary targets for screening interventions, where early detection shifts stage distribution and reduces late-stage mortality.
+\end{keyinsight}
+\end{frame}
+
+\begin{frame}{Cancer: Core Markov Projection}
+\phantomsection\label{cancer-core-markov-projection}
+\texttt{project\_markov\_trace\_dt.R} implements the core engine:
+
+\begin{itemize}
+\tightlist
+\item
+  7\$\times\$7 transition probability matrix per (location, sex, cause,
+  year, age)
+\item
+  State vector: \texttt{pwell, pprc, plcl, prgn, pdst, pcdx, pbgdx}
+\item
+  Forward projection via matrix multiplication, year-by-year
+\item
+  Two absorbing states: cancer death, background death
+\item
+  Handles newborn cohort initialization for population projection
+\end{itemize}
+
+\begin{methodsnote}
+Transition probabilities are first computed at calibration years, then expanded to the full projection period via \texttt{expand\_tps\_years\_dt.R}. Matrix corrections enforced by \texttt{correct\_markov.R}.
+\end{methodsnote}
+\end{frame}
+
+\begin{frame}{Cancer: Key Functions}
+\phantomsection\label{cancer-key-functions}
+\small
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 2\tabcolsep) * \real{0.6250}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 2\tabcolsep) * \real{0.3750}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Function
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Role
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\texttt{calc\_bsln\_tps\_dt} & Baseline TPs from stage distributions +
+GBD rates \\
+\texttt{calc\_intv\_tps} & Modify TPs for intervention scenarios \\
+\texttt{calc\_metric\_dt} & Extract incidence/prevalence/mortality from
+GBD \\
+\texttt{run\_ccpm} & Cohort component population projection \\
+\texttt{gen\_lifetable} & Standard abridged life table
+(\(q_x, l_x, e_x, S_x\)) \\
+\texttt{process\_intv\_scen\_inputs} & Parse scenario YAML/Excel
+inputs \\
+\texttt{frp\_fnx} & Finite rate projection and RR adjustments \\
+\texttt{calc\_start\_hstate\_dist\_dt} & Initial health state
+distribution \\
+\texttt{id\_target\_cc\_methods} & Identify cervical cancer screening
+methods \\
+\bottomrule\noalign{}
+\end{longtable}
+
+\normalsize
+
+\medskip
+
+\textit{Insert figure placeholder: \texttt{output/slides/cancer\_markov\_trace.png} --- Example Markov trace for cervical cancer (Tier 3)}
+\end{frame}
+
+\begin{frame}{Cancer: Intervention Scenarios}
+\phantomsection\label{cancer-intervention-scenarios}
+\textbf{Screening interventions} processed by
+\texttt{process\_intv\_scen\_inputs.R} (\textasciitilde17 KB):
+
+\begin{itemize}
+\tightlist
+\item
+  Define target coverage, efficacy, and ramp-up schedule
+\item
+  Shift stage distribution at diagnosis (earlier detection)
+\item
+  Modify transition probabilities accordingly via
+  \texttt{calc\_intv\_tps}
+\end{itemize}
+
+\medskip
+
+\textbf{Population projection} via \texttt{run\_ccpm.R}:
+
+\begin{itemize}
+\tightlist
+\item
+  Cohort component model: aging, births, deaths by age/sex
+\item
+  Baseline and intervention projections run separately
+\item
+  Difference yields intervention-attributable outcomes
+\end{itemize}
+
+\medskip
+
+\textit{Insert figure placeholder: \texttt{output/slides/cancer\_stage\_shift.png} --- Stage distribution shift under screening scale-up}
+
+\begin{takeaway}
+Cancer outputs mirror the CVD structure: incident cases, deaths, DALYs under baseline vs.\ intervention, enabling consistent cross-module comparison.
+\end{takeaway}
+\end{frame}
+
+\section{Part 4 (cont.) --- Pending
+Modules}\label{part-4-cont.-pending-modules}
+
+\begin{frame}{Demography Module}
+\phantomsection\label{demography-module}
+\begin{cautionbox}[Module Pending]
+The \texttt{code/demography/} directory exists as a placeholder. No implementation is present.
+\end{cautionbox}
+
+\medskip
+
+\textbf{Planned scope:}
+
+\begin{itemize}
+\tightlist
+\item
+  Unified population projection feeding both CVD and cancer modules
+\item
+  Cohort construction with age/sex-specific mortality, fertility,
+  migration
+\item
+  Currently, each module handles demographics independently:
+
+  \begin{itemize}
+  \tightlist
+  \item
+    CVD: loads UNWPP data in \texttt{05\_build\_baseline.R}
+  \item
+    Cancer: uses \texttt{run\_ccpm.R} for cohort component projection
+  \end{itemize}
+\end{itemize}
+
+\medskip
+
+\textbf{Integration benefit:} A shared demography module would ensure
+consistent population denominators and avoid duplication.
+\end{frame}
+
+\begin{frame}{Shared Utilities}
+\phantomsection\label{shared-utilities}
+\begin{cautionbox}[Module Pending]
+The \texttt{code/utils/} directory exists as a placeholder. No shared utility functions are implemented.
+\end{cautionbox}
+
+\medskip
+
+\textbf{Candidate functions for extraction:}
+
+\begin{itemize}
+\tightlist
+\item
+  Rate \(\leftrightarrow\) probability converters (currently sourced
+  remotely in cancer module)
+\item
+  Age-group harmonization (5-year \(\leftrightarrow\) single-year)
+\item
+  GBD data loaders and standardizers
+\item
+  Common plotting themes and output formatters
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Health Systems Module}
+\phantomsection\label{health-systems-module}
+\begin{cautionbox}[Module Pending]
+No dedicated health systems module exists. Treatment and coverage parameters are embedded in intervention definitions.
+\end{cautionbox}
+
+\medskip
+
+\textbf{Current approach:}
+
+\begin{itemize}
+\tightlist
+\item
+  CVD: coverage trajectories defined in
+  \texttt{04\_define\_interventions.R} (quadratic fit to NCD-RisC
+  historical data)
+\item
+  Cancer: screening coverage targets defined in scenario YAML/Excel
+  inputs
+\end{itemize}
+
+\medskip
+
+\textbf{What a dedicated module could add:}
+
+\begin{itemize}
+\tightlist
+\item
+  Treatment adherence modeling
+\item
+  Health workforce constraints
+\item
+  Supply chain / medicine availability
+\item
+  Facility-level capacity modeling
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Comorbidity and Competing Risks}
+\phantomsection\label{comorbidity-and-competing-risks}
+\begin{cautionbox}[Not Modeled in v1.0]
+CVD and cancer modules assume conditional independence. No comorbidity interaction or formal competing-risk adjustment is implemented.
+\end{cautionbox}
+
+\medskip
+
+\textbf{Implication:}
+
+\begin{itemize}
+\tightlist
+\item
+  Deaths averted from one disease do not reduce the at-risk population
+  for the other
+\item
+  Summing CVD + cancer results may overestimate total impact
+\item
+  Acceptable for single-disease policy evaluation; requires adjustment
+  for combined NCD investment cases
+\end{itemize}
+
+\medskip
+
+\textbf{Planned for v2.0:} Shared population with competing-risk
+mortality across disease modules.
+\end{frame}
+
+\section{Part 5 --- Closing}\label{part-5-closing}
+
+\begin{frame}{Summary}
+\phantomsection\label{summary}
+\begin{takeaway}[Summary]
+\begin{itemize}
+  \item Population-based discrete-time Markov framework for Indonesia NCD policy evaluation (2025--2050)
+  \item CVD module: 4 causes, 4 intervention families, calibrated to GBD 2023
+  \item Cancer module: 16 types in 3 tiers, screening interventions for Tier 3
+  \item Economic evaluation via VSL/VSLY with income elasticity scenarios
+  \item Agentic coding approach accelerates development while preserving auditability
+\end{itemize}
+\end{takeaway}
+\end{frame}
+
+\begin{frame}{Next Steps and Pending Work}
+\phantomsection\label{next-steps-and-pending-work}
+\textbf{Near-term:}
+
+\begin{itemize}
+\tightlist
+\item
+  Finalize cancer intervention scenario definitions
+\item
+  Generate publication-ready output figures for all modules
+\item
+  Add \texttt{renv.lock} for dependency management
+\item
+  Populate \texttt{docs/diagrams/} with model workflow visualizations
+\end{itemize}
+
+\medskip
+
+\textbf{Medium-term:}
+
+\begin{itemize}
+\tightlist
+\item
+  Implement shared demography module
+\item
+  Build formal integration layer (unified scenario config, joint output
+  aggregation)
+\item
+  Add competing-risk adjustment for combined NCD estimates
+\end{itemize}
+
+\medskip
+
+\textbf{Longer-term:}
+
+\begin{itemize}
+\tightlist
+\item
+  Probabilistic sensitivity analysis (PSA)
+\item
+  Extend to additional NCD domains (diabetes, COPD)
+\item
+  Country adaptation toolkit for other LMICs
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Key References}
+\phantomsection\label{key-references}
+\small
+
+Core methodology and data:
+
+\begin{itemize}
+\tightlist
+\item
+  Pickersgill et al. (\citeproc{ref-Pickersgill2022}{2022}) --- Global
+  blood pressure target modeling
+\item
+  Kontis et al. (\citeproc{ref-Kontis2019}{2019}) --- Public health
+  interventions and lives saved
+\item
+  Robinson et al. (\citeproc{ref-Robinson2019VSL}{2019}) --- VSL
+  methodology for global benefit-cost analysis
+\item
+  Watkins et al. (\citeproc{ref-Watkins2025SPC}{2025}) --- Single-pill
+  combination therapies impact
+\end{itemize}
+
+\medskip
+
+Data sources:
+
+\begin{itemize}
+\tightlist
+\item
+  Chong et al. (\citeproc{ref-Chong2024}{2024}) --- Global CVD burden
+  projections
+\item
+  Filippini et al. (\citeproc{ref-Filippini2021}{2021}) ---
+  Sodium--blood pressure dose-response
+\item
+  Ettehad et al. (\citeproc{ref-Ettehad2016}{2016}) --- Blood pressure
+  lowering and CVD outcomes
+\end{itemize}
+\end{frame}
+
+\begin{frame}[plain]{}
+\phantomsection\label{section}
+\vfill
+\begin{center}
+{\huge \textcolor{uwpurple}{Thank You}}
+
+\bigskip
+
+{\large Questions and Discussion}
+
+\bigskip
+
+\small
+RTSL / University of Washington\\
+Disease Control Priorities\\
+\texttt{github.com/Disease-Control-Priorities}
+\end{center}
+\vfill
+\end{frame}
+
+\begin{frame}[allowframebreaks]{References}
+\phantomsection\label{references}
+\footnotesize
+
+\phantomsection\label{refs}
+\begin{CSLReferences}{1}{0}
+\bibitem[\citeproctext]{ref-Chong2024}
+Chong, B., Jayabaskaran, J., Jauhari, S. M., Chan, S. P., Goh, R., Kueh,
+M. T. W., Li, H., Chin, Y. H., Kong, G., Anand, V. V., Wang, J.-W.,
+Muthiah, M., Jain, V., Mehta, A., Lim, S. L., Foo, R., Figtree, G. A.,
+Nicholls, S. J., Mamas, M. A., \ldots{} Chan, M. Y. (2024). Global
+burden of cardiovascular diseases: Projections from 2025 to 2050.
+\emph{European Journal of Preventive Cardiology}.
+\url{https://doi.org/10.1093/EURJPC/ZWAE281}
+
+\bibitem[\citeproctext]{ref-Ettehad2016}
+Ettehad, D., Emdin, C. A., Kiran, A., Anderson, S. G., Callender, T.,
+Emberson, J., Chalmers, J., Rodgers, A., \& Rahimi, K. (2016). Blood
+pressure lowering for prevention of cardiovascular disease and death: A
+systematic review and meta-analysis. \emph{The Lancet}, \emph{387},
+957--967.
+\url{https://doi.org/10.1016/S0140-6736(15)01225-8/ATTACHMENT/603C0742-74C8-441A-9C4C-C02740B35023/MMC1.PDF}
+
+\bibitem[\citeproctext]{ref-Filippini2021}
+Filippini, T., Malavolti, M., Whelton, P. K., Naska, A., Orsini, N., \&
+Vinceti, M. (2021). Blood pressure effects of sodium reduction:
+Dose--response meta-analysis of experimental studies.
+\emph{Circulation}, \emph{143}, 1542.
+\url{https://doi.org/10.1161/CIRCULATIONAHA.120.050371}
+
+\bibitem[\citeproctext]{ref-ConsortiumRisk2023}
+Global Cardiovascular Risk Consortium", "The. (2023). Global effect of
+modifiable risk factors on cardiovascular disease and mortality.
+\emph{New England Journal of Medicine}, \emph{389}, 1273--1285.
+\url{https://doi.org/10.1056/NEJMOA2206916/SUPPL_FILE/NEJMOA2206916_DISCLOSURES.PDF}
+
+\bibitem[\citeproctext]{ref-Kontis2019}
+Kontis, V., Cobb, L. K., Mathers, C. D., Frieden, T. R., Ezzati, M., \&
+Danaei, G. (2019). Three public health interventions could save 94
+million lives in 25 years. \emph{Circulation}, \emph{140}, 715--725.
+\url{https://doi.org/10.1161/CIRCULATIONAHA.118.038160}
+
+\bibitem[\citeproctext]{ref-Pickersgill2022}
+Pickersgill, S. J., Msemburi, W. T., Cobb, L., Ide, N., Moran, A. E.,
+Su, Y., Xu, X., \& Watkins, D. A. (2022). Modeling global 80-80-80 blood
+pressure targets and cardiovascular outcomes. \emph{Nature Medicine},
+\emph{28}, 1693--1699. \url{https://doi.org/10.1038/s41591-022-01890-4}
+
+\bibitem[\citeproctext]{ref-Robinson2019VSL}
+Robinson, L. A., Hammitt, J. K., \& O'Keeffe, L. (2019). Valuing
+mortality risk reductions in global benefit-cost analysis. \emph{Journal
+of Benefit-Cost Analysis}, \emph{10}(S1), 15--50.
+\url{https://doi.org/10.1017/bca.2018.26}
+
+\bibitem[\citeproctext]{ref-Vollset2024}
+Vollset, S. E., Ababneh, H. S., Abate, Y. H., Abbafati, C.,
+Abbasgholizadeh, R., Abbasian, M., Abbastabar, H., Magied, A. H. A. A.
+A., ElHafeez, S. A., Abdelkader, A., Abdelmasseh, M., Abd-Elsalam, S.,
+Abdi, P., Abdollahi, M., Abdoun, M., Abdullahi, A., Abebe, M., Abiodun,
+O., Aboagye, R. G., \ldots{} Murray, C. J. L. (2024). Burden of disease
+scenarios for 204 countries and territories, 2022--2050: A forecasting
+analysis for the global burden of disease study 2021. \emph{The Lancet},
+\emph{403}, 2204--2256.
+\url{https://doi.org/10.1016/S0140-6736(24)00685-8/ATTACHMENT/92EF98AF-7EAF-4FFE-B0DE-C943208CF6F1/MMC3.PDF}
+
+\bibitem[\citeproctext]{ref-Watkins2025SPC}
+Watkins, D. A., Pickersgill, S. J., Flood, D., Gaziano, T. A., Huffman,
+M. D., Islam, S., Joseph, P., Malekzadeh, R., Perel, P., Piñeiro, D. J.,
+Pinto, F. J., \& Yusuf, S. (2025). Global impact of single-pill
+combination therapies on cardiovascular mortality and events, 2023-2050:
+A modeling study. \emph{JACC}.
+\href{https://doi.org/To\%20be\%20assigned}{https://doi.org/To be
+assigned}
+
+\end{CSLReferences}
+\end{frame}
+
+\end{document}
