@@ -33,6 +33,9 @@
 \usepackage{microtype}
 \usepackage{hyperref}
 \usepackage{tikz}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage[most]{tcolorbox}
 
 % -- Larger default font for donor/funder audience ----------------------------
 % Presentation is delivered live; increase base font size for readability.
@@ -91,6 +94,49 @@
   \begin{block}{#1}%
 }{\end{block}}
 
+% -- tcolorbox callout environments -------------------------------------------
+% Additional palette colors for callout boxes
+\definecolor{insightblue}{HTML}{1E6FBA}
+\definecolor{insightbluebg}{HTML}{DBEAFE}
+\definecolor{methodgreen}{HTML}{16803C}
+\definecolor{methodgreenbg}{HTML}{DCFCE7}
+\definecolor{cautionamber}{HTML}{92400E}
+\definecolor{cautionamberbg}{HTML}{FEF3C7}
+\definecolor{takeawaygrey}{HTML}{374151}
+\definecolor{takeawaygreybg}{HTML}{F3F4F6}
+
+% Key Insight (blue)
+\newtcolorbox{keyinsight}[1][Key Insight]{%
+  colback=insightbluebg, colframe=insightblue,
+  coltitle=white, fonttitle=\bfseries\normalsize,
+  title={#1}, boxrule=0.8pt, arc=2pt,
+  left=4pt, right=4pt, top=2pt, bottom=2pt,
+  before skip=4pt, after skip=4pt}
+
+% Methods Note (green)
+\newtcolorbox{methodsnote}[1][Methods Note]{%
+  colback=methodgreenbg, colframe=methodgreen,
+  coltitle=white, fonttitle=\bfseries\normalsize,
+  title={#1}, boxrule=0.8pt, arc=2pt,
+  left=4pt, right=4pt, top=2pt, bottom=2pt,
+  before skip=4pt, after skip=4pt}
+
+% Caution / Pending (amber)
+\newtcolorbox{cautionbox}[1][Pending]{%
+  colback=cautionamberbg, colframe=cautionamber,
+  coltitle=white, fonttitle=\bfseries\normalsize,
+  title={#1}, boxrule=0.8pt, arc=2pt,
+  left=4pt, right=4pt, top=2pt, bottom=2pt,
+  before skip=4pt, after skip=4pt}
+
+% Takeaway (dark grey)
+\newtcolorbox{takeaway}[1][Takeaway]{%
+  colback=takeawaygreybg, colframe=takeawaygrey,
+  coltitle=white, fonttitle=\bfseries\normalsize,
+  title={#1}, boxrule=0.8pt, arc=2pt,
+  left=4pt, right=4pt, top=2pt, bottom=2pt,
+  before skip=4pt, after skip=4pt}
+
 % -- Bullet style -------------------------------------------------------------
 \setbeamertemplate{itemize item}{\textcolor{uwpurple}{\textbullet}}
 \setbeamertemplate{itemize subitem}{\textcolor{uwpurple}{--}}
@@ -106,7 +152,7 @@
 %     \end{beamercolorbox}%
 %     \begin{beamercolorbox}[wd=0.45\paperwidth, ht=2.25ex, dp=1ex, center]{title in head/foot}%
 %       \usebeamerfont{title in head/foot}%
-%       \textcolor{black!60}{\footnotesize CVD Program Impact}%
+%       \textcolor{black!60}{\footnotesize NCD Program Impact}%
 %     \end{beamercolorbox}%
 %     \begin{beamercolorbox}[wd=0.10\paperwidth, ht=2.25ex, dp=1ex, right]{date in head/foot}%
 %       \usebeamerfont{date in head/foot}%
@@ -128,7 +174,7 @@
     \end{beamercolorbox}%
     \begin{beamercolorbox}[wd=0.45\paperwidth, ht=2.25ex, dp=1ex, center]{title in head/foot}%
       \usebeamerfont{title in head/foot}%
-      \textcolor{black!60}{\footnotesize CVD Program Impact}%
+      \textcolor{black!60}{\footnotesize NCD Program Impact}%
     \end{beamercolorbox}%
     \begin{beamercolorbox}[wd=0.10\paperwidth, ht=2.25ex, dp=1ex, right]{date in head/foot}%
       \usebeamerfont{date in head/foot}%
