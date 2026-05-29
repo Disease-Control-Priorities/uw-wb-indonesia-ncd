@@ -377,4 +377,8 @@ rm(list = ls()[sapply(ls(), function(x) is.data.frame(get(x)))])
 #rm(is,j,locs)
 
 
+##  Incident rates from GBD
+
+## https://collab2023.healthdata.org/gbd-results?params=gbd-api-2023-permalink/6e31df864b55737aa223f47834aedda1
+
 

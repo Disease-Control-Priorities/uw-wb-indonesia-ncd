@@ -44,11 +44,11 @@ source("01_utils.R")
 
 run_calibration_par <- TRUE # set to TRUE to run parallel calibration
 
-run_adjustment_model <- TRUE # set to TRUE to run adjustment model
+run_adjustment_model <- FALSE # set to TRUE to run adjustment model
 
 run_aod_par <- FALSE # set to TRUE to run model with dementia
 
-run_adjustments_inputs <- TRUE
+run_adjustments_inputs <- FALSE
 
 run_bgmx_trend <- TRUE
 
@@ -120,6 +120,7 @@ source("06_run_scenarios_indonesia.R")
 # 07. Run Burden of Disease ----
 #...........................................................
 
+setwd(paste0(wd_code,"cvd/"))
 source("07_output_dalys.R")
 
 #...........................................................

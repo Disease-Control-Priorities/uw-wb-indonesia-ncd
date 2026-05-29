@@ -97,3 +97,40 @@ reports/beamer_preamble.tex — modified if needed
 reports/references.bib — if you introduce citations and no bib file exists
 
 Confirm the Rmd knits cleanly by checking syntax carefully (don't actually render unless you have LaTeX available). When done, give me a brief summary of: what you found in the codebase, what callout styles you defined, what placeholders I need to fill in, and what's still pending.
+
+
+###################################################################
+###################################################################33
+
+I'm attaching 09_validation_indonesia.R. Please modify only this file (located in code/cvd/) to implement the validation analysis it outlines. Do not create, modify, or touch any other files in the repository.
+The script should perform validation analysis comparing mortality cases and rates (non-standardized) across data sources, by sex, for ages 20+. Specifically:
+Data inputs to wire up:
+
+Model outputs — already loaded from out_model/ (.rds files), filtered to intervention == "baseline" and scenario == "baseline". Covers 2017–2050.
+GBD — already loaded from temp_1baseline_rates_gbd23.rds. Covers 1990–2023.
+UNWPP — fix lines 26 and 28: the file paths are pasted as raw unquoted Windows paths. Read them properly using readxl::read_excel() with paths constructed from wd_raw (e.g., paste0(wd_raw, "unwpp/WPP2024_MORT_F01_2_DEATHS_SINGLE_AGE_MALE.xlsx")). Use the Estimates sheet for 1950–2023 and the Medium variant sheet for 2024–2050, then bind them. Covers 1990–2050 after filtering.
+
+Plots to produce (ggplot2, saved to the output/ folder, one file per plot, sensible names):
+Section 1 — Model vs GBD:
+
+CVD death counts, 2017–2050 vs GBD 1990–2023, by sex
+CVD mortality rates, 2017–2050 vs GBD 1990–2023, by sex
+CVD death counts by sex and 5-year age group, for years 2020, 2030, 2040, 2050
+CVD mortality rates by sex and 5-year age group, for years 2020, 2030, 2040, 2050
+All-cause (CVD + background) death counts, 2017–2050 vs GBD 1990–2023
+All-cause (CVD + background) mortality rates, 2017–2050 vs GBD 1990–2023
+
+Section 2 — Model vs GBD vs UNWPP:
+
+All-cause death counts, 2017–2050 vs GBD 1990–2023 vs UNWPP 1990–2050
+All-cause mortality rates, 2017–2050 vs GBD 1990–2023 vs UNWPP 1990–2050
+CVD death counts by sex and 5-year age group (model vs GBD), every 10 years
+CVD mortality rates by sex and 5-year age group (model vs GBD), every 10 years
+
+Constraints:
+
+Restrict all comparisons to ages 20+.
+Use a consistent color/linetype mapping for sources (Model / GBD / UNWPP) across all plots.
+Use data.table syntax consistent with the rest of the script.
+Assume wd_outp, wd_raw, and required packages (data.table, ggplot2, readxl) are already set up upstream — do not re-define them, but do add any missing library() calls at the top if needed.
+Keep the existing comments as section headers; replace the placeholder lines with working code.
