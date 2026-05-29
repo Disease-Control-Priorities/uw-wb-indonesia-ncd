@@ -28,12 +28,13 @@ dt_gbd_rr[, cause := fcase(
   `Risk-Outcome` == "Ischaemic stroke", "istroke",
   `Risk-Outcome` == "Intracerebral hemorrhage", "hstroke",
   `Risk-Outcome` == "Hypertensive heart disease", "hhd",
-  `Risk-Outcome` == "Rheumatic heart disease", "rhd",
-  `Risk-Outcome` == "Other cardiomyopathy", "cmd", # ??Cardiomyopathy and myocarditis not a category in RR, so using this
+  # `Risk-Outcome` == "Rheumatic heart disease", "rhd",
+  # `Risk-Outcome` == "Other cardiomyopathy", "cmd", # ??Cardiomyopathy and myocarditis not a category in RR, so using this
   default = NA_character_
 )]
 dt_gbd_rr[, `Risk-Outcome` := NULL]
-dt_gbd_rr <- dt_gbd_rr[cause %in% c("ihd", "istroke", "hstroke", "hhd","rhd","cmd")]
+#dt_gbd_rr <- dt_gbd_rr[cause %in% c("ihd", "istroke", "hstroke", "hhd","rhd","cmd")]
+dt_gbd_rr <- dt_gbd_rr[cause %in% c("ihd", "istroke", "hstroke", "hhd")]
 
 # Expand age groups to single years
 expand_age <- function(age_group) {

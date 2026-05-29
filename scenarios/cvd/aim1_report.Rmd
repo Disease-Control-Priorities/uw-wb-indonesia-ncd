@@ -63,7 +63,9 @@ cause_map <- c(
   ihd     = "Ischemic heart disease",
   istroke = "Ischemic stroke",
   hstroke = "Intracerebral hemorrhage",
-  hhd     = "Hypertensive heart disease"
+  hhd     = "Hypertensive heart disease",
+  rhd     = "Rheumatic heart disease",
+  cmd     = "Cardiomyopathy and myocarditis"
 )
 
 # ---- Intervention display labels --------------------------------------------
@@ -119,14 +121,18 @@ cause_cols <- c(
   ihd     = "#56B4E9",
   istroke = "#CC79A7",
   hstroke = "#F0E442",
-  hhd     = "#E69F00"
+  hhd     = "#E69F00",
+  rhd     = "#0072B2",
+  cmd     = "#D55E00"
 )
 
 cause_labels_plot <- c(
   ihd     = "Ischemic heart disease",
   istroke = "Ischemic stroke",
   hstroke = "Intracerebral hemorrhage",
-  hhd     = "Hypertensive heart disease"
+  hhd     = "Hypertensive heart disease",
+  rhd     = "Rheumatic heart disease",
+  cmd     = "Cardiomyopathy and myocarditis"
 )
 
 # ---- WHO standard population (ages 20-95+) for ASMR -------------------------
@@ -492,6 +498,8 @@ asmr_cause[, cause_lbl := fcase(
   cause == "istroke", "Ischemic stroke",
   cause == "hstroke", "Intracerebral hemorrhage",
   cause == "hhd",     "Hypertensive heart disease",
+  cause == "rhd",     "Rheumatic heart disease",
+  cause == "cmd",     "Cardiomyopathy and myocarditis",
   default = cause
 )]
 
@@ -636,6 +644,8 @@ dt_tab2[, cause_lbl := fcase(
   cause == "istroke", "Ischemic stroke",
   cause == "hstroke", "Intracerebral hemorrhage",
   cause == "hhd",     "Hypertensive heart disease",
+  cause == "rhd",     "Rheumatic heart disease",
+  cause == "cmd",     "Cardiomyopathy and myocarditis",
   default = cause
 )]
 

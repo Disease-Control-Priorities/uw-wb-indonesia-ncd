@@ -107,14 +107,14 @@ source("04_define_interventions.R")
 # 05. build baseline ----
 #...........................................................
 
-source("05_build_baseline.R")
+source("05_build_baseline_indonesia.R")
 
 #...........................................................
 # 06. Run model ----
 #...........................................................
 
 # Run CVD multiple interventions
-source("06_run_scenarios_multiple.R")
+source("06_run_scenarios_indonesia.R")
 
 #...........................................................
 # 07. Run Burden of Disease ----
