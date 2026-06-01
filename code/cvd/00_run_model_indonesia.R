@@ -114,6 +114,7 @@ source("05_build_baseline_indonesia.R")
 #...........................................................
 
 # Run CVD multiple interventions
+setwd(paste0(wd_code,"cvd/"))
 source("06_run_scenarios_indonesia.R")
 
 #...........................................................
@@ -126,7 +127,12 @@ source("07_output_dalys.R")
 #...........................................................
 # 08. Run Economic Value ----
 #...........................................................
-
+setwd(paste0(wd_code,"cvd/"))
 source("08_economic_value_calculation.R")
 
 
+#...........................................................
+# 09. Run Validation ----
+#...........................................................
+setwd(paste0(wd_code,"cvd/"))
+source("09_validation_indonesia.R")

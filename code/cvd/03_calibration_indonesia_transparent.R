@@ -123,7 +123,7 @@ SEARCH_HALFWIDTH <- 0.50
 
 # Granularity of the multipliers. "combo" = PRIMARY (one IR + one CF per
 # location-sex-cause). "age_group" = SENSITIVITY (per 5-year age group).
-GRANULARITY <- "combo"          # "combo" (primary) | "age_group" (sensitivity)
+GRANULARITY <- "age_group"          # "combo" (primary) | "age_group" (sensitivity)
 
 ## --- search ALGORITHM (stochastic hill-climb / (1+1) strategy) --------------
 N_ITER           <- 400         # max perturbation iterations per combo

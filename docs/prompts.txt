@@ -134,3 +134,116 @@ Use a consistent color/linetype mapping for sources (Model / GBD / UNWPP) across
 Use data.table syntax consistent with the rest of the script.
 Assume wd_outp, wd_raw, and required packages (data.table, ggplot2, readxl) are already set up upstream — do not re-define them, but do add any missing library() calls at the top if needed.
 Keep the existing comments as section headers; replace the placeholder lines with working code.
+
+#############################################################
+#############################################################
+Calibration Algorithm
+
+# Task: Build a transparent, single-pass calibration script for the Indonesia NCD/CVD model
+
+## Context
+This is a multi-state (well–sick–dead) Markov NCD/CVD model for Indonesia (and other 
+locations). Disease dynamics are driven by two transition probabilities per 
+location-sex-cause-age-year cell:
+  - IR = incidence rate (well -> sick)
+  - CF = case fatality (sick -> dead)
+Background mortality is BG.mx (sick) and BG.mx.all (well/pop). The model projects 
+states forward one year at a time using the recursion in `031_calibration_indonesia.R`:
+  sick'   = sick*(1-(CF+BG.mx)) + well*IR
+  dead'   = sick*CF
+  pop'    = pop - all.mx
+  all.mx' = sum(dead') + pop'*BG.mx.all
+  well'   = pop' - all.mx' - sick'
+Targets are GBD Deaths (fatal) and Prevalence (non-fatal), aggregated to 5-year age 
+groups, years ~2009/2010–2019. Fatal error is weighted 2x non-fatal in the objective 
+(error = 2*RMSE_deaths + RMSE_prev).
+
+## Problem with the current approach (what reviewers flagged)
+The current pipeline calibrates in TWO stages with arbitrary, hard-coded magic numbers:
+  - `031_calibration_indonesia.R`: a ±5% grid search over IRadjust/CFadjust 
+    (i in -5:5, j in -5:5), picking the best multiplier per cell.
+  - `032_adjustments_indonesia.R`: a SEPARATE post-hoc "adjustments" pass with a 
+    different, asymmetric grid (IRmult down 0–20%, CFmult down 0–50%), i.e. the 
+    "40%/50% when mortality exceeded observed" step.
+Reviewers correctly note: Why 5%? Why 40–50%? The split logic is opaque, the grid 
+bounds are arbitrary, and results depend on the chosen percentages. We need ONE 
+explicit, auditable calibration with a defensible, documented search over the actual 
+parameters — not two stacked ad-hoc multiplier grids.
+
+## What to build
+Create a NEW file in the code/ folder:
+  `03_calibration_indonesia_transparent.R`
+DO NOT modify or overwrite `031_calibration_indonesia.R`, `032_adjustments_indonesia.R`, 
+or any existing script. First read the existing code/ folder to match conventions: 
+the working-directory variables (`wd`, `wd_data`, `wd_temp`, `wd_raw`), input file 
+patterns (`tps_inpt*`, `PopulationsAge20_full.csv`, GBD 
+`temp_1baseline_rates_gbd23.rds`, `locs.rds`), the `state.transition` recursion, the 
+age-group matching table, and the cause codes (ihd, istroke, hstroke, hhd, aod).
+
+## Required design (mirror the cancer `calibration.R` logic, adapt to well-sick-dead)
+Use the structure of the provided cancer-model `calibration.R` as the template:
+  1. Calibrate each location–sex–cause combination INDEPENDENTLY in a single loop 
+     (like `calibrate_by_combo`).
+  2. Per combo, run an iterative search that perturbs the parameters, projects the 
+     full Markov trace forward, computes a weighted error vs GBD targets 
+     (like `calc_combo_error_fast`, keeping the 2x fatal weighting), and keeps the 
+     best-fitting parameter set. Use early stopping on convergence / no-improvement, 
+     and a fixed seed for reproducibility.
+  3. Replace the two arbitrary multiplier grids with ONE transparent search over the 
+     calibration parameters. Prefer age-resolved multiplicative adjustment factors on 
+     IR and CF (analogous to the cancer model's per-age `adj_factor`/`dst_adj_factor`), 
+     sampled from an explicit, documented, symmetric range (state the range as a 
+     tunable argument at the top of the script with a comment justifying it — do NOT 
+     bury 0.05 / 0.40 / 0.50 constants in the loop). Make the search bounds, number of 
+     iterations, and weights named parameters at the top of the file.
+
+Important: In this model, `IR` may be named as an incidence rate in the input files, but it is used in the transition equation as an annual transition probability from well to sick. Therefore the calibrated `IR` must be treated as a probability and constrained accordingly.
+
+Implement two calibration granularities:
+  - Default/primary: one IR multiplier vector and one CF multiplier vector per location–sex–cause combination, optionally age-smoothed or age-resolved within the combo.
+  - Sensitivity: more flexible age-group-specific multipliers by location–sex–cause–age_group.
+
+Prefer the primary approach unless the fit is clearly inadequate.
+
+## Hard constraints (MUST hold — these are probabilities and transition rows)
+IR and CF are transition probabilities and each cell forms a valid transition row:
+  - After every adjustment: 0 <= IR <= 1, 0 <= CF <= 1 (NA -> 0).
+  - The "well" outflow row must stay valid: IR + BG.mx <= 1.
+  - The "sick" outflow row must stay valid: CF + BG.mx <= 1.
+  When an adjustment would push a row sum over 1, renormalize the competing hazards so 
+  the row remains a valid probability distribution (see the proportional renormalization 
+  logic in `032_adjustments_indonesia.R` lines ~46–55: scale IR/CF and BG.mx by their 
+  shares, with a small epsilon buffer), rather than naive clipping where possible. 
+  Document this step clearly.
+
+When an adjustment would push a row sum over 1, prefer preserving the externally supplied background mortality (`BG.mx`) and reducing the calibrated disease transition probability so that:
+  IR_cal <= 1 - BG.mx - eps
+  CF_cal <= 1 - BG.mx - eps
+
+Only use proportional renormalization of disease transition and background mortality as a fallback if required to match the existing model logic, and clearly document whenever BG.mx is modified.
+
+## Output contract (must feed `06_run_scenarios_indonesia.R` unchanged)
+The end product must be a drop-in replacement for what `031` produces — i.e. a 
+calibrated `b_rates` object with IR and CF already adjusted to their final calibrated 
+values, same columns/schema as the existing `tps_inpt*` / `adjusted_searo_part*.rds` 
+files that `06` consumes (year, location, sex, age, cause, IR, CF, BG.mx, BG.mx.all, 
+PREVt0, DIS.mx.t0, ALL.mx, and any other fields the existing files carry). Save it in 
+the same location/format and chunking the existing pipeline expects (e.g. 
+`adjusted_searo_part{i}.rds` in `wd_data`, or whatever `06` actually reads in — verify 
+by inspecting the upstream `05_*` script that builds `b_rates`/`data.in`). Also write 
+out the per-combo calibrated adjustment factors and a fit-diagnostics table (RMSE_deaths, 
+RMSE_prev, error per location-sex-cause-age_group) so the calibration is auditable, 
+analogous to `adjustments2023_age.csv`.
+
+## Deliverables
+  1. `03_calibration_indonesia_transparent.R` — runnable, parallelizable over location 
+     groups like `031` (foreach/doParallel), with all tunable constants surfaced and 
+     commented at the top.
+  2. Inline comments at each design decision explaining WHY (especially the search 
+     bounds and the renormalization), so a reviewer can audit it without guessing.
+  3. A short header block documenting: the objective function, the search space, the 
+     probability/row constraints enforced, and how this replaces the 031+032 split.
+
+Validate before finishing: confirm all calibrated IR, CF in [0,1]; IR+BG.mx <= 1; 
+CF+BG.mx <= 1; no NAs introduced; row counts and schema match the existing 031 output; 
+and print a summary of fit RMSE so I can compare against the old approach.
