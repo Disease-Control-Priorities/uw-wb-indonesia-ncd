@@ -1,0 +1,193 @@
+location,sex,cause,age.group,ir_mult,cf_mult,granularity
+Indonesia,Female,Cardiomyopathy and myocarditis,20-24 years,1.18898834357969,1.20685151126236,age_group
+Indonesia,Female,Cardiomyopathy and myocarditis,25-29 years,1.38877564691938,0.753995741019025,age_group
+Indonesia,Female,Cardiomyopathy and myocarditis,30-34 years,1.39457880565897,1.21568445209414,age_group
+Indonesia,Female,Cardiomyopathy and myocarditis,35-39 years,1.42571793450043,0.698831373360008,age_group
+Indonesia,Female,Cardiomyopathy and myocarditis,40-44 years,0.854320337995887,1.19497863436118,age_group
+Indonesia,Female,Cardiomyopathy and myocarditis,45-49 years,1.10009178891778,0.987990622874349,age_group
+Indonesia,Female,Cardiomyopathy and myocarditis,50-54 years,0.750870505115017,0.53871838352643,age_group
+Indonesia,Female,Cardiomyopathy and myocarditis,55-59 years,1.43373246304691,0.533126352354884,age_group
+Indonesia,Female,Cardiomyopathy and myocarditis,60-64 years,0.511403914075345,0.864728477085009,age_group
+Indonesia,Female,Cardiomyopathy and myocarditis,65-69 years,0.882291530258954,0.812387669226155,age_group
+Indonesia,Female,Cardiomyopathy and myocarditis,70-74 years,0.771474362816662,1.1817599767819,age_group
+Indonesia,Female,Cardiomyopathy and myocarditis,75-79 years,0.585514683509246,0.700018228264526,age_group
+Indonesia,Female,Cardiomyopathy and myocarditis,80-84 years,0.561370434937999,0.824148596730083,age_group
+Indonesia,Female,Cardiomyopathy and myocarditis,85-89 years,0.562796278158203,0.887039464665577,age_group
+Indonesia,Female,Cardiomyopathy and myocarditis,90-94 years,0.969035185175017,1.41016713599674,age_group
+Indonesia,Female,Cardiomyopathy and myocarditis,95+ years,0.839775189524517,0.869782629190013,age_group
+Indonesia,Female,Hypertensive heart disease,20-24 years,0.958745155949146,0.72621323633939,age_group
+Indonesia,Female,Hypertensive heart disease,25-29 years,0.830233646556735,1.04326663026586,age_group
+Indonesia,Female,Hypertensive heart disease,30-34 years,1.18917113705538,0.89180794917047,age_group
+Indonesia,Female,Hypertensive heart disease,35-39 years,1.03096826816909,0.708521004300565,age_group
+Indonesia,Female,Hypertensive heart disease,40-44 years,1.18817325122654,0.861396601423621,age_group
+Indonesia,Female,Hypertensive heart disease,45-49 years,0.990112181985751,0.537095429841429,age_group
+Indonesia,Female,Hypertensive heart disease,50-54 years,1.32394682220183,1.11032616067678,age_group
+Indonesia,Female,Hypertensive heart disease,55-59 years,1.05825338372961,0.800264681922272,age_group
+Indonesia,Female,Hypertensive heart disease,60-64 years,0.805898686405271,0.967917130794376,age_group
+Indonesia,Female,Hypertensive heart disease,65-69 years,0.89196979184635,0.630239222431555,age_group
+Indonesia,Female,Hypertensive heart disease,70-74 years,0.940912189427763,0.945672173751518,age_group
+Indonesia,Female,Hypertensive heart disease,75-79 years,0.587575265904889,0.727619257057086,age_group
+Indonesia,Female,Hypertensive heart disease,80-84 years,0.527587740682066,0.531436651712284,age_group
+Indonesia,Female,Hypertensive heart disease,85-89 years,0.52057493198663,0.736062002833933,age_group
+Indonesia,Female,Hypertensive heart disease,90-94 years,1.39269808260724,0.743217167211697,age_group
+Indonesia,Female,Hypertensive heart disease,95+ years,1.3282998863142,1.24728306080215,age_group
+Indonesia,Female,Intracerebral hemorrhage,20-24 years,1.33537554810755,1.1382403599564,age_group
+Indonesia,Female,Intracerebral hemorrhage,25-29 years,0.669585140189156,0.894648224115372,age_group
+Indonesia,Female,Intracerebral hemorrhage,30-34 years,1.26588053279556,1.1390550066717,age_group
+Indonesia,Female,Intracerebral hemorrhage,35-39 years,0.803368884837255,0.650304229697213,age_group
+Indonesia,Female,Intracerebral hemorrhage,40-44 years,0.792040240718052,0.636894972296432,age_group
+Indonesia,Female,Intracerebral hemorrhage,45-49 years,0.620667636627331,1.46099122427404,age_group
+Indonesia,Female,Intracerebral hemorrhage,50-54 years,0.788448657374829,1.35753852128983,age_group
+Indonesia,Female,Intracerebral hemorrhage,55-59 years,1.0945443531964,0.666533864103258,age_group
+Indonesia,Female,Intracerebral hemorrhage,60-64 years,0.903185454430059,0.749156282050535,age_group
+Indonesia,Female,Intracerebral hemorrhage,65-69 years,1.21755080064759,0.851289085811004,age_group
+Indonesia,Female,Intracerebral hemorrhage,70-74 years,0.917936250567436,1.4423209214583,age_group
+Indonesia,Female,Intracerebral hemorrhage,75-79 years,0.608393175993115,1.23776907264255,age_group
+Indonesia,Female,Intracerebral hemorrhage,80-84 years,0.533296845387667,0.918258574791253,age_group
+Indonesia,Female,Intracerebral hemorrhage,85-89 years,0.500612845178694,0.936564640840515,age_group
+Indonesia,Female,Intracerebral hemorrhage,90-94 years,0.522394403116778,0.677485986845568,age_group
+Indonesia,Female,Intracerebral hemorrhage,95+ years,1.46101695182733,0.533211393514648,age_group
+Indonesia,Female,Ischemic heart disease,20-24 years,1.38032847456634,0.944182547973469,age_group
+Indonesia,Female,Ischemic heart disease,25-29 years,1.247676379513,0.67428789101541,age_group
+Indonesia,Female,Ischemic heart disease,30-34 years,0.660659188171849,1.15377439861186,age_group
+Indonesia,Female,Ischemic heart disease,35-39 years,0.689422456547618,0.913346731103957,age_group
+Indonesia,Female,Ischemic heart disease,40-44 years,0.570385002531111,1.47716360958293,age_group
+Indonesia,Female,Ischemic heart disease,45-49 years,0.960543265100569,0.61529011814855,age_group
+Indonesia,Female,Ischemic heart disease,50-54 years,0.55898013105616,0.875101265963167,age_group
+Indonesia,Female,Ischemic heart disease,55-59 years,1.25741261406802,0.684433031827211,age_group
+Indonesia,Female,Ischemic heart disease,60-64 years,0.536899740342051,1.29446163075045,age_group
+Indonesia,Female,Ischemic heart disease,65-69 years,0.822271792218089,1.01715625077486,age_group
+Indonesia,Female,Ischemic heart disease,70-74 years,0.592036420479417,1.19269526959397,age_group
+Indonesia,Female,Ischemic heart disease,75-79 years,0.945063296239823,0.931404736358672,age_group
+Indonesia,Female,Ischemic heart disease,80-84 years,0.606750431237742,0.641528978943825,age_group
+Indonesia,Female,Ischemic heart disease,85-89 years,0.965631939005107,0.755799017846584,age_group
+Indonesia,Female,Ischemic heart disease,90-94 years,0.78272669413127,0.539435463026166,age_group
+Indonesia,Female,Ischemic heart disease,95+ years,1.01004735007882,0.70247635175474,age_group
+Indonesia,Female,Ischemic stroke,20-24 years,0.557705217739567,0.918869130779058,age_group
+Indonesia,Female,Ischemic stroke,25-29 years,1.36754892533645,0.700072311563417,age_group
+Indonesia,Female,Ischemic stroke,30-34 years,1.16206196974963,1.27022898383439,age_group
+Indonesia,Female,Ischemic stroke,35-39 years,0.745072336867452,0.729409089079127,age_group
+Indonesia,Female,Ischemic stroke,40-44 years,0.673458588542417,0.75130200968124,age_group
+Indonesia,Female,Ischemic stroke,45-49 years,1.08336479729041,1.26869720662944,age_group
+Indonesia,Female,Ischemic stroke,50-54 years,0.750602774787694,0.699812521459535,age_group
+Indonesia,Female,Ischemic stroke,55-59 years,1.36938282288611,0.768630150472745,age_group
+Indonesia,Female,Ischemic stroke,60-64 years,0.889177247183397,0.986979234497994,age_group
+Indonesia,Female,Ischemic stroke,65-69 years,1.14230724796653,0.873284533619881,age_group
+Indonesia,Female,Ischemic stroke,70-74 years,0.595331218559295,1.24908314063214,age_group
+Indonesia,Female,Ischemic stroke,75-79 years,0.744760087924078,1.14606137713417,age_group
+Indonesia,Female,Ischemic stroke,80-84 years,0.529046728042886,0.92043195781298,age_group
+Indonesia,Female,Ischemic stroke,85-89 years,0.730444069718942,1.09785086032934,age_group
+Indonesia,Female,Ischemic stroke,90-94 years,1.21310753864236,0.662150695221499,age_group
+Indonesia,Female,Ischemic stroke,95+ years,1.26823938894086,1.1881942555774,age_group
+Indonesia,Female,Rheumatic heart disease,20-24 years,0.909341006306931,0.828483089106157,age_group
+Indonesia,Female,Rheumatic heart disease,25-29 years,0.922148226061836,1.12277379771695,age_group
+Indonesia,Female,Rheumatic heart disease,30-34 years,0.713422599015757,1.08271446428262,age_group
+Indonesia,Female,Rheumatic heart disease,35-39 years,1.38304365449585,0.595962902065367,age_group
+Indonesia,Female,Rheumatic heart disease,40-44 years,1.02750300103799,1.38683016807772,age_group
+Indonesia,Female,Rheumatic heart disease,45-49 years,0.910247905179858,0.8957139167469,age_group
+Indonesia,Female,Rheumatic heart disease,50-54 years,1.18691278272308,1.08491039485671,age_group
+Indonesia,Female,Rheumatic heart disease,55-59 years,0.876853131689131,0.599692473420873,age_group
+Indonesia,Female,Rheumatic heart disease,60-64 years,1.37839891156182,1.21115238312632,age_group
+Indonesia,Female,Rheumatic heart disease,65-69 years,1.36682324972935,0.555895282886922,age_group
+Indonesia,Female,Rheumatic heart disease,70-74 years,0.508974730269983,0.521216126624495,age_group
+Indonesia,Female,Rheumatic heart disease,75-79 years,1.35116762411781,0.644150973064825,age_group
+Indonesia,Female,Rheumatic heart disease,80-84 years,0.815850485349074,0.595520892878994,age_group
+Indonesia,Female,Rheumatic heart disease,85-89 years,1.08429596526548,0.52448886143975,age_group
+Indonesia,Female,Rheumatic heart disease,90-94 years,1.37802944448777,0.900100418133661,age_group
+Indonesia,Female,Rheumatic heart disease,95+ years,1.12711516837589,0.556767079746351,age_group
+Indonesia,Male,Cardiomyopathy and myocarditis,20-24 years,0.998024627333507,0.517644735053182,age_group
+Indonesia,Male,Cardiomyopathy and myocarditis,25-29 years,1.28045536088757,1.09910274366848,age_group
+Indonesia,Male,Cardiomyopathy and myocarditis,30-34 years,1.31699087820016,1.28307091048919,age_group
+Indonesia,Male,Cardiomyopathy and myocarditis,35-39 years,1.11782721616328,0.902981616789475,age_group
+Indonesia,Male,Cardiomyopathy and myocarditis,40-44 years,0.692914220504463,1.26146204513498,age_group
+Indonesia,Male,Cardiomyopathy and myocarditis,45-49 years,0.79617948946543,0.707004283787683,age_group
+Indonesia,Male,Cardiomyopathy and myocarditis,50-54 years,0.600021539023146,1.48750005406328,age_group
+Indonesia,Male,Cardiomyopathy and myocarditis,55-59 years,0.858025573892519,1.27768702199683,age_group
+Indonesia,Male,Cardiomyopathy and myocarditis,60-64 years,1.00759647437371,0.796791071305051,age_group
+Indonesia,Male,Cardiomyopathy and myocarditis,65-69 years,0.602672515437007,0.703041208675131,age_group
+Indonesia,Male,Cardiomyopathy and myocarditis,70-74 years,1.07192338677123,0.589266808470711,age_group
+Indonesia,Male,Cardiomyopathy and myocarditis,75-79 years,0.526625756872818,0.807220290414989,age_group
+Indonesia,Male,Cardiomyopathy and myocarditis,80-84 years,0.521865471033379,1.30636265012436,age_group
+Indonesia,Male,Cardiomyopathy and myocarditis,85-89 years,0.556972950231284,0.725114113418385,age_group
+Indonesia,Male,Cardiomyopathy and myocarditis,90-94 years,1.34266781108454,0.536345830420032,age_group
+Indonesia,Male,Cardiomyopathy and myocarditis,95+ years,1.38155540497974,1.01014081318863,age_group
+Indonesia,Male,Hypertensive heart disease,20-24 years,0.834028108976781,0.769254851387814,age_group
+Indonesia,Male,Hypertensive heart disease,25-29 years,0.755030751693994,0.694086160277948,age_group
+Indonesia,Male,Hypertensive heart disease,30-34 years,0.53395291347988,0.507695057429373,age_group
+Indonesia,Male,Hypertensive heart disease,35-39 years,1.04668133100495,0.751287967897952,age_group
+Indonesia,Male,Hypertensive heart disease,40-44 years,0.734471623320133,1.00163972587325,age_group
+Indonesia,Male,Hypertensive heart disease,45-49 years,0.703702227910981,1.44166740099899,age_group
+Indonesia,Male,Hypertensive heart disease,50-54 years,1.04072582512163,1.41561837564223,age_group
+Indonesia,Male,Hypertensive heart disease,55-59 years,1.25567208486609,1.07898647570983,age_group
+Indonesia,Male,Hypertensive heart disease,60-64 years,1.374737926526,1.47633623983711,age_group
+Indonesia,Male,Hypertensive heart disease,65-69 years,1.16394446091726,0.805795609718189,age_group
+Indonesia,Male,Hypertensive heart disease,70-74 years,0.660894597414881,0.536769607570022,age_group
+Indonesia,Male,Hypertensive heart disease,75-79 years,0.505462708882988,0.824519050773233,age_group
+Indonesia,Male,Hypertensive heart disease,80-84 years,0.547567229485139,0.775436386698857,age_group
+Indonesia,Male,Hypertensive heart disease,85-89 years,0.942838034126908,0.82349688722752,age_group
+Indonesia,Male,Hypertensive heart disease,90-94 years,0.662829076638445,0.791694534942508,age_group
+Indonesia,Male,Hypertensive heart disease,95+ years,0.7702948062215,0.914505978813395,age_group
+Indonesia,Male,Intracerebral hemorrhage,20-24 years,0.586057129781693,1.04848406696692,age_group
+Indonesia,Male,Intracerebral hemorrhage,25-29 years,1.07593759847805,1.16182757494971,age_group
+Indonesia,Male,Intracerebral hemorrhage,30-34 years,1.38385966559872,1.21685725310817,age_group
+Indonesia,Male,Intracerebral hemorrhage,35-39 years,0.868865991476923,1.43337323213927,age_group
+Indonesia,Male,Intracerebral hemorrhage,40-44 years,1.39651598618366,0.835250308737159,age_group
+Indonesia,Male,Intracerebral hemorrhage,45-49 years,1.12115464662202,1.37188539141789,age_group
+Indonesia,Male,Intracerebral hemorrhage,50-54 years,1.21784705319442,1.47245760029182,age_group
+Indonesia,Male,Intracerebral hemorrhage,55-59 years,1.24702954431996,0.873830404831097,age_group
+Indonesia,Male,Intracerebral hemorrhage,60-64 years,0.598524167668074,1.49375860043801,age_group
+Indonesia,Male,Intracerebral hemorrhage,65-69 years,1.32397105754353,0.758794181747362,age_group
+Indonesia,Male,Intracerebral hemorrhage,70-74 years,1.31438733357936,1.33573425398208,age_group
+Indonesia,Male,Intracerebral hemorrhage,75-79 years,0.592060385039076,1.45431014732458,age_group
+Indonesia,Male,Intracerebral hemorrhage,80-84 years,0.542060801759362,1.04274835134856,age_group
+Indonesia,Male,Intracerebral hemorrhage,85-89 years,0.584703215397894,1.07801056606695,age_group
+Indonesia,Male,Intracerebral hemorrhage,90-94 years,0.569336570799351,1.25835448107682,age_group
+Indonesia,Male,Intracerebral hemorrhage,95+ years,0.656424988759682,1.35718648601323,age_group
+Indonesia,Male,Ischemic heart disease,20-24 years,1.32649254240096,0.589357092510909,age_group
+Indonesia,Male,Ischemic heart disease,25-29 years,1.19394916133024,0.688900742679834,age_group
+Indonesia,Male,Ischemic heart disease,30-34 years,1.38557030633092,1.39717745175585,age_group
+Indonesia,Male,Ischemic heart disease,35-39 years,0.692392437485978,1.00289671891369,age_group
+Indonesia,Male,Ischemic heart disease,40-44 years,0.628824310610071,1.31011752015911,age_group
+Indonesia,Male,Ischemic heart disease,45-49 years,0.917868641437963,0.71277202712372,age_group
+Indonesia,Male,Ischemic heart disease,50-54 years,0.75703731388785,0.802193163195625,age_group
+Indonesia,Male,Ischemic heart disease,55-59 years,1.00532761821523,1.09035254619084,age_group
+Indonesia,Male,Ischemic heart disease,60-64 years,1.35531336534768,1.01833364204504,age_group
+Indonesia,Male,Ischemic heart disease,65-69 years,1.15331588312984,1.06800899631344,age_group
+Indonesia,Male,Ischemic heart disease,70-74 years,0.639216920128092,0.912138033192605,age_group
+Indonesia,Male,Ischemic heart disease,75-79 years,0.55765714077279,0.958088912768289,age_group
+Indonesia,Male,Ischemic heart disease,80-84 years,0.709109911927953,0.862764601362869,age_group
+Indonesia,Male,Ischemic heart disease,85-89 years,0.797046015039086,0.917600320652127,age_group
+Indonesia,Male,Ischemic heart disease,90-94 years,0.500302531057969,0.839931698748842,age_group
+Indonesia,Male,Ischemic heart disease,95+ years,1.42590506537817,0.992314918199554,age_group
+Indonesia,Male,Ischemic stroke,20-24 years,0.984054205240682,1.16647354653105,age_group
+Indonesia,Male,Ischemic stroke,25-29 years,0.658249570289627,0.672566030872986,age_group
+Indonesia,Male,Ischemic stroke,30-34 years,1.3019234163221,0.510997592238709,age_group
+Indonesia,Male,Ischemic stroke,35-39 years,1.16688875993714,0.804234606213868,age_group
+Indonesia,Male,Ischemic stroke,40-44 years,1.24856571131386,0.79224058939144,age_group
+Indonesia,Male,Ischemic stroke,45-49 years,0.68554642284289,1.25959969637916,age_group
+Indonesia,Male,Ischemic stroke,50-54 years,0.699936873279512,0.526579362573102,age_group
+Indonesia,Male,Ischemic stroke,55-59 years,1.21760251931846,0.546242865268141,age_group
+Indonesia,Male,Ischemic stroke,60-64 years,0.883643141714856,1.43733138078824,age_group
+Indonesia,Male,Ischemic stroke,65-69 years,0.892323662759736,0.562911578454077,age_group
+Indonesia,Male,Ischemic stroke,70-74 years,0.50337876053527,0.930331149837002,age_group
+Indonesia,Male,Ischemic stroke,75-79 years,1.17146954406053,0.796796810813248,age_group
+Indonesia,Male,Ischemic stroke,80-84 years,0.770977464970201,0.589831049321219,age_group
+Indonesia,Male,Ischemic stroke,85-89 years,0.542106249369681,0.833577912067995,age_group
+Indonesia,Male,Ischemic stroke,90-94 years,0.97379433689639,0.574795256834477,age_group
+Indonesia,Male,Ischemic stroke,95+ years,0.944884107913822,1.48577194148675,age_group
+Indonesia,Male,Rheumatic heart disease,20-24 years,0.700255496427417,0.917279420420527,age_group
+Indonesia,Male,Rheumatic heart disease,25-29 years,0.791103548603132,0.522134341532365,age_group
+Indonesia,Male,Rheumatic heart disease,30-34 years,1.49654578836635,0.780312404269353,age_group
+Indonesia,Male,Rheumatic heart disease,35-39 years,1.1283654733561,1.04335420019925,age_group
+Indonesia,Male,Rheumatic heart disease,40-44 years,0.581639796262607,0.747381251538172,age_group
+Indonesia,Male,Rheumatic heart disease,45-49 years,0.745067023206502,0.8709213337861,age_group
+Indonesia,Male,Rheumatic heart disease,50-54 years,0.621515901759267,0.72643231949769,age_group
+Indonesia,Male,Rheumatic heart disease,55-59 years,0.578554256819189,0.769364823820069,age_group
+Indonesia,Male,Rheumatic heart disease,60-64 years,0.574172218563035,0.640829785261303,age_group
+Indonesia,Male,Rheumatic heart disease,65-69 years,0.897803120780736,0.769554932136089,age_group
+Indonesia,Male,Rheumatic heart disease,70-74 years,0.666898933472112,0.724826752441004,age_group
+Indonesia,Male,Rheumatic heart disease,75-79 years,0.536230492172763,0.771916430443525,age_group
+Indonesia,Male,Rheumatic heart disease,80-84 years,0.999956268351525,0.508999186800793,age_group
+Indonesia,Male,Rheumatic heart disease,85-89 years,0.7684054474812,0.669464313890785,age_group
+Indonesia,Male,Rheumatic heart disease,90-94 years,0.599709727568552,0.709351492347196,age_group
+Indonesia,Male,Rheumatic heart disease,95+ years,0.50386845250614,1.47529870714061,age_group

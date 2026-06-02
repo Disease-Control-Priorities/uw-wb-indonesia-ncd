@@ -107,6 +107,8 @@ source("04_define_interventions.R")
 # 05. build baseline ----
 #...........................................................
 
+# Run CVD multiple interventions
+setwd(paste0(wd_code,"cvd/"))
 source("05_build_baseline_indonesia.R")
 
 #...........................................................

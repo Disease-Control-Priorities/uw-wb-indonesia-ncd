@@ -247,3 +247,42 @@ analogous to `adjustments2023_age.csv`.
 Validate before finishing: confirm all calibrated IR, CF in [0,1]; IR+BG.mx <= 1; 
 CF+BG.mx <= 1; no NAs introduced; row counts and schema match the existing 031 output; 
 and print a summary of fit RMSE so I can compare against the old approach.
+
+###############################################################################
+###############################################################################
+
+
+I want you to extend my CVD microsimulation model by adding the health impact of a Disease Control Priorities (DCP) / FAIR-Choices cardiovascular disease intervention package as a new intervention. Create a new file code/cvd/06_run_scenarios_indonesia_fair.R — do not modify the original 06_run_scenarios_indonesia.R. The new file should be a self-contained copy/derivative that adds the FAIR-Choices logic, so it can be sourced as a drop-in alternative to step 06 in 00_run_model_indonesia.R.
+Methods reference. Before writing code, review the FAIR-Choices methods documentation so your implementation matches their approach:
+
+User guides: https://fairchoices.w.uib.no/documentation/#user-guides
+Methods summary: https://fairchoices.w.uib.no/documentation/fairchoices-methods/#summary
+
+The core FAIR-Choices health-impact identity is:
+Health_Impact = Population × Disease_Rate × Intervention_Coverage × Efficacy × Time_Horizon
+where Efficacy (effect size) and the population it applies to come from the taxonomy effect-size table, scaled by coverage and phased over the time horizon. Follow their convention that effect sizes act multiplicatively on the relevant rate (mortality/case-fatality, incidence, or prevalence) for the affected proportion of the population in the specified age/sex band, over the stated duration of effect.
+Effect-size inputs. Read parameters from C:\Users\wrgar\OneDrive - UW\02Work\WorldBank-Indonesia\uw-wb-indonesia-ncd\data\raw\FAIR-Choices\taxonomy_effect_size.xlsx (single sheet named Sheet 1). Load it via read_excel(paste0(wd_raw, "FAIR-Choices/taxonomy_effect_size.xlsx")) to stay consistent with the existing path variables (wd, wd_raw, wd_data, wd_outp are defined in 00_run_model_indonesia.R). Relevant columns: Group, Sub-group, level 3, level 4, Intervention bundle, Affected condition, Affected Proportion, Age name, Age start, Age stop, Affected gender, Duration effect, Mortality, Disability, Incidence, Prevalence, Fertility, Stillbirths. Filter to Sub-group == "Cardiovascular diseases". Treat string "NA"/"None" as missing. All parameters must come from this table as default values but remain overridable — expose them as a parameter object/data.table the user can edit or replace with local Indonesian program-data evidence (coverage, affected proportion, efficacy, target/start years).
+Disease/condition mapping. The model uses internal cause codes; map the table's Affected condition strings onto them (see cause_map in 00_run_model_indonesia.R):
+
+Ischemic heart disease → ihd
+Ischemic stroke → istroke
+Intracerebral hemorrhage → hstroke
+Hypertensive heart disease → hhd
+Cardiomyopathy and myocarditis → cmd
+Rheumatic heart disease → rhd
+Conditions in the table that have no model cause (e.g. Lower extremity peripheral arterial disease, SRHD, ESRD) should be dropped with a message, not silently. Note the model currently runs causes ihd, istroke, hstroke, hhd (rhd/cmd are mapped but commented out in the GBD RR setup) — handle gracefully when a mapped cause isn't present in intervention_rates.
+
+What to build — a new intervention function in the style of the existing ones. Study the existing functions in 06_run_scenarios_indonesia.R so your new function matches their signature, side-effect conventions, and outputs exactly: calculate_tfa_impact() and calculate_statins_impact() are the closest templates because, like FAIR-Choices interventions, they act directly on intervention_rates (the data.table with columns age, sex, location, cause, year, IR, CF, eff_ir, eff_cf, ...) and shift CF/IR while updating the eff_cf/eff_ir tracking ratios multiplicatively (eff_cf := eff_cf * (1 - effect_size)).
+Write calculate_fair_cvd_impact() that:
+
+Takes intervention_rates, Country, the FAIR effect-size parameter table, and coverage scale-up parameters (fair_start_year, fair_target_year, fair_target_coverage, plus per-bundle overrides), defaulting in the same way the other functions default (e.g. coverage scaled with calculate_coverage_by_year(), which already exists and you should reuse).
+Shifts incidence (IR) and case-fatality (CF) probabilities by applying, per affected cause × age-band × sex, an effect computed as effect_size = Affected_Proportion × Efficacy × Coverage(year), where Efficacy is (1 − value) interpretation consistent with how the table stores reductions — confirm against the FAIR-Choices docs whether the tabulated Mortality/Incidence/Prevalence values are relative reductions or residual relative risks, and document your choice in a comment. Map the table's Mortality column onto case-fatality (CF) effects and the Incidence column onto incidence (IR) effects; respect Age start/Age stop and Affected gender (Both/Male/Female). Apply only from fair_start_year onward, phased by coverage.
+When the package contains multiple bundles affecting the same cause (e.g. primary prevention + secondary prevention + acute management all hit ihd mortality), combine them multiplicatively on the surviving fraction (prod(1 - effect_size_b) across bundles b), consistent with how the existing code combines interventions via Reduce(\*`, ...). Make the package membership configurable (a vector of Intervention bundle` names) with a sensible default = the full CVD primary+secondary+acute package.
+Returns intervention_rates with the same columns and ordering the other calculate_* functions return, with CF, IR, eff_cf, eff_ir updated, and never produces NA/out-of-range values (clamp like the existing code: CF/IR ≤ 0.99, effects in [0,1]).
+
+Confirm from the FAIR-Choices documentation and/or table metadata whether the Mortality, Incidence, and Prevalence columns are stored as proportional reductions or residual relative risks. If they are proportional reductions, use effect_size = Affected_Proportion × value × Coverage(year) and apply the multiplier 1 - effect_size. If they are residual relative risks, convert them to reductions first as 1 - value. Document the chosen interpretation clearly in code comments and do not double-transform the effect size.
+
+Wire it into the orchestration. In the copied file, add "fair_cvd" (or similar) as a valid intervention in project.all()'s valid_interventions, add an if ("fair_cvd" %in% interventions) block that calls calculate_fair_cvd_impact() in the post-BP-combination stage (alongside TFA/statins, since it acts directly on rates), thread its parameters through project.all() and run_multiple_scenarios(), add it to the clusterExport varlist, and add scenarios to the scenarios list (e.g. fair_only = "fair_cvd" and a combined all_plus_fair). Keep the parallel foreach country loop and output-saving (model_output_<country>_<target>.rds) intact, but consider writing FAIR outputs under a distinct filename suffix so they don't overwrite the originals.
+Deliverables & validation. Produce the single file code/cvd/06_run_scenarios_indonesia_fair.R. At the top, include a clear comment block documenting: the FAIR-Choices formula, the source table, the reduction-vs-residual-RR interpretation decision, and every default parameter with a note that each is overridable with local program data. Add brief cat() progress messages matching the existing style. Make sure the file runs in the same environment (depends on objects created by earlier sourced scripts: data.in, b_rates, inc, dt_gbd_rr, repYear, etc.) and reuses existing helpers rather than duplicating them where possible. Do not invent data values — every effect size must trace to a row in taxonomy_effect_size.xlsx.
+If anything about the reduction-vs-RR interpretation or the intended bundle composition of the "package" is ambiguous after reading the FAIR-Choices docs, state your assumption explicitly in code comments rather than guessing silently.
+
