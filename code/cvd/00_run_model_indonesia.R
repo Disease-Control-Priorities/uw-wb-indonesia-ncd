@@ -117,7 +117,7 @@ source("05_build_baseline_indonesia.R")
 
 # Run CVD multiple interventions
 setwd(paste0(wd_code,"cvd/"))
-source("06_run_scenarios_indonesia.R")
+source("06_run_scenarios_indonesia_fair.R")
 
 #...........................................................
 # 07. Run Burden of Disease ----

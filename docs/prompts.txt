@@ -3,6 +3,7 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %%% Updating CLAUDE.md file after restructuring the project
+new-prompt
 
 The project structure has been updated. Please update the CLAUDE.md file to reflect the current state of the codebase.
 Specifically:
@@ -27,6 +28,7 @@ When you're done, summarize what changed and why.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+new-prompt
 
 %%% Creating technical slides
 
@@ -101,7 +103,7 @@ Confirm the Rmd knits cleanly by checking syntax carefully (don't actually rende
 
 ###################################################################
 ###################################################################33
-
+new-prompt
 I'm attaching 09_validation_indonesia.R. Please modify only this file (located in code/cvd/) to implement the validation analysis it outlines. Do not create, modify, or touch any other files in the repository.
 The script should perform validation analysis comparing mortality cases and rates (non-standardized) across data sources, by sex, for ages 20+. Specifically:
 Data inputs to wire up:
@@ -137,6 +139,7 @@ Keep the existing comments as section headers; replace the placeholder lines wit
 
 #############################################################
 #############################################################
+new-prompt
 Calibration Algorithm
 
 # Task: Build a transparent, single-pass calibration script for the Indonesia NCD/CVD model
@@ -250,7 +253,7 @@ and print a summary of fit RMSE so I can compare against the old approach.
 
 ###############################################################################
 ###############################################################################
-
+new-prompt
 
 I want you to extend my CVD microsimulation model by adding the health impact of a Disease Control Priorities (DCP) / FAIR-Choices cardiovascular disease intervention package as a new intervention. Create a new file code/cvd/06_run_scenarios_indonesia_fair.R — do not modify the original 06_run_scenarios_indonesia.R. The new file should be a self-contained copy/derivative that adds the FAIR-Choices logic, so it can be sourced as a drop-in alternative to step 06 in 00_run_model_indonesia.R.
 Methods reference. Before writing code, review the FAIR-Choices methods documentation so your implementation matches their approach:
@@ -286,3 +289,37 @@ Wire it into the orchestration. In the copied file, add "fair_cvd" (or similar) 
 Deliverables & validation. Produce the single file code/cvd/06_run_scenarios_indonesia_fair.R. At the top, include a clear comment block documenting: the FAIR-Choices formula, the source table, the reduction-vs-residual-RR interpretation decision, and every default parameter with a note that each is overridable with local program data. Add brief cat() progress messages matching the existing style. Make sure the file runs in the same environment (depends on objects created by earlier sourced scripts: data.in, b_rates, inc, dt_gbd_rr, repYear, etc.) and reuses existing helpers rather than duplicating them where possible. Do not invent data values — every effect size must trace to a row in taxonomy_effect_size.xlsx.
 If anything about the reduction-vs-RR interpretation or the intended bundle composition of the "package" is ambiguous after reading the FAIR-Choices docs, state your assumption explicitly in code comments rather than guessing silently.
 
+################################################
+################################################
+new-prompt
+
+Modify a single R Markdown file, scenarios/cvd/aim1_report.Rmd. Edit only this file — do not touch any other file. I'm also attaching code/cvd/06_run_scenarios_indonesia_fair.R for reference only (do not modify it); it is the upstream model that now produces the report's input, and its header comments document the FAIR-Choices methods.
+The report ingests model output via data.out (built from per-country model_output_*.rds files), plus dt_dalys (DALYs) and dt_econ (economic) outputs. Make the three sets of changes below. Throughout, preserve the existing data.table / ggplot2 / kableExtra style, helper functions (calculate_asmr, deaths_summary, fmt_k, etc.), and the colour/label-map conventions. Before editing, read the whole file top to bottom and inventory every scenario-dependent and cause-dependent chunk so nothing is missed.
+1) Add the new FAIR-Choices intervention scenario.
+The model now emits two extra scenarios beyond the current eight: fair_only = "fair_cvd", and all_plus_fair = c("antihypertensive","sodium","tfa","statins","fair_cvd"). The report currently recognizes only the originals and silently drops the rest at data.out <- data.out[intervention %in% c("b.a.u", int_order)]. Wire the two new scenarios through end to end:
+
+In the setup chunk, extend int_labels, int_order, int_order_individual (as appropriate), and int_cols (assign two new distinct, accessible colours). Suggested display labels: "FAIR-Choices CVD Package" (for fair_only) and "All + FAIR" (for all_plus_fair).
+In the data.out scenario-relabelling block (the run of data.out[intervention %in% c(...), intervention := ...] statements), add mappings for fair_only/fair_cvd/FAIR and all_plus_fair. Apply the identical additions to the dt_dalys relabelling block in the load-dalys chunk.
+Update the economic scenario maps econ_scen_lbl (in econ-results-table) and econ_scen_lbl_slides (in slides-econ) to include the two new scenarios — note these maps are keyed on the raw model scenario names, so confirm the names the economic script emits and map both new scenarios accordingly.
+Update the Intervention Scenarios methods section: the prose says "seven intervention scenarios … four types of CVD risk-factor control policies" — revise the counts, and add a row/description for the FAIR-Choices CVD package. Describe it faithfully per the 06_run_scenarios_indonesia_fair.R header: a DCP/FAIR-Choices CVD intervention package whose per-condition effect sizes come from data/raw/FAIR-Choices/taxonomy_effect_size.xlsx, applied as proportional reductions to cause-specific mortality/case-fatality (Mortality column → CF) and incidence (Incidence column → IR), scaled by coverage rising to 80% by 2050 (2026–2050). Reconcile every other hardcoded scenario count in prose, captions, and footnotes.
+Confirm the inline-stat chunk (total_all, total_bp, etc.) and Table 1's "all four intervention strategies" prose still read correctly, and add FAIR figures if appropriate.
+
+2) Fully incorporate the two added diseases rhd (Rheumatic heart disease) and cmd (Cardiomyopathy and myocarditis).
+The cause maps (cause_map, cause_map_full, cause_cols, cause_labels_plot) already include all six causes, but several downstream chunks still hardcode only four. Find and fix every cause enumeration so all six causes flow through consistently. Specific known offenders to fix (search for others too):
+
+The bod-table2 chunk's cause_lbl := fcase(...) omits rhd and cmd (falls through to raw code) — add both.
+The slides-dt-cause chunk's cause_lbl := fcase(...) omits rhd and cmd — add both (with abbreviations consistent with its style, e.g. "Rheumatic HD", "Cardiomyopathy").
+Audit prose, captions, and footnotes that say "all four causes" / "all four CVD causes" / enumerate "ischemic heart disease, ischemic stroke, intracerebral hemorrhage, hypertensive heart disease" (e.g. the disease-trends subtitle "All four causes combined", Table 1's footnote cause list, Table 2's footnote "Antihypertensive interventions affect all four CVD causes") and update them to reflect six causes. Note in the relevant footnotes that the new model upstream may carry zero/limited effect for rhd/cmd under some interventions (so a "–" in cause tables is expected), but they should still appear as columns/rows and in baseline disease/benchmarking views.
+Note the cause_map-vs-cause_map_full redundancy: both list all six — leave both but make sure cause-faceted plots/tables key off the full six-cause maps.
+
+3) Add a new "Model Benchmarking and Validation" section with time-series plots.
+Insert a clearly-titled section (logical spot: after "Disease Trends (Baseline)" or before "Projected Deaths Averted"). For each of the six causes in cause_map, overlay the modeled time series against observed GBD data, producing six metrics per cause: (1) death counts, (2) mortality rate, (3) prevalence cases, (4) prevalence rate, (5) incidence cases, (6) incidence rate. Use small-multiples/faceting (e.g. facet by cause within each metric, or a 6-cause × 6-metric grid of panels) so each cause/metric is legible, with modeled vs. GBD series visually distinguished (line vs. points, or a two-level legend). Add brief prose explaining the benchmarking purpose and how to read the panels.
+
+GBD observed (2000–2019): load the tps_inpt RDS files from wd_data exactly as below, then rbindlist them; inspect the bound object's columns to map them to the six metrics, and derive any missing rate as count / population × 100,000, noting the assumption in a code comment:
+rfiles <- list.files(path = wd_data, pattern = "tps_inpt", full.names = TRUE)
+dt_list <- lapply(files, function(f) { dt <- readRDS(f); setDT(dt); dt })
+
+Modeled (2017–2050): use the existing data.out object, baseline b.a.u scenario, aggregated to cause × year. Map the model's state columns to the metrics (e.g. dead → death counts; newcases → incidence cases; sick → prevalence cases; rates = the corresponding count / population × 100,000, using well + sick or pop as the denominator consistent with how calculate_asmr and the disease-trends chunk define population). State your denominator/derivation choices in comments.
+Plot the GBD series over 2000–2019 and let the modeled series run 2017–2050, so the 2017–2019 overlap is visible for validation. Save the figure(s) to wd_outp with ggsave following the file's existing naming pattern (e.g. aim1_benchmark_<metric>.png), and guard gracefully (a message/warning) if no tps_inpt files are found.
+
+After editing, do a final consistency pass: confirm no scenario or cause is hardcoded-out anywhere (including the slide-deck SL-* chunks, the Excel export, and all footnotes/captions), that every prose count matches the new scenario and disease totals, and that the new benchmarking section is self-contained and runs against data.out and the tps_inpt files. Return the modified aim1_report.Rmd.

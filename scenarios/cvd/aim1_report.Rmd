@@ -324,7 +324,9 @@ cause_map_full <- c(
   ihd     = "Ischemic heart disease",
   istroke = "Ischemic stroke",
   hstroke = "Intracerebral hemorrhage",
-  hhd     = "Hypertensive heart disease"
+  hhd     = "Hypertensive heart disease",
+  rhd     = "Rheumatic heart disease",
+  cmd     = "Cardiomyopathy and myocarditis"
 )
 num_causes  <- length(unique(cause_map_full))
 study_years <- paste0(min(data.out$year[data.out$year >= 2025]),
