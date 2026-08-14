@@ -1518,8 +1518,11 @@ load_fair_cvd_params <- function(path = paste0(wd_raw, "FAIR-Choices/taxonomy_ef
 
   raw <- as.data.table(read_excel(path))   # single sheet "Sheet 1"
 
-  # Keep only cardiovascular-disease interventions
+  # Keep only cardiovascular-disease
   raw <- raw[.fair_clean_chr(`Sub-group`) == "Cardiovascular diseases"]
+  
+  # Keep one cardiovascular-disease interventions for model
+  raw <- raw[model_inclusion=="Include",]
 
   # Numeric columns are routed through .fair_clean_chr() first so that literal
   # "NA"/"None" strings become NA cleanly (no "NAs introduced by coercion").
