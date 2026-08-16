@@ -1706,6 +1706,108 @@ calculate_fair_cvd_impact <- function(intervention_rates,
 }
 
 #...........................................................
+# FAIR-Choices WORKBOOK-driven impact (Model 04 catalogue) ----
+#...........................................................
+# Applies the validated per-link effect rows built in Model 04
+# (fair_scenarios[[scenario]]$fair_effect_rows) to incidence (IR / eff_ir) and
+# case fatality (CF / eff_cf). This is the workbook-driven analogue of
+# calculate_fair_cvd_impact(): every parameter (effect_value, affected_fraction,
+# baseline/target coverage, start/target year, age band, sex, and the mapped
+# model transition) is row-specific and comes from indonesia_model_inputs.xlsx.
+# Coverage uses the row's ABSOLUTE path (baseline -> target) fed to the existing
+# apply_coverage_adjustment() FAIR formula. Multiple rows acting on the same
+# cause/transition combine MULTIPLICATIVELY on the surviving fraction
+# (order-invariant). NO new Markov states: workbook sick_hf / sick_severe rows
+# were already collapsed onto "sick" via affected_fraction in Model 04.
+calculate_fair_workbook_impact <- function(intervention_rates, Country, effect_rows) {
+
+  cat("  - Calculating FAIR-Choices (workbook) package impact\n")
+
+  if (is.null(effect_rows) || nrow(effect_rows) == 0) {
+    cat("    (no effect rows supplied; rates returned unchanged)\n")
+    return(intervention_rates[])
+  }
+
+  dt <- copy(intervention_rates)
+  er <- as.data.table(copy(effect_rows))
+
+  present <- unique(dt$cause)
+  miss    <- setdiff(unique(er$cause_code), present)
+  if (length(miss) > 0)
+    cat("    FAIR wb: mapped cause(s) not present in rates, skipped:",
+        paste(miss, collapse = ", "), "\n")
+  er <- er[cause_code %in% present]
+
+  # Surviving fractions (1 = no effect); accumulate (1 - effect) products.
+  dt[, `:=`(fair_surv_ir = 1, fair_surv_cf = 1)]
+
+  for (i in seq_len(nrow(er))) {
+    r <- er[i]
+
+    base_cov <- r$baseline_coverage
+    tgt_cov  <- r$target_coverage
+    sy       <- r$start_year
+    ty       <- r$target_year
+
+    # Absolute coverage path: baseline before start; linear baseline -> target
+    # between start and target (inclusive, "no delay"); target thereafter.
+    span  <- max(ty - sy + 1, 1)
+    frac  <- pmin(pmax((dt$year - sy + 1) / span, 0), 1)
+    cov_t <- base_cov + (tgt_cov - base_cov) * frac
+    cov_t[dt$year <  sy] <- base_cov
+    cov_t[dt$year >  ty] <- tgt_cov
+    cov_t <- pmin(pmax(cov_t, 0), 1)
+
+    # FAIR coverage-adjusted effect, then the affected fraction.
+    e_adj <- apply_coverage_adjustment(effect_size = r$effect_value,
+                                       coverage_t  = cov_t,
+                                       coverage_0  = base_cov)
+    es <- r$affected_fraction * e_adj
+    es[!is.finite(es)] <- 0
+    es <- pmin(pmax(es, 0), 1)
+
+    gender_ok <- if (identical(r$sex, "Both")) rep(TRUE, nrow(dt)) else dt$sex == r$sex
+    mask <- dt$cause == r$cause_code &
+            dt$age  >= r$age_start &
+            dt$age  <= r$age_stop &
+            dt$year >= sy &
+            gender_ok
+    mask[is.na(mask)] <- FALSE
+    es[!mask] <- 0
+
+    if (identical(r$model_transition, "incidence")) {
+      dt[, fair_surv_ir := fair_surv_ir * (1 - es)]
+    } else if (identical(r$model_transition, "case_fatality")) {
+      dt[, fair_surv_cf := fair_surv_cf * (1 - es)]
+    } else {
+      stop("FAIR wb: unmapped model_transition '", r$model_transition,
+           "' for link ", r$intervention_cause_key, call. = FALSE)
+    }
+  }
+
+  dt[, `:=`(
+    CF     = CF     * fair_surv_cf,
+    IR     = IR     * fair_surv_ir,
+    eff_cf = eff_cf * fair_surv_cf,
+    eff_ir = eff_ir * fair_surv_ir
+  )]
+
+  dt[CF > 0.99, CF := 0.99]
+  dt[IR > 0.99, IR := 0.99]
+  dt[CF < 0, CF := 0]
+  dt[IR < 0, IR := 0]
+  dt[, c("fair_surv_ir", "fair_surv_cf") := NULL]
+
+  if (dt[, any(is.na(CF))] || dt[, any(is.na(IR))])
+    stop("FAIR workbook computation produced NA in CF or IR.", call. = FALSE)
+
+  setorder(dt, year, sex, location, cause, age)
+  cat("    Applied", nrow(er), "workbook effect row(s) across cause(s):",
+      paste(sort(unique(er$cause_code)), collapse = ", "), "\n")
+  dt[]
+}
+
+#...........................................................
 # Model. Project.all function ----
 #...........................................................
 #
@@ -1779,7 +1881,10 @@ project.all <- function(Country,
                         fair_target_year       = 2050,
                         fair_target_coverage   = 0.80,
                         fair_baseline_coverage = 0,
-                        fair_bundle_coverage   = NULL   # named per-bundle coverage overrides
+                        fair_bundle_coverage   = NULL,  # named per-bundle coverage overrides
+                        # FAIR-Choices WORKBOOK effect rows (validated Model 04
+                        # catalogue); drives the "fair_wb" intervention.
+                        fair_effect_rows       = NULL
 ) {
 
   cat("\n========================================\n")
@@ -1788,7 +1893,7 @@ project.all <- function(Country,
   cat("========================================\n\n")
   
   # Validate interventions
-  valid_interventions <- c("antihypertensive", "antihypertensive_diabetes", "sodium", "tfa", "statins", "fair_cvd")
+  valid_interventions <- c("antihypertensive", "antihypertensive_diabetes", "sodium", "tfa", "statins", "fair_cvd", "fair_wb")
   
   if (!all(interventions %in% valid_interventions)) {
     stop("Invalid intervention(s). Must be one or more of: ", 
@@ -2104,6 +2209,23 @@ project.all <- function(Country,
     applied_interventions <- c(applied_interventions, "FAIR")
   }
 
+  #..................................
+  ## Apply FAIR-Choices WORKBOOK Package (Model 04 catalogue) ----
+  ## Workbook-driven scenarios use this branch (interventions == "fair_wb").
+  #..................................
+
+  if ("fair_wb" %in% interventions) {
+    cat("\n=== Applying FAIR-Choices (workbook) Package ===\n")
+
+    intervention_rates <- calculate_fair_workbook_impact(
+      intervention_rates = intervention_rates,
+      Country            = Country,
+      effect_rows        = fair_effect_rows
+    )
+
+    applied_interventions <- c(applied_interventions, "FAIR")
+  }
+
   # Create intervention label
   if (length(applied_interventions) > 0) {
     intervention_label <- paste(applied_interventions, collapse = " + ")
@@ -2302,10 +2424,23 @@ run_multiple_scenarios <- function(Country,
     cat("\n##########################################\n")
     cat("RUNNING SCENARIO:", scenario_name, "\n")
     cat("##########################################\n")
-    
+
+    # Scenario entries may be either a legacy character vector of intervention
+    # tokens, OR a richer list (workbook-driven, from Model 04) carrying
+    # $interventions and $fair_effect_rows. Support both.
+    entry <- scenario_list[[scenario_name]]
+    if (is.list(entry) && !is.null(entry$interventions)) {
+      ints_arg <- entry$interventions
+      fer_arg  <- entry$fair_effect_rows
+    } else {
+      ints_arg <- entry
+      fer_arg  <- NULL
+    }
+
     results[[scenario_name]] <- project.all(
       Country             = Country,
-      interventions       = scenario_list[[scenario_name]],
+      interventions       = ints_arg,
+      fair_effect_rows    = fer_arg,
       target_control      = target_control,
       control_start_year  = control_start_year,
       control_target_year = control_target_year,
@@ -2588,13 +2723,15 @@ htn_target_cols <- c("htncov2_aspirational")
 #   all_plus_fair = c("antihypertensive", "sodium", "tfa", "statins", "fair_cvd")
 # )
 
-# Only RUN the fair choices
-scenarios <- list(
-  baseline = character(0),
-  # FAIR-Choices CVD package scenarios
-  fair_only     = "fair_cvd",
-  all_plus_fair = c("fair_cvd")
-)
+# WORKBOOK-DRIVEN scenarios: the scenario catalogue is built by Model 04 from
+# indonesia_model_inputs.xlsx (baseline + one "fair_wb" scenario per selected
+# valid intervention + a combined "all" scenario). No FAIR intervention list,
+# scenario list, effect size, coverage target or cause map is hard-coded here.
+if (!exists("fair_scenarios"))
+  stop("Model 06: `fair_scenarios` not found. Source Model 04 ",
+       "(04_define_interventions_indonesia.R) first so the workbook-driven ",
+       "scenario catalogue is available.", call. = FALSE)
+scenarios <- fair_scenarios
 
 # explicit hypertension control parameters
 target_control <- 0.5
@@ -2647,6 +2784,7 @@ clusterExport(
     "calculate_tfa_impact",
     "calculate_statins_impact",
     "calculate_fair_cvd_impact",
+    "calculate_fair_workbook_impact",
     "load_fair_cvd_params",
     ".fair_clean_chr",
     "dt_fair_params",

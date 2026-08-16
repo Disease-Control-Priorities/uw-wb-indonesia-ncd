@@ -1505,3 +1505,365 @@ rm(data.in.statin,dt_sta,dt_statins_interp,dt_statins_scenarios,dt_temp,
 # rm(dt_hbp_control, dt_hbp_control_2020_2023, inc, interpolate_control, name_map)
 
 
+
+
+#===========================================================================
+# FAIR CHOICES WORKBOOK-DRIVEN CATALOGUE  (feeds Models 06 and 09) ----
+#---------------------------------------------------------------------------
+# Everything below makes the FAIR Choices interventions, intervention-cause
+# links, transition targets, effect sizes, coverage trajectories and cost
+# components WORKBOOK-DRIVEN. All analytic inputs are read from the user's
+# selections in `indonesia_model_inputs.xlsx` (path supplied by Model 00 as
+# `model_inputs_file`); raw input columns are read and every derived field is
+# reproduced in R (Excel cached formula results are NOT trusted).
+#
+# Two objects are exported:
+#   * fair_scenarios : named list consumed by Model 06 -- baseline + one
+#                      scenario per selected+valid intervention + a combined
+#                      "all" scenario (when >= 2 interventions are runnable).
+#   * fair_inputs    : list of validated catalogues consumed by Model 09
+#                      (links, costs, assumptions, validation report, blocked
+#                      links, cause/transition translations).
+# Both are LISTS on purpose: Model 06 ends by removing every data.frame from
+# the global environment, and lists survive that cleanup.
+#
+# FAIR Choices coverage-adjusted effect (FairChoices_Methods sheet and
+# https://fairchoices.w.uib.no/documentation/fairchoices-methods/):
+#   delta_cov(t)       = coverage(t) - baseline_coverage
+#   adjusted_effect(t) = effect_value * delta_cov(t) / (1 - effect_value*baseline_coverage)
+#   transition_effect  = adjusted_effect(t) * affected_fraction
+#   p_scenario(t)      = p_baseline(t) * (1 - transition_effect(t))
+# Prevention (well->sick) modifies incidence (IR / eff_ir); disease management
+# (sick->death) modifies case fatality (CF / eff_cf). The workbook HF / severe
+# labels (sick_hf, sick_severe) are collapsed onto the model's single "sick"
+# state through affected_fraction ONLY -- NO new Markov states are created
+# (explicit translate_transition() table below).
+#===========================================================================
+
+# --- Execution metaparameters: single source of truth is Model 00. Provide
+#     safe fallbacks so this script can also be sourced stand-alone. ----------
+if (!exists("model_inputs_file"))
+  model_inputs_file <- paste0(wd, "data/indonesia_model_inputs.xlsx")
+if (!exists("strict_model_input_validation"))
+  strict_model_input_validation <- FALSE
+if (!exists("baseline_scenario_id"))
+  baseline_scenario_id <- "baseline"
+
+.build_fair_catalogue <- function(inputs_path,
+                                  cause_map,
+                                  strict      = FALSE,
+                                  baseline_id = "baseline") {
+
+  if (!file.exists(inputs_path))
+    stop("FAIR: input workbook not found: ", inputs_path)
+
+  req_sheets <- c("Assumptions", "Dictionaries", "Intervention_Cause_Map",
+                  "Effect_Sizes", "Coverage", "Cost_Components")
+  have <- readxl::excel_sheets(inputs_path)
+  miss <- setdiff(req_sheets, have)
+  if (length(miss))
+    stop("FAIR: workbook missing required sheet(s): ", paste(miss, collapse = ", "))
+
+  rd   <- function(sheet) as.data.table(readxl::read_excel(inputs_path, sheet = sheet))
+  numv <- function(x) suppressWarnings(as.numeric(x))
+  chrv <- function(x) trimws(as.character(x))
+
+  # Consolidated validation issue log -----------------------------------------
+  issues <- data.table(scope = character(), item_key = character(), field = character(),
+                       problem = character(), severity = character())
+  add_issue <- function(scope, item_key, field, problem, severity = "FAIL")
+    issues <<- rbind(issues, data.table(scope = scope, item_key = as.character(item_key),
+                                        field = field, problem = problem,
+                                        severity = severity))
+
+  ## -- Assumptions (parameter_id -> value) ------------------------------------
+  asmp <- rd("Assumptions")
+  A    <- setNames(as.character(asmp$value), as.character(asmp$parameter_id))
+  getA <- function(id, default = NA) if (id %in% names(A)) A[[id]] else default
+
+  analysis_start_year     <- as.integer(numv(getA("analysis_start_year", 2025)))
+  analysis_end_year       <- as.integer(numv(getA("analysis_end_year", 2050)))
+  intervention_start_year <- as.integer(numv(getA("intervention_start_year", analysis_start_year)))
+  coverage_target_year    <- as.integer(numv(getA("coverage_target_year", analysis_end_year)))
+  target_coverage_default <- numv(getA("target_coverage_default", 0.8))
+  cost_discount_rate      <- numv(getA("cost_discount_rate", 0.03))
+  health_discount_rate    <- numv(getA("health_discount_rate", 0.03))
+  cost_price_year         <- as.integer(numv(getA("cost_price_year", 2023)))
+
+  ## -- cause_id -> model cause short code (explicit translation table) --------
+  cause_id2code <- c(C_RHD = "rhd", C_IHD = "ihd", C_IS = "istroke",
+                     C_ICH = "hstroke", C_HHD = "hhd", C_CMP = "cmd", C_T2D = "dm2")
+  # C_SHARED intentionally absent (shared-cost bucket; not a modeled cause).
+  bad_codes <- setdiff(unname(cause_id2code), names(cause_map))
+  if (length(bad_codes))
+    stop("FAIR: cause translation maps to code(s) absent from Model 00 cause_map: ",
+         paste(bad_codes, collapse = ", "))
+
+  ## -- transition translation (workbook from/to -> model transition) ----------
+  translate_transition <- function(from, to) {
+    from <- tolower(chrv(from)); to <- tolower(chrv(to))
+    out <- rep(NA_character_, length(from))
+    out[from == "well" & to == "sick"] <- "incidence"
+    out[from %in% c("sick", "sick_severe", "sick_hf") & grepl("^dead", to)] <- "case_fatality"
+    out
+  }
+
+  ## -- Read the four contract sheets ------------------------------------------
+  map <- rd("Intervention_Cause_Map")
+  eff <- rd("Effect_Sizes")
+  cov <- rd("Coverage")
+  cst <- rd("Cost_Components")
+
+  map[, include_flag := as.integer(numv(include_flag))]
+  map_sel <- map[include_flag == 1L]
+
+  # Duplicate / missing intervention_cause_key (selected links) ----------------
+  dupk <- map_sel[, .N, by = intervention_cause_key][N > 1L]
+  if (nrow(dupk))
+    for (k in dupk$intervention_cause_key)
+      add_issue("health_link", k, "intervention_cause_key", "duplicate selected link key", "FAIL")
+  if (any(is.na(map_sel$intervention_cause_key) | !nzchar(chrv(map_sel$intervention_cause_key))))
+    add_issue("health_link", "<NA>", "intervention_cause_key", "missing link key", "FAIL")
+
+  # Effect / coverage match cardinality ---------------------------------------
+  eff_n <- eff[, .(n_eff = .N), by = intervention_cause_key]
+  cov_n <- cov[, .(n_cov = .N), by = intervention_cause_key]
+
+  eff_k <- eff[, .(intervention_cause_key,
+                   transition_from, transition_to, effect_measure,
+                   effect_value      = numv(effect_value),
+                   affected_fraction = numv(affected_fraction),
+                   e_age_start       = numv(age_start),
+                   e_age_stop        = numv(age_stop),
+                   e_sex             = chrv(sex),
+                   effect_review     = chrv(review_status))]
+
+  cov_k <- cov[, .(intervention_cause_key,
+                   baseline_coverage = numv(baseline_coverage),
+                   target_override   = numv(target_override),
+                   coverage_review   = chrv(review_status))]
+  cov_k[, target_coverage := ifelse(is.na(target_override), target_coverage_default, target_override)]
+  cov_k[, start_year  := intervention_start_year]
+  cov_k[, target_year := coverage_target_year]
+
+  ## -- Assemble the selected-link table ---------------------------------------
+  L <- merge(map_sel[, .(intervention_cause_key, intervention_id, intervention_name,
+                         cause_id, model_name, cost_join_key, cost_scope)],
+             eff_k, by = "intervention_cause_key", all.x = TRUE)
+  L <- merge(L, cov_k, by = "intervention_cause_key", all.x = TRUE)
+  L <- merge(L, eff_n, by = "intervention_cause_key", all.x = TRUE)
+  L <- merge(L, cov_n, by = "intervention_cause_key", all.x = TRUE)
+  L[is.na(n_eff), n_eff := 0L]
+  L[is.na(n_cov), n_cov := 0L]
+
+  L[, model_transition := translate_transition(transition_from, transition_to)]
+  L[, cause_code       := cause_id2code[cause_id]]
+
+  ## -- Per-link validation -----------------------------------------------------
+  in01 <- function(x) !is.na(x) & x >= 0 & x <= 1
+  L[, problem := ""]
+  padd <- function(cond, msg) {
+    cond[is.na(cond)] <- FALSE
+    L[cond, problem := paste0(problem, ifelse(nchar(problem) > 0L, "; ", ""), msg)]
+  }
+  padd(L$n_eff != 1L,                          "effect match != 1")
+  padd(L$n_cov != 1L,                          "coverage match != 1")
+  padd(!in01(L$effect_value),                  "effect_value missing/out of [0,1]")
+  padd(!in01(L$affected_fraction),             "affected_fraction missing/out of [0,1]")
+  padd(is.na(L$baseline_coverage),             "baseline coverage missing")
+  padd(!is.na(L$baseline_coverage) & (L$baseline_coverage < 0 | L$baseline_coverage > 1),
+                                               "baseline coverage out of [0,1]")
+  padd(!in01(L$target_coverage),               "target coverage missing/out of [0,1]")
+  padd(!is.na(L$baseline_coverage) & !is.na(L$target_coverage) &
+         L$target_coverage < L$baseline_coverage, "target coverage < baseline coverage")
+  padd(is.na(L$model_transition),              "transition label not mapped to model")
+  padd(is.na(L$cause_code),                    "cause_id absent from Model 00 cause_map")
+  padd(is.na(L$start_year) | is.na(L$target_year) | L$start_year > L$target_year,
+                                               "invalid start/target year")
+  L[, valid := problem == ""]
+
+  for (i in which(!L$valid))
+    add_issue("health_link", L$intervention_cause_key[i], "effect/coverage",
+              L$problem[i], "FAIL")
+
+  ## -- Cost components ---------------------------------------------------------
+  sel_int <- unique(map_sel$intervention_id)
+  C <- cst[, .(cost_record_id, cost_component_key, cost_option,
+               selected_for_base_case      = as.integer(numv(selected_for_base_case)),
+               intervention_id, cause_id, cost_join_key, cost_component,
+               population_in_need_measure  = tolower(chrv(population_in_need_measure)),
+               population_in_need_fraction = numv(population_in_need_fraction),
+               frequency_per_year          = numv(frequency_per_year),
+               c_age_start = numv(age_start), c_age_stop = numv(age_stop),
+               c_sex = chrv(sex),
+               unit_cost_usd = numv(unit_cost_usd),
+               price_year    = as.integer(numv(price_year)),
+               indonesia_adjusted_flag = as.integer(numv(indonesia_adjusted_flag)),
+               cost_review   = chrv(review_status))]
+  C <- C[intervention_id %in% sel_int]
+
+  # Exactly one selected base-case row per in-scope cost_component_key ----------
+  C[, n_sel := sum(selected_for_base_case == 1L, na.rm = TRUE), by = cost_component_key]
+  sel_counts <- unique(C[, .(cost_component_key, n_sel)])
+  for (i in seq_len(nrow(sel_counts))) {
+    if (isTRUE(sel_counts$n_sel[i] > 1L))
+      add_issue("cost", sel_counts$cost_component_key[i], "selected_for_base_case",
+                "more than one base-case option selected", "FAIL")
+    if (isTRUE(sel_counts$n_sel[i] == 0L))
+      add_issue("cost", sel_counts$cost_component_key[i], "selected_for_base_case",
+                "no base-case cost option selected (component omitted from costing)", "REVIEW")
+  }
+
+  Cbase <- C[selected_for_base_case == 1L]
+  valid_cjk <- unique(chrv(map$cost_join_key))
+  Cbase[, cause_code := cause_id2code[cause_id]]  # NA for C_SHARED
+
+  padc <- function(dt, cond, field, msg, severity) {
+    cond[is.na(cond)] <- FALSE
+    if (any(cond))
+      for (i in which(cond))
+        add_issue("cost", dt$cost_record_id[i], field, msg, severity)
+  }
+  padc(Cbase, is.na(Cbase$unit_cost_usd) | Cbase$unit_cost_usd < 0, "unit_cost_usd",
+       "missing or negative unit cost on a selected base-case row", "FAIL")
+  padc(Cbase, is.na(Cbase$frequency_per_year) | Cbase$frequency_per_year < 0, "frequency_per_year",
+       "missing or negative frequency", "FAIL")
+  padc(Cbase, is.na(Cbase$population_in_need_fraction) |
+         Cbase$population_in_need_fraction < 0 | Cbase$population_in_need_fraction > 1,
+       "population_in_need_fraction", "PIN fraction missing/out of [0,1]", "FAIL")
+  padc(Cbase, !(chrv(Cbase$cost_join_key) %in% valid_cjk), "cost_join_key",
+       "cost_join_key not present in Intervention_Cause_Map", "FAIL")
+  padc(Cbase, !(Cbase$population_in_need_measure %in% c("all", "prevalence", "incidence")),
+       "population_in_need_measure", "unsupported PIN measure", "FAIL")
+  padc(Cbase, Cbase$indonesia_adjusted_flag == 0L, "indonesia_adjusted_flag",
+       "cost not Indonesia-adjusted (flagged; not treated as ready)", "REVIEW")
+  padc(Cbase, !is.na(Cbase$price_year) & Cbase$price_year != cost_price_year, "price_year",
+       paste0("cost price year != reporting price year (", cost_price_year, ")"), "REVIEW")
+
+  # cost_scope per cost_join_key (from the map) --------------------------------
+  scope_by_cjk <- unique(map[, .(cost_join_key = chrv(cost_join_key), cost_scope = chrv(cost_scope))])
+  scope_by_cjk <- scope_by_cjk[, .(cost_scope = cost_scope[1]), by = cost_join_key]
+  Cbase[, cost_join_key := chrv(cost_join_key)]
+  Cbase <- merge(Cbase, scope_by_cjk, by = "cost_join_key", all.x = TRUE)
+
+  # Coverage spec for each cost record (link-level, else intervention-level) ---
+  cov_by_key <- cov_k[, .(cost_join_key = intervention_cause_key,
+                          cb = baseline_coverage, ct = target_coverage,
+                          cs = start_year, cty = target_year)]
+  cov_int <- merge(map_sel[, .(intervention_cause_key, intervention_id)],
+                   cov_k[, .(intervention_cause_key, baseline_coverage, target_coverage,
+                             start_year, target_year)],
+                   by = "intervention_cause_key")
+  cov_int_u <- cov_int[, .(ib = mean(baseline_coverage, na.rm = TRUE),
+                           it = mean(target_coverage, na.rm = TRUE),
+                           is = suppressWarnings(min(start_year, na.rm = TRUE)),
+                           ity = suppressWarnings(max(target_year, na.rm = TRUE)),
+                           n_traj = uniqueN(paste(baseline_coverage, target_coverage,
+                                                  start_year, target_year))),
+                       by = intervention_id]
+  Cbase <- merge(Cbase, cov_by_key,  by = "cost_join_key",  all.x = TRUE)
+  Cbase <- merge(Cbase, cov_int_u,   by = "intervention_id", all.x = TRUE)
+  Cbase[is.na(cb), `:=`(cb = ib, ct = it, cs = is, cty = ity)]
+  # Shared cost that fell back to an ambiguous intervention-level trajectory
+  padc(Cbase, is.na(Cbase$cb), "coverage",
+       "no coverage trajectory found for cost record", "FAIL")
+  setnames(Cbase, c("cb", "ct", "cs", "cty"),
+           c("cov_baseline", "cov_target", "cov_start_year", "cov_target_year"))
+  Cbase[, c("ib", "it", "is", "ity") := NULL]
+
+  ## -- Runnable interventions & scenario catalogue ----------------------------
+  valid_links   <- L[valid == TRUE]
+  runnable_ints <- unique(valid_links$intervention_id)
+  blocked_ints  <- setdiff(sel_int, runnable_ints)
+
+  to_engine <- function(dd)
+    dd[, .(intervention_id, intervention_cause_key, cause_code, model_transition,
+           effect_value, affected_fraction, baseline_coverage, target_coverage,
+           start_year, target_year, age_start = e_age_start, age_stop = e_age_stop,
+           sex = e_sex)]
+
+  scen <- list()
+  scen[[baseline_id]] <- list(scenario_id = baseline_id,
+                              scenario_label = "Baseline (no new intervention)",
+                              intervention_ids = character(0),
+                              interventions = character(0),
+                              fair_effect_rows = NULL)
+  for (iid in runnable_ints) {
+    nm <- unique(map_sel[intervention_id == iid, intervention_name])[1]
+    scen[[iid]] <- list(scenario_id = iid, scenario_label = nm,
+                        intervention_ids = iid, interventions = "fair_wb",
+                        fair_effect_rows = to_engine(valid_links[intervention_id == iid]))
+  }
+  if (length(runnable_ints) >= 2L)
+    scen[["all"]] <- list(scenario_id = "all",
+                          scenario_label = "All selected interventions (combined)",
+                          intervention_ids = runnable_ints,
+                          interventions = "fair_wb",
+                          fair_effect_rows = to_engine(valid_links))
+
+  ## -- Assemble fair_inputs (consumed by Model 09) ----------------------------
+  fair_inputs <- list(
+    links          = L,
+    valid_links    = valid_links,
+    blocked_links  = L[valid == FALSE],
+    costs          = Cbase,
+    cost_all       = C,
+    validation     = issues,
+    cause_translation = data.table(cause_id = names(cause_id2code),
+                                   cause_code = unname(cause_id2code)),
+    runnable_interventions = runnable_ints,
+    blocked_interventions  = blocked_ints,
+    inputs_path    = inputs_path,
+    baseline_scenario_id = baseline_id,
+    assumptions    = list(
+      analysis_start_year     = analysis_start_year,
+      analysis_end_year       = analysis_end_year,
+      intervention_start_year = intervention_start_year,
+      coverage_target_year    = coverage_target_year,
+      target_coverage_default = target_coverage_default,
+      cost_discount_rate      = cost_discount_rate,
+      health_discount_rate    = health_discount_rate,
+      cost_price_year         = cost_price_year,
+      currency                = getA("currency", "USD"),
+      scale_up_shape          = getA("scale_up_shape", "linear"),
+      downstream_cost_offsets = as.integer(numv(getA("downstream_cost_offsets", 0))),
+      rhd_surgery_frequency   = numv(getA("rhd_surgery_frequency", 1)),
+      economic_perspective    = getA("economic_perspective", "health_system")))
+
+  ## -- Report ------------------------------------------------------------------
+  n_fail <- sum(issues$severity == "FAIL")
+  n_rev  <- sum(issues$severity == "REVIEW")
+  cat("\n--- FAIR Choices workbook catalogue ---------------------------------\n")
+  cat(sprintf("Workbook: %s\n", inputs_path))
+  cat(sprintf("Selected links: %d | valid: %d | invalid: %d\n",
+              nrow(map_sel), nrow(valid_links), nrow(L[valid == FALSE])))
+  cat(sprintf("Runnable interventions (%d): %s\n",
+              length(runnable_ints), paste(runnable_ints, collapse = ", ")))
+  if (length(blocked_ints))
+    cat(sprintf("BLOCKED interventions (%d): %s\n",
+                length(blocked_ints), paste(blocked_ints, collapse = ", ")))
+  cat(sprintf("Selected base-case cost rows: %d\n", nrow(Cbase)))
+  cat(sprintf("Validation issues: %d FAIL, %d REVIEW\n", n_fail, n_rev))
+  if (nrow(issues)) {
+    cat("Consolidated validation diagnostic:\n")
+    print(issues)
+  }
+  cat(sprintf("Scenarios built (%d): %s\n",
+              length(scen), paste(names(scen), collapse = ", ")))
+  cat("---------------------------------------------------------------------\n\n")
+
+  if (strict && n_fail > 0L)
+    stop("FAIR: strict_model_input_validation = TRUE and ", n_fail,
+         " FAIL-level workbook issue(s) present (see diagnostic above). ",
+         "Resolve them or set strict_model_input_validation = FALSE to run only ",
+         "the valid scenarios.", call. = FALSE)
+
+  list(scenarios = scen, inputs = fair_inputs)
+}
+
+.fair_built    <- .build_fair_catalogue(model_inputs_file, cause_map,
+                                        strict      = strict_model_input_validation,
+                                        baseline_id = baseline_scenario_id)
+fair_scenarios <- .fair_built$scenarios
+fair_inputs    <- .fair_built$inputs
+rm(.fair_built)
