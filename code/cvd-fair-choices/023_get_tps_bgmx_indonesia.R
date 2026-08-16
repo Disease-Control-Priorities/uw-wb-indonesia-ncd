@@ -40,7 +40,7 @@ library(demography)
 library(forecast)   # for auto.arima + forecast
 
 # ============================================================
-# Adult mortality forecast (ages 20–95+) by location/sex/cause
+# Background mortality forecast (full model age range 0–95+) by location/sex/cause
 # Train: 2000–2015  |  Validate (RMSE): 2016–2019  |  Project: 2016–2050
 # Input dt columns: location, sex, cause, year, age, BG.mx  (rates)
 # ============================================================
@@ -121,9 +121,12 @@ fit_forecast_group <- function(dg) {
   test_years  <- 2016:2019
   proj_until  <- 2050
   
-  # ages present in training (and within 20–95)
+  # ages present in training (within the configured model age range 0-95).
+  # Young ages with an all-NA training row are dropped by keep_age below and
+  # then fall back to "no trend" (flat) at the 05 merge, so they are never
+  # silently lost from the model grid.
   ages_all <- sort(unique(dg$age))
-  ages_use <- ages_all[ages_all >= 20 & ages_all <= 95]
+  ages_use <- ages_all[ages_all >= min_model_age & ages_all <= max_model_age]
   
   # Build matrices
   mx_train <- make_rate_matrix(dg[year %in% train_years], ages_use, train_years)

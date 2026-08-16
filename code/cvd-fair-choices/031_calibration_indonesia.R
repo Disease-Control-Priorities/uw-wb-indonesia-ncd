@@ -278,23 +278,13 @@ unique(gbd$location)
 unique(gbd$age)
 unique(gbd$cause)
 
-age_match<-data.frame(age=20:95)%>%
-      mutate(age.group = ifelse(age<25, "20-24 years", NA),
-             age.group = ifelse(age>=25 & age<30, "25-29 years", age.group),
-             age.group = ifelse(age>=30 & age<35, "30-34 years", age.group),
-             age.group = ifelse(age>=35 & age<40, "35-39 years", age.group),
-             age.group = ifelse(age>=40 & age<45, "40-44 years", age.group),
-             age.group = ifelse(age>=45 & age<50, "45-49 years", age.group),
-             age.group = ifelse(age>=50 & age<55, "50-54 years", age.group),
-             age.group = ifelse(age>=55 & age<60, "55-59 years", age.group),
-             age.group = ifelse(age>=60 & age<65, "60-64 years", age.group),
-             age.group = ifelse(age>=65 & age<70, "65-69 years", age.group),
-             age.group = ifelse(age>=70 & age<75, "70-74 years", age.group),
-             age.group = ifelse(age>=75 & age<80, "75-79 years", age.group),
-             age.group = ifelse(age>=80 & age<85, "80-84 years", age.group),
-             age.group = ifelse(age>=85 & age<90, "85-89 years", age.group),
-             age.group = ifelse(age>=90 & age<95, "90-94 years", age.group),
-             age.group = ifelse(age==95, "95+ years", age.group))
+# Single-year age -> GBD band label via the central helper in 01_utils (was a
+# hand-written 20-95 ladder). NOTE: 031 is a dormant seed script (not sourced by
+# 00, which sources 03_calibration_indonesia_nelder_mead.R); its state.transition
+# is still the legacy age-20-boundary version and would need full-lifecycle
+# parity before use.
+age_match <- data.frame(age = age_single)
+age_match$age.group <- as.character(gbd_band_label(age_match$age))
 
 #............................................................. 
 # Run Calibration by location groups----

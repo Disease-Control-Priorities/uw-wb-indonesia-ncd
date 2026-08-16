@@ -324,12 +324,10 @@ if(run_adjustments_inputs) {
   gbd <- data.table(gbd)
 
   
-  # Remove unnecessary dx
-  dx_include <- c("All causes","Ischemic heart disease",
-                  "Ischemic stroke","Intracerebral hemorrhage",
-                  "Alzheimer's disease and other dementias","Hypertensive heart disease")                            
-  
-  # Filter the data to include only the specified causes
+  # Filter to the configured causes. Uses dx_include from the central config in
+  # 00 (removed a divergent local dx_include that listed aod and omitted
+  # rhd/cmd/dm2). NOTE: 032 is dormant in production (00 sources
+  # 03_calibration_indonesia_nelder_mead.R, not 03_calibration.R).
   gbd <- gbd[cause_name %in% dx_include,]
   
   setnames(gbd,c("sex_name","age_name","cause_name","measure_name","metric_name","location_name")
@@ -357,17 +355,13 @@ if(run_adjustments_inputs) {
   
   setnames(gbd, c("val.Deaths", "val.Prevalence"), c("gbdDeaths", "gbdPrev"))
   
-  # asignend 0 to missing alzheime r's disease and other dementias
-  gbd[is.na(gbdDeaths) & cause == "Alzheimer's disease and other dementias", gbdDeaths := 0]
-  gbd[is.na(gbdPrev) & cause == "Alzheimer's disease and other dementias", gbdPrev := 0]
+  # Missing young-age Deaths/Prevalence -> 0 (no burden), for any modeled cause.
+  gbd[is.na(gbdDeaths), gbdDeaths := 0]
+  gbd[is.na(gbdPrev),   gbdPrev   := 0]
 
-  # Apply mapping
-  gbd[cause=="Alzheimer's disease and other dementias", cause:="aod"]
-  gbd[cause=="Hypertensive heart disease", cause:="hhd"]
-  gbd[cause=="Ischemic heart disease", cause:="ihd"]
-  gbd[cause=="Ischemic stroke", cause:="istroke"]
-  gbd[cause=="Intracerebral hemorrhage", cause:="hstroke"]
-  gbd[cause=="All causes", cause:="all"]
+  # Long GBD name -> short code via the central cause map (from 00).
+  cause_lookup <- setNames(names(cause_map), cause_map)
+  gbd[, cause := fcoalesce(cause_lookup[cause], cause)]
   
   saveRDS(gbd, file = paste0(wd_temp,"gbd2021_adj.rds"))
   
@@ -378,38 +372,12 @@ if(run_adjustments_inputs) {
   
   dt  <- readRDS(paste0(wd_temp,"out_df_adjusted.rds"))
   
-  dt[cause=="Alzheimer's disease and other dementias", cause:="aod"]
-  dt[cause=="Hypertensive heart disease", cause:="hhd"]
-  dt[cause=="Ischemic heart disease", cause:="ihd"]
-  dt[cause=="Ischemic stroke", cause:="istroke"]
-  dt[cause=="Intracerebral hemorrhage", cause:="hstroke"]
-  dt[cause=="All causes", cause:="all"]
-  
-  
-  
+  dt[, cause := fcoalesce(cause_lookup[cause], cause)]
+
   #setnames(dt, c("sick", "dead"), c("Prevalence", "Deaths"))
-  
-  # create GBD age groups
-  
-  gbd_breaks <- c(seq(20, 95, by = 5), Inf)
-  gbd_labels <- c(
-    paste0(seq(20, 90, by = 5), "-", seq(24, 94, by = 5)),
-    "95+"
-  )
-  
-  # 2) (Optionally) wrap in a helper
-  create_gbd_age_group <- function(age) {
-    cut(
-      age,
-      breaks        = gbd_breaks,
-      labels        = gbd_labels,
-      right         = FALSE,      # [20,25), [25,30), …, [95,Inf)
-      include.lowest = TRUE
-    )
-  }
-  
-  # # 3) Apply to your data.table
-  dt[, age_group := create_gbd_age_group(age)]
+
+  # GBD band label via the central helper (was a local 20-95 "95+" ladder).
+  dt[, age_group := as.character(gbd_band_label(age))]
   
   # group by age group,location,year,sex,cause,scenario_id
   dt <- dt[
@@ -429,7 +397,9 @@ dt  <- readRDS(paste0(wd_temp,"out_df_adjusted_grouped.rds"))
 
 gbd <- readRDS(paste0(wd_temp,"gbd2021_adj.rds"))
 
-gbd[,age_group := gsub(" years", "", age)]
+# Keep the full GBD band label so it matches gbd_band_label() used for dt above
+# (previously this stripped " years", which no longer matches the central helper).
+gbd[,age_group := age]
 
 gbd$age <- NULL
 dt[,age_group := as.character(age_group)]

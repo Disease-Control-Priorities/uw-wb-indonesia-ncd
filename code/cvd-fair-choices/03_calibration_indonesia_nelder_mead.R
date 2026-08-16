@@ -279,9 +279,14 @@ gbd <- gbd[metric == "Number" &
 gbd <- dcast(gbd, location + sex + cause + age + year ~ measure, value.var = "val")
 
 ## drop "All causes" (no per-cause target; 031 also excludes it from the join)
-targets <- gbd[cause != cause_map[["all"]],
+targets <- gbd[cause != cause_map[[all_cause_code]],
                .(location, sex, cause, age, year,
                  gbdDeaths = Deaths, gbdPrev = Prevalence)]
+## GBD reports no Deaths (and sometimes no Prevalence) for a disease at the
+## youngest ages -> NA after the reshape. Treat an absent target as 0 (no
+## burden) so the objective and diagnostics are well defined at every age band.
+targets[is.na(gbdDeaths), gbdDeaths := 0]
+targets[is.na(gbdPrev),   gbdPrev   := 0]
 setkey(targets, location, sex, cause)
 
 #===============================================================================
@@ -289,29 +294,14 @@ setkey(targets, location, sex, cause)
 #===============================================================================
 
 ## ----------------------------------------------------------------------------
-## Single-year age (20-95) -> 5-year GBD age-group label. Identical breaks to
-## 031's age_match so model output aggregates onto GBD's age bins.
+## Single-year age (full model grid 0-95) -> GBD age-group label. Uses the
+## central band helper in 01_utils (gbd_band_label), so the model output
+## aggregates onto exactly the GBD bins present in the extract and never drifts
+## from a hand-written age ladder.
 ## ----------------------------------------------------------------------------
 make_age_match <- function() {
-      am <- data.table(age = 20:95)
-      am[, age.group := fcase(
-            age < 25, "20-24 years",
-            age < 30, "25-29 years",
-            age < 35, "30-34 years",
-            age < 40, "35-39 years",
-            age < 45, "40-44 years",
-            age < 50, "45-49 years",
-            age < 55, "50-54 years",
-            age < 60, "55-59 years",
-            age < 65, "60-64 years",
-            age < 70, "65-69 years",
-            age < 75, "70-74 years",
-            age < 80, "75-79 years",
-            age < 85, "80-84 years",
-            age < 90, "85-89 years",
-            age < 95, "90-94 years",
-            default = "95+ years"
-      )]
+      am <- data.table(age = age_single)
+      am[, age.group := gbd_band_label(age)]
       am
 }
 
@@ -437,9 +427,16 @@ apply_multipliers <- function(combo_rates, mtab, age_match) {
 
 ## ----------------------------------------------------------------------------
 ## Project ONE location-sex-cause combo through the well-sick-dead recursion,
-## 2009 -> 2019. This is 031's state.transition specialised to a single combo
-## and rewritten with a KEYED update-join (br[upd, on=.(year,age), :=...])
-## instead of 031's position-based assignment, which is fragile to row order.
+## 2009 -> 2019, as a FULL-LIFECYCLE cohort model over ages 0-95.
+##   * ENTRY: newborns enter at age 0 each projection year, seeded from that
+##     year's single-age population Nx (PREVt0 ~ 0 for CVD/dm2 in infants, so
+##     newborns are almost entirely "well"). This REPLACES the old age-20
+##     exogenous boundary; there is no age-20 reseed.
+##   * AGING: every cohort ages one year (age -> age+1) per step.
+##   * TERMINAL: age 95 is an OPEN-ENDED 95+ stock -- survivors aged from 94
+##     enter it AND survivors already in 95+ are retained (both pooled and
+##     summed), instead of the cohort disappearing after one year.
+## Rewritten with a KEYED update-join (br[upd, on=.(year,age), :=...]).
 ##
 ## APPROXIMATION (documented): the full model couples causes through the shared
 ## population pool (all.mx2 = sum of deaths over ALL causes). Projecting a single
@@ -447,19 +444,24 @@ apply_multipliers <- function(combo_rates, mtab, age_match) {
 ## are tiny relative to population, and targets are per-cause, so this is a
 ## negligible and intentional simplification that lets each combo calibrate
 ## independently (as in the cancer calibrate_by_combo template).
+##
+## `pop_combo` (the old age-20 UNWPP series) is retained in the signature for
+## compatibility but is no longer used for entry in the full-lifecycle model:
+## the single-age Nx already present on `cr` supplies every cohort, including
+## age-0 newborns.
 ## ----------------------------------------------------------------------------
-project_combo <- function(cr, pop_combo, y0 = CAL_YEAR_START, y1 = CAL_YEAR_END) {
-      br <- merge(cr, pop_combo, by = c("year", "location", "sex", "age"), all.x = TRUE)
-      ## incoming age-20 cohort each projection year comes from UNWPP (Nx20)
-      br[age == 20 & year > y0, Nx := Nx20]
-      br[, Nx20 := NULL]
+project_combo <- function(cr, pop_combo = NULL, y0 = CAL_YEAR_START, y1 = CAL_YEAR_END) {
+      br <- copy(cr)
+      a_lo <- min_model_age   # 0  : newborn entry age
+      a_hi <- max_model_age   # 95 : open-ended terminal age
 
-      ## initial states: first calibration year (all ages) + age-20 (all years)
-      br[year == y0 | age == 20, sick   := Nx * PREVt0]
-      br[year == y0 | age == 20, dead   := Nx * DIS.mx.t0]
-      br[year == y0 | age == 20, well   := Nx * (1 - (PREVt0 + ALL.mx))]
-      br[year == y0 | age == 20, pop    := Nx]
-      br[year == y0 | age == 20, all.mx := Nx * ALL.mx]
+      ## initial states: first calibration year (all ages) + age-0 newborns
+      ## (all years). Newborns each year come from that year's single-age Nx.
+      br[year == y0 | age == a_lo, sick   := Nx * PREVt0]
+      br[year == y0 | age == a_lo, dead   := Nx * DIS.mx.t0]
+      br[year == y0 | age == a_lo, well   := Nx * (1 - (PREVt0 + ALL.mx))]
+      br[year == y0 | age == a_lo, pop    := Nx]
+      br[year == y0 | age == a_lo, all.mx := Nx * ALL.mx]
 
       ## same defensive caps 031 applies inside state.transition
       br[CF > 0.9, CF := 0.9]
@@ -490,8 +492,15 @@ project_combo <- function(cr, pop_combo, y0 = CAL_YEAR_START, y1 = CAL_YEAR_END)
             b2[, well2 := pop2 - all.mx2 - sick2]
             b2[well2 < 0, well2 := 0]
 
-            upd <- b2[year == yr & age2 < 96,
-                      .(age = age2, year, sick2, dead2, well2, pop2, all.mx2)]
+            ## Aged cohorts land at age2 (= age+1), i.e. ages a_lo+1 .. a_hi+1.
+            ## Pool age2 > a_hi into the open-ended terminal group a_hi (95+):
+            ## this both ages survivors from 94 into 95+ (age2 == 95) and retains
+            ## survivors already in 95+ (age2 == 96), summing the count states.
+            upd <- b2[year == yr & age2 > a_lo]
+            upd[age2 > a_hi, age2 := a_hi]
+            upd <- upd[, .(sick2 = sum(sick2), dead2 = sum(dead2), well2 = sum(well2),
+                           pop2 = sum(pop2), all.mx2 = sum(all.mx2)),
+                       by = .(age = age2, year)]
             br[upd, on = .(year, age), `:=`(
                   sick   = i.sick2,
                   dead   = i.dead2,
@@ -523,14 +532,22 @@ proj_vs_targets <- function(proj, combo_targets, age_match) {
 
 ## ----------------------------------------------------------------------------
 ## Weighted RELATIVE squared error (the search objective). Deaths weighted 2x.
+##
+## A relative error only makes sense where the GBD target is positive. GBD does
+## not report Deaths (and sometimes Prevalence) for a disease at the youngest
+## ages, so those targets are 0; dividing by (0 + eps) would blow the objective
+## up to ~1e18 for any nonzero model value and swamp the meaningful adult signal.
+## We therefore include each metric's term ONLY where that metric's target > 0,
+## and sum the Deaths and Prevalence contributions separately so a zero-target on
+## one metric never discards a valid term on the other. For the adult bands
+## (all targets positive) this equals the original gbd+eps formulation.
 ## ----------------------------------------------------------------------------
 combo_error <- function(proj, combo_targets, age_match,
                         w_deaths = W_DEATHS, w_prev = W_PREV, eps = EPS_REL) {
       j <- proj_vs_targets(proj, combo_targets, age_match)
-      j[, sum(
-            w_deaths * ((Deaths     - gbdDeaths) / (gbdDeaths + eps))^2 +
-            w_prev   * ((Prevalence - gbdPrev)   / (gbdPrev   + eps))^2,
-            na.rm = TRUE)]
+      err_d <- j[gbdDeaths > 0, sum(((Deaths     - gbdDeaths) / gbdDeaths)^2, na.rm = TRUE)]
+      err_p <- j[gbdPrev   > 0, sum(((Prevalence - gbdPrev)   / gbdPrev  )^2, na.rm = TRUE)]
+      w_deaths * err_d + w_prev * err_p
 }
 
 ## ----------------------------------------------------------------------------
@@ -566,7 +583,17 @@ calibrate_one_combo_nm <- function(combo_rates, pop_combo, combo_targets, age_ma
 
       set.seed(seed)
       lo <- 1 - hw; hi <- 1 + hw
-      age_groups <- sort(unique(combo_targets$age))
+      ## Calibrate only age groups that carry burden (nonzero GBD Deaths or
+      ## Prevalence target). Young bands with no burden (e.g. CVD/dm2 below ~15y)
+      ## are left at their baseline rate (multiplier 1 via apply_multipliers) so
+      ## the search stays focused on ages that matter; the projection itself is
+      ## still full-lifecycle over all ages. Fall back to all target bands if a
+      ## combo somehow has no positive target.
+      age_groups <- sort(unique(
+            combo_targets[(!is.na(gbdDeaths) & gbdDeaths > 0) |
+                          (!is.na(gbdPrev)   & gbdPrev   > 0), age]))
+      if (length(age_groups) == 0L)
+            age_groups <- sort(unique(combo_targets$age))
       n_g   <- length(age_groups)
       n_par <- n_par_for(n_g, granularity)
 

@@ -22,14 +22,14 @@
 # GBD 2023 Data ----
 #...........................................................
 
-# Indonesia Level 2
+# Indonesia Level 2 DM
 
-# https://collab2023.healthdata.org/gbd-results?params=gbd-api-2023-permalink/e23ae880499d3ae1d643dca738057425
+# https://collab2023.healthdata.org/gbd-results?params=gbd-api-2023-permalink/d82f6c1f52b4905e2fcfcf571df01abe
 
 # load 2020- 2023
 
 # List all CSV files
-files <- list.files(paste0(wd_raw,"GBD/GBD2023-Indonesia/"), pattern = "\\.csv$", full.names = TRUE)
+files <- list.files(paste0(wd_raw,"GBD/gbd2023-indonesia-fair/"), pattern = "\\.csv$", full.names = TRUE)
 
 # Read and combine using rbindlist
 dt_23 <- rbindlist(lapply(files, fread), use.names = TRUE, fill = TRUE)
@@ -44,25 +44,6 @@ unique(dt$location_name)
 unique(dt$cause_name)
 unique(dt$age_name)
 
-dt <- dt[age_name!="75-84 years",]
-
-# Fix countries names
-
-# # Remove unnecessary dx
-dx_include <- c("All causes","Ischemic heart disease","Alzheimer's disease and other dementias",
-                "Ischemic stroke","Intracerebral hemorrhage","Hypertensive heart disease",
-                "Rheumatic heart disease","Cardiomyopathy and myocarditis")
-
-cause_map <- c(
-  ihd      = "Ischemic heart disease",
-  istroke  = "Ischemic stroke",
-  hstroke  = "Intracerebral hemorrhage",
-  hhd      = "Hypertensive heart disease",
-  aod      = "Alzheimer's disease and other dementias",
-  rhd      = "Rheumatic heart disease",
-  cmd      = "Cardiomyopathy and myocarditis",
-  all      = "All causes"
-)
 
 # AFTER  – define the vector once, reuse it
 cause_cols <- names(cause_map)
@@ -73,11 +54,10 @@ dt <- dt[cause_name %in% dx_include,]
 # Filter only Indonesia
 dt <- dt[location_name == "Indonesia",]
 
-# Filter 20+ years only
-dt <- dt[age_name %in% c("20-24 years", "25-29 years", "30-34 years", "35-39 years",
-                         "40-44 years", "45-49 years", "50-54 years", "55-59 years",
-                         "60-64 years", "65-69 years", "70-74 years", "75-79 years",
-                         "80-84 years", "85-89 years", "90-94 years", "95+ years"), ]
+# Filter to the modeled age bands (age 0 through the open-ended 95+ group),
+# taken from the central GBD band definition in 01_utils (driven by the
+# min/max_model_age set in 00). Previously this hard-coded the adult 20-95 bands.
+dt <- dt[age_name %in% gbd_age_bands(min_model_age, max_model_age)$label, ]
 
 # save temp baseline rates from gbd 2023
 saveRDS(dt, file = paste0(wd_raw,"GBD/","temp_1baseline_rates_gbd23.rds"))
@@ -126,28 +106,27 @@ setnames(dt,c("sex_name","age_name","cause_name","measure_name","metric_name","l
 
 project.all <- function(Country,
                         yr,
-                        ## short code  = long GBD cause name
-                        cause_map = c(
-                          ihd     = "Ischemic heart disease",
-                          istroke = "Ischemic stroke",
-                          hstroke = "Intracerebral hemorrhage",
-                          hhd     = "Hypertensive heart disease",
-                          aod     = "Alzheimer's disease and other dementias",
-                          rhd     = "Rheumatic heart disease",
-                          cmd     = "Cardiomyopathy and myocarditis",
-                          all     = "All causes")  # keep “all” last for readability
-) {
-  
+                        cause_map) {
+
+  ## `cause_map` MUST be supplied by the caller from the central config in 00.
+  ## No local default: a divergent inner map (which used to list "aod" and omit
+  ## "dm2") would silently drift from the single source of truth.
+  if (missing(cause_map) || is.null(cause_map))
+    stop("project.all(): cause_map not supplied; pass the central cause_map from 00.")
+
   ## .....................................................................
-  ##  Helpers 
+  ##  Helpers
   ## .....................................................................
-  all_long  <- unname(cause_map["all"])        # “All causes”
-  short_all <- "all"
-  short_vec <- setdiff(names(cause_map), short_all)  # everything except “all”
-  
-  interpolate.rate <- function(y) {
-    ages_in  <- c(seq(22, 92, 5), 95)
-    ages_out <- 20:95
+  all_long  <- unname(cause_map[all_cause_code])   # "All causes"
+  short_all <- all_cause_code
+  short_vec <- setdiff(names(cause_map), short_all)  # everything except "all"
+
+  ## Interpolate GBD band-level rates (anchored at band midpoints, ages_in) to
+  ## single years of age across the full model grid (age_single = 0:95). ages_in
+  ## is the set of band midpoints actually present, so this is robust to which
+  ## bands the extract contains and treats age 95 as the open-ended 95+ anchor.
+  interpolate.rate <- function(y, ages_in) {
+    ages_out <- age_single
     if (sum(!is.na(y)) < 2)
       return(rep(NA_real_, length(ages_out)))
     approx(x = ages_in, y = y, xout = ages_out,
@@ -158,16 +137,25 @@ project.all <- function(Country,
   ##  Data for the chosen year 
   ## .....................................................................
   gbd_data  <- dt[year == yr]
-  pop.df    <- totalpop[year_id == yr &
-                          location == Country & age_group > 19,
-                        .(location, sex = sex_name, age = age_group, Nx = val)]
+  ## Population by single year of age (UNWPP single-age file). Its `age` column
+  ## (renamed `age_group`) is a 1-based INDEX: index 1 == actual age 0, ...,
+  ## index 101 == actual age 100+. Convert index -> actual age, then pool all
+  ## ages >= max_model_age into the open-ended terminal group (95+).
+  pop.df    <- totalpop[year_id == yr & location == Country,
+                        .(location, sex = sex_name, age = age_group - 1L, Nx = val)]
+  pop.df[age >= max_model_age, age := max_model_age]
+  pop.df    <- pop.df[age >= min_model_age,
+                      .(Nx = sum(Nx)), by = .(location, sex, age)]
   
   ## .....................................................................
   ##  Generic rate extractor 
   ## .....................................................................
   other.rates <- function(met, meas, colname, sel) {
     df <- gbd_data[metric == met & measure == meas & location == Country]
-    df[, midptage := as.numeric(substr(age, 1, 2)) + 2]
+    ## GBD band label -> single-age interpolation midpoint (central helper).
+    ## Replaces substr(age,1,2)+2, which produced NA for the irregular young
+    ## bands ("<1 year", "12-23 months", "2-4 years", ...).
+    df[, midptage := gbd_band_midpoint(age)]
     setorder(df, sex, cause, midptage)
     
     ## wide: one column per original cause name
@@ -191,14 +179,24 @@ project.all <- function(Country,
     keep_cols <- c("sex", "midptage", names(cause_map))
     df <- df[, ..keep_cols]
     setorder(df, sex, midptage)
-    
-    ## interpolate to single-year ages 20:95 for each sex
+
+    ## Young ages: GBD does not report Deaths for some diseases below ~15y
+    ## (rows simply absent -> NA after dcast). Treat an absent DISEASE rate as
+    ## 0 (no burden), never NA -- NA would make approx() flat-extrapolate an
+    ## adult rate down onto children. The all-cause column is never zero-filled
+    ## (a missing all-cause value is a real error we must not mask).
+    for (sc in short_vec) df[is.na(get(sc)), (sc) := 0]
+
+    ## interpolate to single-year ages (age_single = 0:95) for each sex, using
+    ## the band midpoints actually present as the interpolation anchors.
     rates_sex <- rbindlist(lapply(unique(df$sex), function(sx) {
-      mat  <- as.matrix(df[sex == sx, ..cause_cols])
-      res  <- apply(mat, 2, interpolate.rate)
-      out  <- as.data.table(res)
+      dsx     <- df[sex == sx][order(midptage)]
+      ages_in <- dsx$midptage
+      mat     <- as.matrix(dsx[, ..cause_cols])
+      res     <- apply(mat, 2, interpolate.rate, ages_in = ages_in)
+      out     <- as.data.table(res)
       out[, sex := sx]
-      out[, age := 20:95]
+      out[, age := age_single]
       out[]
     }))
     

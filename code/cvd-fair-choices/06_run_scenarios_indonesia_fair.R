@@ -2116,67 +2116,80 @@ project.all <- function(Country,
   
   cat("\n=== Setting Initial Population States ===\n")
   
-  intervention_rates[year == 2017 | age == 20, `:=`(
+  ## Full-lifecycle initial states: seed year 2017 (all ages) and age-0 newborns
+  ## (all years). Newborns come from that year's single-age population Nx; for
+  ## CVD/dm2 in infants PREVt0 ~ 0, so newborns are almost entirely "well". This
+  ## REPLACES the old age-20 exogenous boundary -- there is no age-20 reseed.
+  intervention_rates[year == 2017 | age == min_model_age, `:=`(
     sick = Nx * PREVt0,
     dead = Nx * DIS.mx.t0,
     well = Nx * (1 - (PREVt0 + BG.mx)),
     pop = Nx,
     all.mx = Nx * DIS.mx.t0 + Nx * BG.mx
   )]
-  
+
   intervention_rates[CF > 0.99, CF := 0.99]
   intervention_rates[IR > 0.99, IR := 0.99]
-  
-  setorder(intervention_rates, sex, location, cause, age)
-  
+
+  setorder(intervention_rates, sex, location, cause, intervention, age)
+
+  a_lo <- min_model_age   # 0  : newborn entry age
+  a_hi <- max_model_age   # 95 : open-ended terminal (95+) age
+
   #..................................
   ## STATE TRANSITIONS ----
   #..................................
-  
+
   cat("\n=== Running State Transition Model ===\n")
   cat("Projecting from 2017 to 2058...\n")
-  
+
   for(i in 1:41) {
     if (i %% 10 == 0) cat("  Year", 2017 + i, "\n")
-    
+
     b2 <- intervention_rates[year <= 2017 + i & year >= 2017 + i - 1]
+    setorder(b2, sex, location, cause, intervention, age, year)  # shift() reads year yr-1
     b2[, age2 := age + 1]
-    
-    b2[, newcases2 := shift(well) * IR, 
+
+    b2[, newcases2 := shift(well) * IR,
        by = .(sex, location, cause, age, intervention)]
-    
-    b2[, sick2 := shift(sick) * (1 - (CF + BG.mx + covid.mx)) + shift(well) * IR, 
+
+    b2[, sick2 := shift(sick) * (1 - (CF + BG.mx + covid.mx)) + shift(well) * IR,
        by = .(sex, location, cause, age, intervention)]
     b2[sick2 < 0, sick2 := 0]
-    
-    b2[, dead2 := shift(sick) * CF, 
+
+    b2[, dead2 := shift(sick) * CF,
        by = .(sex, location, cause, age, intervention)]
     b2[dead2 < 0, dead2 := 0]
-    
-    b2[, pop2 := shift(pop) - shift(all.mx), 
+
+    b2[, pop2 := shift(pop) - shift(all.mx),
        by = .(sex, location, cause, age, intervention)]
     b2[pop2 < 0, pop2 := 0]
-    
-    b2[, all.mx2 := sum(dead2), 
+
+    b2[, all.mx2 := sum(dead2),
        by = .(sex, location, year, age, intervention)]
     b2[, all.mx2 := all.mx2 + (pop2 * BG.mx.all) + (pop2 * covid.mx)]
     b2[all.mx2 < 0, all.mx2 := 0]
-    
+
     b2[, well2 := pop2 - all.mx2 - sick2]
     b2[well2 < 0, well2 := 0]
-    
-    b2 <- b2[year == 2017 + i & age2 < 96, 
-             .(age2, newcases2, sick2, dead2, well2, pop2, all.mx2, 
-               sex, location, cause, intervention)]
-    setnames(b2, "age2", "age")
-    
-    intervention_rates[year == 2017 + i & age > 20, `:=`(
-      newcases = b2$newcases2,
-      sick = b2$sick2,
-      dead = b2$dead2,
-      well = b2$well2,
-      pop = b2$pop2,
-      all.mx = b2$all.mx2
+
+    ## Aged cohorts land at age2 = age+1. Pool age2 > a_hi into the open-ended
+    ## terminal group (95+): this both ages survivors from 94 into 95+
+    ## (age2 == 95) AND retains survivors already in 95+ (age2 == 96), summing the
+    ## count states. Age 0 is not updated here (reseeded as newborns above).
+    upd <- b2[year == 2017 + i & age2 > a_lo]
+    upd[age2 > a_hi, age2 := a_hi]
+    upd <- upd[, .(newcases = sum(newcases2), sick = sum(sick2), dead = sum(dead2),
+                   well = sum(well2), pop = sum(pop2), all.mx = sum(all.mx2)),
+               by = .(age = age2, year, sex, location, cause, intervention)]
+
+    intervention_rates[upd, on = .(year, age, sex, location, cause, intervention), `:=`(
+      newcases = i.newcases,
+      sick     = i.sick,
+      dead     = i.dead,
+      well     = i.well,
+      pop      = i.pop,
+      all.mx   = i.all.mx
     )]
   }
   
@@ -2560,19 +2573,27 @@ validate_intervention_results <- function(results_dt) {
 # HTN target columns in dt_hbp_targets
 htn_target_cols <- c("htncov2_aspirational")
 
-# Scenarios: baseline + antihypertensive only (you can expand this list with more combinations as needed)
+# # Scenarios: baseline + antihypertensive only (you can expand this list with more combinations as needed)
+# scenarios <- list(
+#   baseline = character(0),
+#   bp_only = "antihypertensive",
+#   sodium_only = "sodium",
+#   tfa_only = "tfa",
+#   statins_only = "statins",
+#   bp_sodium = c("antihypertensive", "sodium"),
+#   bp_sodium_tfa = c("antihypertensive", "sodium", "tfa"),
+#   all_four = c("antihypertensive", "sodium", "tfa", "statins"),
+#   # FAIR-Choices CVD package scenarios
+#   fair_only     = "fair_cvd",
+#   all_plus_fair = c("antihypertensive", "sodium", "tfa", "statins", "fair_cvd")
+# )
+
+# Only RUN the fair choices
 scenarios <- list(
   baseline = character(0),
-  bp_only = "antihypertensive",
-  sodium_only = "sodium",
-  tfa_only = "tfa",
-  statins_only = "statins",
-  bp_sodium = c("antihypertensive", "sodium"),
-  bp_sodium_tfa = c("antihypertensive", "sodium", "tfa"),
-  all_four = c("antihypertensive", "sodium", "tfa", "statins"),
   # FAIR-Choices CVD package scenarios
   fair_only     = "fair_cvd",
-  all_plus_fair = c("antihypertensive", "sodium", "tfa", "statins", "fair_cvd")
+  all_plus_fair = c("fair_cvd")
 )
 
 # explicit hypertension control parameters

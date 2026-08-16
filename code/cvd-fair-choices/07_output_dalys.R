@@ -11,12 +11,22 @@ int_year <- 2026
 # Since the dw are not explicit, we compute it as the ratio of YLDs to prevalence for each cause and location.
 # For overall modeling, the average frequency-weighted disability weight across the countries will be used, but we will also have country-specific dw for sensitivity analyses.
 
-# dw <- as.data.table(read_excel("C:/Users/wrgar/OneDrive - UW/02Work/ResolveToSaveLives/GitHub/HTN-cost-model/DisabilityWeights4Countries.xlsx", 
-#                  sheet = "Sheet1", range = "A2:G18"))
+# GBD Permalink
+# https://collab2023.healthdata.org/gbd-results?params=gbd-api-2023-permalink/b4edd5f8b04a716e3388280d50b10563
 
 # Raw file: IHME-GBD_2023_DATA-52d32656-1
 
-dt_burden_gbd <- fread(paste0(wd_raw,"GBD/","IHME-GBD_2023_DATA-52d32656-1.csv"))
+# dt_burden_gbd <- fread(paste0(wd_raw,"GBD/","IHME-GBD_2023_DATA-52d32656-1.csv"))
+dt_burden_gbd <- fread(paste0(wd_raw,"GBD/gbd2023-indonesia-burden/","IHME-GBD_2023_DATA-ea9c4fae-1.csv"))
+
+# Keep most recent year and sex both
+dt_burden_gbd <- dt_burden_gbd[year == 2023 & sex_name=="Both",]
+
+# Only Indonesia
+dt_burden_gbd <- dt_burden_gbd[location_name=="Indonesia",]
+
+# Only Rates (age standarized)
+dt_burden_gbd <- dt_burden_gbd[metric_name=="Rate",]
 
 # Keep only relevant columns
 dt_burden_gbd <- dt_burden_gbd[measure_name %in% c("YLDs (Years Lived with Disability)","Prevalence"), .(location_name, cause_name, measure_name, val)]

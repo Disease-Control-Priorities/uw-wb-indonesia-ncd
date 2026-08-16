@@ -4,50 +4,68 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A population-based discrete-time Markov (state-transition) simulation framework evaluating health and economic impacts of NCD policies in Indonesia. Two independent disease modules: **CVD** and **Cancer** (16 cancer types from GBD 2021). Projects outcomes 2025–2050 under policy scenarios.
+A population-based discrete-time Markov (state-transition) simulation framework evaluating health and economic impacts of NCD policies in Indonesia, projecting outcomes under policy scenarios (roughly 2025–2050 in the legacy pipelines, 2025–2100 in the integrated pipeline).
 
-The CVD module exists in two parallel forms: a **generic/SEARO** pipeline (`*.R`) and an **Indonesia-specific** pipeline (`*_indonesia.R`). The Indonesia pipeline is the active, maintained path — its entry point is `00_run_model_indonesia.R`. The Indonesia variant models six causes (IHD, ischemic stroke, intracerebral hemorrhage, hypertensive heart disease, rheumatic heart disease, cardiomyopathy & myocarditis); the generic variant models the first four.
+**Core design**: Population → Risk Factors → Markov transitions → Outcomes (deaths, DALYs, costs). Conditional independence across diseases; PAF-based incidence; no comorbidity modeled (v1).
 
-**Core design**: Population → Risk Factors → Markov transitions → Outcomes (deaths, DALYs, costs). Conditional independence across diseases; PAF-based incidence; no comorbidity modeled (v1.0).
+The codebase currently contains **four coexisting code families**. Know which one you are working in:
+
+1. **Legacy CVD pipeline** (`code/cvd/`) — the original numbered pipeline, with a generic/SEARO variant (`*.R`) and an Indonesia-specific variant (`*_indonesia.R`). Entry point `code/cvd/00_run_model_indonesia.R`. Models six causes (IHD, ischemic stroke, intracerebral hemorrhage, hypertensive heart disease, rheumatic heart disease, cardiomyopathy & myocarditis); the generic variant models the first four.
+2. **FAIR Choices CVD variant** (`code/cvd-fair-choices/`) — a copy of the Indonesia CVD scripts adapted to a FAIR Choices–style intervention/effect-size framework. Entry point `code/cvd-fair-choices/00_run_model_cvd_fair.R`. Uses the Nelder-Mead calibration and the `_fair` scenario engine.
+3. **Integrated NCD pipeline** (`code/scripts/` + `code/R/`) — a newer rewrite that unifies CVD, cancer, and other NCDs under a single cause-agnostic Markov engine driven by a 23-cause registry. Entry point `code/scripts/00_run_all.R`. **In active development** (V1 scope: 4 CVD causes + cervical cancer). This is the strategic direction.
+4. **Cancer pipeline** (`code/cancer/`) — Markov + cohort-component population projection for 16 cancer types (GBD 2021). Run sequentially from `code/cancer/scripts/`.
 
 ## Directory Layout
 
 ```
 ├── code/
-│   ├── cvd/             # CVD Markov model pipeline (numbered scripts)
-│   ├── cancer/          # Cancer Markov + cohort component projection
-│   │   ├── fnx/         # Function library (~20 reusable functions)
-│   │   └── scripts/     # Numbered execution scripts (00–06)
-│   ├── demography/      # Demographic models (placeholder)
-│   └── utils/           # Shared utilities (placeholder)
+│   ├── cvd/               # Legacy CVD Markov pipeline (generic + _indonesia variants)
+│   ├── cvd-fair-choices/  # FAIR Choices CVD variant (copy of Indonesia CVD scripts)
+│   ├── scripts/           # Integrated NCD pipeline orchestrated by 00_run_all.R (01–07)
+│   ├── R/                 # Integrated-pipeline modules: engine, cause_registry,
+│   │                      #   interventions_cvd, validation, packages
+│   ├── utils/             # ⚠ Identical duplicate of code/R/ (stale mirror; see Gotchas)
+│   ├── cancer/            # Cancer Markov + cohort component projection
+│   │   ├── fnx/           # Function library (~20 reusable functions)
+│   │   └── scripts/       # Numbered execution scripts (00–06)
+│   ├── demography/        # Placeholder (README only)
+│   └── tests/             # Placeholder (README only)
 ├── data/
-│   ├── raw/             # GBD 2023, UNWPP 2024, IHME, NCD-RisC, ETIHAD (not on GitHub)
-│   ├── interim/         # Working/intermediate datasets
-│   └── processed/       # Production-ready .rds/.csv/.xlsx files
-├── output/
-│   ├── out_model/       # Per-run raw simulation .rds (gitignored; consumed by 09_validation)
-│   ├── paper/           # Publication-ready summary .rds files
-│   └── slides/          # Presentation-ready .rds + .png files
-├── scenarios/
-│   ├── cvd/             # CVD R Markdown reports (aim1_report.Rmd)
-│   └── cancer/          # Cancer R Markdown reports
-├── reports/             # LaTeX/Beamer; technical_presentation.Rmd/.tex, preamble, refs
-├── tests/               # Test suite (placeholder)
-└── docs/                # Documentation, diagrams, prompts.txt
+│   ├── raw/               # GBD 2023, UNWPP 2024, IHME, NCD-RisC, ETIHAD (not on GitHub)
+│   ├── interim/           # Working/intermediate datasets
+│   ├── processed/         # Production-ready .rds/.csv/.xlsx (legacy pipelines)
+│   ├── gbd/               # Cleaned GBD inputs generated by integrated scripts 01/01b/03
+│   ├── wpp/               # WPP2024 demographic backbone from integrated script 02
+│   ├── model/             # Calibration + baseline/scenario objects (integrated 04–06)
+│   └── indonesia_model_inputs.xlsx
+├── output/                # LEGACY pipeline outputs
+│   ├── out_model/         # Per-run raw simulation .rds (gitignored; consumed by 09_validation)
+│   ├── paper/             # Publication-ready summary .rds files
+│   └── slides/            # Presentation-ready .rds + .png files
+├── outputs/               # INTEGRATED pipeline outputs (tables/, figures/, validation/)
+├── scenarios/             # R Markdown reports: cvd/ (aim1_report.Rmd), cancer/
+├── reports/               # LaTeX/Beamer; technical_presentation.Rmd/.tex, preamble, refs
+├── R/, config/, dev/, tests/  # Top-level placeholders (README only)
+└── docs/                  # Documentation, references, diagrams, prompts.txt
 ```
 
-A scratch directory `../temp/` (sibling of the repo) is auto-created by the run scripts for intermediate processing.
+`uw-wb-indonesia-ncd.Rproj` at the repo root defines the RStudio project (and `here::here()` root). A scratch directory `../temp/` (sibling of the repo) is auto-created by the legacy run scripts for intermediate processing.
 
 ## Running the Models
 
-### CVD pipeline
+### Integrated NCD pipeline (active development)
 
 ```r
-# Active Indonesia pipeline:
-source("code/cvd/00_run_model_indonesia.R")
+source("code/scripts/00_run_all.R")   # runs scripts 01–07 in order
+```
 
-# Generic/SEARO pipeline (legacy):
-source("code/cvd/00_run_model.R")
+`00_run_all.R` sources the numbered scripts; each can also run standalone once its prerequisites exist. Steps 01–03 are one-time data prep (re-run only when GBD/WPP data changes); step 04 re-runs on calibration changes; steps 05–07 run every model update.
+
+### Legacy CVD pipeline
+
+```r
+source("code/cvd/00_run_model_indonesia.R")   # active Indonesia pipeline
+source("code/cvd/00_run_model.R")             # generic/SEARO (legacy)
 ```
 
 The entry script hard-codes `wd` to an absolute local path — update it before running on another machine. Configuration flags near the top control which stages execute:
@@ -61,48 +79,95 @@ The entry script hard-codes `wd` to an absolute local path — update it before 
 
 Set flags to `FALSE` to skip expensive stages when intermediate `.rds` files already exist.
 
+### FAIR Choices CVD variant
+
+```r
+source("code/cvd-fair-choices/00_run_model_cvd_fair.R")
+```
+
+Same flag/config convention as the legacy Indonesia pipeline; hard-codes an absolute `wd`. Sources `03_calibration_indonesia_nelder_mead.R` and `06_run_scenarios_indonesia_fair.R`.
+
 ### Cancer pipeline
 
-Cancer scripts run sequentially from `code/cancer/scripts/` (00–06). Initialize with `library.R`, which loads packages, reads `settings.yml`, and sources all functions from `fnx/`. Requires internet access for remote helper functions (falls back to local paths via `settings.yml`). Note: `settings.yml` is not committed to the repo and must be present locally; `library.R` resolves paths relative to a `root` ("R/") prefix it expects to be set.
+Cancer scripts run sequentially from `code/cancer/scripts/` (00–06). Initialize with `library.R`, which loads packages, reads `settings.yml`, and sources all functions from `fnx/`. Requires internet access for remote helper functions (falls back to local paths via `settings.yml`). Note: `settings.yml` is not committed and must be present locally; `library.R` resolves paths relative to a `root` ("R/") prefix it expects to be set.
 
 ## Package Dependencies
 
 No `renv.lock` exists. Install manually:
 
 ```r
-# CVD
+# Legacy CVD + FAIR Choices variant
 install.packages(c("data.table", "dplyr", "tidyr", "ggplot2", "RColorBrewer",
                    "readxl", "countrycode", "stringr", "parallel", "doParallel",
                    "foreach", "gmodels", "forecast"))
+
+# Integrated NCD pipeline (requires R >= 4.1.0 for the native pipe |>)
+install.packages(c("here", "dplyr", "tidyr", "readr", "purrr", "tibble",
+                   "ggplot2", "scales", "abind", "stringr", "readxl",
+                   "cowplot", "data.table", "countrycode", "rlang"))
+devtools::install_github("PPgp/wpp2024")   # demographic backbone (integrated script 02)
 
 # Cancer (additional)
 install.packages(c("tidyverse", "yaml", "curl"))
 ```
 
-## CVD Pipeline Architecture
+`code/R/packages.R` checks for the integrated pipeline's dependencies and stops with an install instruction if any are missing (it does not install silently).
 
-The entry script sources orchestration scripts that in turn source numbered sub-scripts. Most stages have a generic version and an `_indonesia` version; the table below lists the role and notes the Indonesia variant where it diverges. The active `00_run_model_indonesia.R` sources the `_indonesia` variants of stages 02, 05, 06 and adds stage 09.
+## Integrated NCD Pipeline Architecture
+
+`code/scripts/` holds the numbered pipeline; `code/R/` holds the shared engine and metadata sourced by those scripts (via `here("R", ...)` — see Gotchas). The cause-agnostic design means adding a disease = writing a new cause spec, with zero new engine code.
+
+### Shared modules (`code/R/`)
+
+| Module | Role |
+|--------|------|
+| `packages.R` | Dependency check; stops with install instructions if packages are missing |
+| `engine.R` | Markov engine (~1,900 lines): demographic backbone (`project_population_exposure`), core runner (`run_cause_module`, `run_direct_mortality_module`), TPM validation, output helpers (`compute_q4030`, `compute_deaths_averted`, `make_module_target_mx`), and scenario/module factories. Separates the WPP **demographic backbone** from the **disease state layer**; TPM rows = FROM, columns = TO, rows sum to 1 |
+| `cause_registry.R` | `CAUSE_REGISTRY` of 23 cause specs (4 CVD, 16 cancer, 3 other NCD) plus `SHARED_PARAMS`, `CVD_CAUSE_MAP`, `CVD_MODEL_TYPE` (`tpm` vs `direct_mortality`), and registry helpers. Metadata only — state vectors, transition adjacency, calibration targets, intervention slots |
+| `interventions_cvd.R` | V1 simplified CVD intervention modifiers returning `eff_ir` / `eff_cf` age vectors (antihypertensives, statins, sodium, TFA, diabetes-specific BP). See header for the simplifications vs the parent CVD model |
+| `validation.R` | `run_core_invariant_suite()` — cross-layer STOP/WARN/INFO invariant checks (backbone alignment, population plausibility, mx non-negativity, cause fractions ≤ 1) |
+
+### Numbered scripts (`code/scripts/`)
+
+| Script | Role |
+|--------|------|
+| `00_run_all.R` | Master orchestrator; sources 01–07 |
+| `01_prepare_gbd_inputs.R` | One-time: raw GBD downloads → clean disease + PAF tables in `data/gbd/` |
+| `01b_prepare_sbp_rr.R` | Build GBD 2021-style SBP dose-response RR lookup (`data/gbd/gbd_rr_sbp*.rds`) |
+| `02_build_demography.R` | wpp2024 → `sf.wpp` demographic backbone (`data/wpp/`); custom `get.par()`/`get.lt()` defined in-script (from the NCD Countdown parent model) |
+| `03_build_cause_fractions.R` | Logit-space trend fit through 7 GBD anchor years (2000–2023), projected annually; core identity `mx_cause(t) = mx_WPP(t) × frac_cause(t)` |
+| `04_calibrate_modules.R` | Fit CVD TPMs (IHD, ischemic stroke, ICH), store HHD direct-mortality rates, fit 7-state cervical cancer TPM → `data/model/calibration/` |
+| `05_run_baseline.R` | Project baseline 2025–2100 (4 CVD causes + cervical); year-varying TPMs anchored to WPP × projected cause fraction |
+| `06_run_scenarios.R` | Project 12 scenarios (10 CVD + 2 cervical): baseline, bp_fast/slow, statins_fast/slow, sodium, tfa, diabetes_bp, all_fast/slow, cancer_fast/slow |
+| `07_make_outputs.R` | Compile summary tables + figures (deaths averted, 40q30 trajectories, SDG 3.4 pace) to `outputs/` |
+
+## Legacy CVD Pipeline Architecture
+
+The entry script sources orchestration scripts that in turn source numbered sub-scripts. Most stages have a generic version and an `_indonesia` version. The active `00_run_model_indonesia.R` sources the `_indonesia` variants of stages 02, 05, 06 and adds stage 09. The FAIR Choices variant (`code/cvd-fair-choices/`) mirrors the Indonesia `_indonesia` scripts.
 
 | Script (generic / `_indonesia`) | Role |
 |--------|------|
 | `00_run_model.R` / `00_run_model_indonesia.R` | Entry point; sets paths, defines config flags, sources all stages |
-| `01_utils.R` | Utility functions: `get.bp.prob()`, TFA mortality reduction, ETIHAD RR calculations (shared) |
+| `01_utils(_indonesia).R` | Utility functions: `get.bp.prob()`, TFA mortality reduction, ETIHAD RR calculations |
 | `02_load_inputs(_indonesia).R` | Orchestrator — sources 021–023 below |
-| → `021_get_base_rates(_indonesia).R` | Extracts GBD 2023 mortality + prevalence; interpolates to single-year ages 20–95; emits `baseline_rates_part*.rds`, `locs.rds` |
+| → `021_get_base_rates(_indonesia).R` | Extracts GBD 2023 mortality + prevalence; interpolates to single-year ages; emits `baseline_rates_part*.rds`, `locs.rds` |
 | → `022_get_tps(_indonesia).R` | Health-state transition probabilities; emits `tps_inpt_part*.rds` |
 | → `023_get_tps_bgmx(_indonesia).R` | Background mortality trend forecasts |
-| `03_calibration.R` | Orchestrator — sources 031 + 032 (the two-pass grid-search calibration) |
+| `03_calibration.R` | Orchestrator — sources generic 031 + 032 (two-pass grid-search calibration) |
 | → `031_calibration(_indonesia).R` | Calibrates to GBD estimates (±5% IR/CF grid; can run in parallel) |
-| → `032_adjustments(_indonesia).R` | Second asymmetric grid; enforces IR + BG.mx ≤ 1; repeats baseline for projection period; emits `adjustments2023_age.csv` |
-| `03_calibration_indonesia_transparent.R` | **Alternative** single-pass calibration that replaces 031+032 with one documented symmetric multiplicative search (per-combo or per-age-group), drop-in writing `adjusted_searo_part*.rds`. See header for usage. |
-| `04_define_interventions.R` | Defines all policy scenarios (sodium, TFA, statins, HTN control); emits scenario `.rds` files and `covfxn2.csv` (shared) |
+| → `032_adjustments(_indonesia).R` | Second asymmetric grid; enforces IR + BG.mx ≤ 1; emits `adjustments2023_age.csv` |
+| `03_calibration_indonesia_transparent.R` | **Alternative** single-pass calibration replacing 031+032 with one documented symmetric multiplicative search; writes `adjusted_searo_part*.rds` |
+| `03_calibration_indonesia_nelder_mead.R` | **Alternative** calibration: Nelder-Mead downhill simplex (base R `optim`) per IR/CF multiplier vector. Used by the FAIR Choices entry point |
+| `03_calibration_indonesia_random_tp.R` | **Alternative** calibration: pure random (Monte Carlo) search over multiplier vectors |
+| `04_define_interventions.R` | Defines policy scenarios (sodium, TFA, statins, HTN control); emits scenario `.rds` and `covfxn2.csv` |
 | `05_build_baseline(_indonesia).R` | Loads population + risk factor data; prepares Markov inputs (re-applies `adjustments2023_age.csv` when `run_adjustment_model == TRUE`) |
-| `06_run_scenarios(_indonesia).R` | Core simulation engine; applies interventions via ETIHAD/GBD RRs; Indonesia variant runs in parallel and writes per-chunk `.rds` to `output/out_model/` |
-| `07_output_dalys.R` | Computes YLL, YLD, DALYs using GBD disability weights + WPP 2024 life tables (shared) |
-| `08_economic_value_calculation.R` | Healthcare costs, productivity losses, cost-effectiveness (VSL/VSLY) (shared) |
-| `09_validation_indonesia.R` | Validation: compares baseline model deaths/rates against GBD 2023 and UNWPP 2024 by cause and sex (Indonesia only) |
+| `06_run_scenarios(_indonesia).R` | Core simulation engine; applies interventions via ETIHAD/GBD RRs; Indonesia variant runs in parallel, writes per-chunk `.rds` to `output/out_model/` |
+| `06_run_scenarios_indonesia_fair.R` | FAIR Choices scenario engine (used by both `code/cvd/` and `code/cvd-fair-choices/`; the two copies are identical) |
+| `07_output_dalys.R` | Computes YLL, YLD, DALYs using GBD disability weights + WPP 2024 life tables |
+| `08_economic_value_calculation.R` | Healthcare costs, productivity losses, cost-effectiveness (VSL/VSLY) |
+| `09_validation_indonesia.R` | Validation: baseline model deaths/rates vs GBD 2023 and UNWPP 2024 by cause and sex |
 
-**Note**: the legacy `00_run_model.R` sources `06_run_scenarios_multiple.R`, which does not exist on disk — use `06_run_scenarios.R` (or the Indonesia pipeline). `03_calibration.R` sources the *generic* `031`/`032`, not the `_indonesia` variants, even from the Indonesia entry point; to calibrate with the Indonesia-specific or transparent logic, source those scripts directly.
+**Note**: the three alternative calibration scripts (`transparent`, `nelder_mead`, `random_tp`) are near-clones differing only in the per-combo search strategy. `03_calibration.R` sources the *generic* `031`/`032` even from the Indonesia entry point; to calibrate with Indonesia-specific or alternative logic, source those scripts directly.
 
 ## Cancer Pipeline Architecture
 
@@ -126,7 +191,7 @@ Key function groups:
 - **Metrics**: `calc_metric_dt`, `calc_rates`, `gen_lifetable`
 - **Scenario processing**: `process_intv_scen_inputs`, `id_target_cc_methods`
 
-## Intervention Scenario Logic (`04_define_interventions.R`)
+## Legacy Intervention Scenario Logic (`code/cvd/04_define_interventions.R`)
 
 **Sodium**: Linear interpolation 2025–2030 to target (−15% Progress, −30% Aspirational), then held flat. Affects BP distribution via `get.bp.prob()` coefficients.
 
@@ -136,30 +201,24 @@ Key function groups:
 
 **HTN control** (most complex, ~850 lines): Three scenarios using quadratic scale-up functions fit to NCD-RisC historical data (1990–2019). Outputs `covfxn2.csv` with columns: `location, year, control, Progress, Aspirational, Business_as_usual, p_change, a_change, aroc`.
 
-## Markov Simulation Engine (`06_run_scenarios.R`)
-
-State space per age/sex/location/cause/year: **Susceptible → Incident → Prevalent → Dead**.
-
-Intervention effects applied via ETIHAD trial RRs per 10 mmHg BP reduction, coverage-adjusted:
-```
-IR_treated = IR_baseline × (1 − coverage × RR_effect)
-```
-
-Multi-intervention stacking order: Sodium → BP shift → IR reduction; Statins → direct IR reduction; TFA → IR via RR; BP control coverage → treatment effect.
+Legacy state space per age/sex/location/cause/year: **Susceptible → Incident → Prevalent → Dead**. Intervention effects applied via ETIHAD trial RRs per 10 mmHg BP reduction, coverage-adjusted: `IR_treated = IR_baseline × (1 − coverage × RR_effect)`. Stacking order: Sodium → BP shift → IR reduction; Statins → direct IR reduction; TFA → IR via RR; BP control coverage → treatment effect.
 
 ## Quality Checks
 
-No formal test suite. Validation is embedded:
+No formal automated test suite (`code/tests/`, `tests/` are placeholders). Validation is embedded:
+- Integrated: `code/R/engine.R` validates every TPM (square, [0,1], rows sum to 1); `code/R/validation.R` `run_core_invariant_suite()` enforces cross-layer invariants; `make_module_target_mx()` fails loudly on missing cause × year × sex × age targets
 - `021_get_base_rates.R`: `print(anyNA(data.out))` after joins
 - `032_adjustments.R`: `test = ifelse(IR + BG.mx > 1, 1, 0)` flags invalid transition probabilities
-- `03_calibration_indonesia_transparent.R`: end-of-run `stopifnot` asserting IR/CF ∈ [0,1], IR/CF + BG.mx ≤ 1, and row-count/schema parity with input
+- `03_calibration_indonesia_transparent.R`: end-of-run `stopifnot` asserting IR/CF ∈ [0,1], IR/CF + BG.mx ≤ 1, and row/schema parity with input
 - `09_validation_indonesia.R`: cross-source comparison of baseline mortality vs GBD 2023 and UNWPP 2024
-- `05_build_baseline.R`: checks location coverage completeness
 - Cancer: `correct_markov.R` validates/corrects Markov transition matrices
 
 ## Gotchas
 
-- **Hard-coded paths**: CVD entry scripts set `wd` to an absolute Windows path; edit before running elsewhere.
-- **Double-calibration**: if you use `03_calibration_indonesia_transparent.R`, set `run_adjustment_model <- FALSE` before stage 05, or `adjustments2023_age.csv` from 032 will be multiplied in a second time. See the script header.
-- **Two CVD pipelines coexist**: the generic `*.R` and Indonesia `*_indonesia.R` scripts read/write overlapping intermediate files in `data/processed/`. Run one pipeline end-to-end rather than mixing stages.
-- **Raw data not on GitHub**: `data/raw/**` is gitignored (only `.md` files kept). The model expects GBD 2023, UNWPP 2024, IHME, NCD-RisC, and ETIHAD inputs to be staged locally.
+- **`code/utils/` duplicates `code/R/`**: the five files are byte-identical copies. The integrated scripts source `code/R/`; `code/utils/` is a stale mirror — edit `code/R/` and treat `code/utils/` as disposable.
+- **Integrated-pipeline module path**: scripts source modules via `here("R", ...)`, which resolves to the **repo-root** `R/` directory — but that directory currently holds only a README; the real modules live in `code/R/`. Reconcile the path (or place/symlink the modules at repo-root `R/`) before running the integrated pipeline standalone.
+- **Hard-coded paths**: legacy CVD and FAIR Choices entry scripts set `wd` to an absolute Windows path; edit before running elsewhere. The integrated pipeline uses `here::here()` instead.
+- **Double-calibration**: if you use `03_calibration_indonesia_transparent.R` (or another alternative), set `run_adjustment_model <- FALSE` before stage 05, or `adjustments2023_age.csv` from 032 will be multiplied in a second time.
+- **Multiple pipelines share intermediate files**: the generic, `_indonesia`, and FAIR Choices CVD scripts read/write overlapping intermediate files in `data/processed/`. Run one pipeline end-to-end rather than mixing stages.
+- **Raw data not on GitHub**: `data/raw/**` is gitignored (only `.md` files kept). Models expect GBD 2023, UNWPP 2024, IHME, NCD-RisC, and ETIHAD inputs staged locally; the integrated pipeline additionally generates `data/gbd/`, `data/wpp/`, and `data/model/` from its 01–04 steps.
+- **Output dirs differ**: legacy pipelines write to `output/`; the integrated pipeline writes to `outputs/`. `output/out_model/` is gitignored.

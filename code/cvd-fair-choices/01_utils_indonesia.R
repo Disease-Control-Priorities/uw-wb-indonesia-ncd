@@ -141,21 +141,65 @@ calc_mortality_reduction <- function(tfa_current, mortality_rate) {
 
 # Age Categories GBD-----
 
-# Vectorized age‐grouping function
+#...........................................................
+## Central GBD age-band helper (SINGLE SOURCE for age banding) ----
+#
+# The GBD single-age <-> band mapping lives here ONLY and is driven by the age
+# bounds declared in 00_run_model_cvd_fair.R (min_model_age / max_model_age).
+# Every script that needs to (a) label a single-year age with its GBD band,
+# (b) look up a band's interpolation midpoint, or (c) know a band's single-year
+# members MUST call these helpers instead of hand-writing an age ladder. This
+# removes the "20-24 years" / "95+" / "85plus" label mismatches that used to
+# make merges on age_group silently fail.
+#
+# `label` strings match the raw GBD extract EXACTLY (so model output aggregated
+# to bands joins the GBD targets). `midpt` is the single-age interpolation
+# anchor (band centre; band lower+2 for the regular 5-year bands, 95 for the
+# open 95+ group). If a future GBD extract uses different band labels, edit the
+# `label` column here to match the new extract.
+#...........................................................
+
+gbd_age_bands <- function(min_age = 0L, max_age = 95L) {
+  bands <- data.table::data.table(
+    label  = c("<1 year", "12-23 months", "2-4 years",
+               "5-9 years", "10-14 years", "15-19 years",
+               "20-24 years","25-29 years","30-34 years","35-39 years",
+               "40-44 years","45-49 years","50-54 years","55-59 years",
+               "60-64 years","65-69 years","70-74 years","75-79 years",
+               "80-84 years","85-89 years","90-94 years","95+ years"),
+    age_lo = c(0L, 1L, 2L, 5L, 10L, 15L, seq(20L, 90L, by = 5L), 95L),
+    age_hi = c(0L, 1L, 4L, 9L, 14L, 19L, seq(24L, 94L, by = 5L), Inf),
+    midpt  = c(0, 1, 3, 7, 12, 17, seq(22, 92, by = 5), 95)
+  )
+  # keep only bands overlapping [min_age, max_age]; the terminal band is
+  # open-ended, so cap its upper edge at max_age (which represents "max_age+").
+  bands <- bands[age_hi >= min_age & age_lo <= max_age]
+  bands[age_hi > max_age, age_hi := max_age]
+  bands[age_lo < min_age, age_lo := min_age]
+  bands[]
+}
+
+# Single-year age -> GBD band label (vectorised). Ages >= max_age map to the
+# open-ended terminal band.
+gbd_band_label <- function(age,
+                           min_age = if (exists("min_model_age")) min_model_age else 0L,
+                           max_age = if (exists("max_model_age")) max_model_age else 95L) {
+  b   <- gbd_age_bands(min_age, max_age)
+  idx <- findInterval(pmin(age, max_age), b$age_lo)  # b sorted ascending by age_lo
+  b$label[idx]
+}
+
+# GBD band label -> interpolation midpoint (vectorised).
+gbd_band_midpoint <- function(label,
+                              min_age = if (exists("min_model_age")) min_model_age else 0L,
+                              max_age = if (exists("max_model_age")) max_model_age else 95L) {
+  b <- gbd_age_bands(min_age, max_age)
+  b$midpt[match(label, b$label)]
+}
+
+# Backwards-compatible name kept for any caller of create_age_groups(): now
+# returns the unified GBD band labels (covering the full 0:95 grid) instead of
+# the old adult-only "20-24".."85plus" labels.
 create_age_groups <- function(age) {
-  # define breaks and labels
-  breaks <- c(20, seq(25, 85, by = 5), Inf)
-  labels <- c(
-    paste0(seq(20, 80, by = 5), "-", seq(24, 84, by = 5)),
-    "85plus"
-  )
-  
-  # cut into factor
-  cut(
-    x              = age,
-    breaks         = breaks,
-    labels         = labels,
-    right          = FALSE,
-    include.lowest = TRUE
-  )
+  factor(gbd_band_label(age), levels = gbd_age_bands()$label)
 }

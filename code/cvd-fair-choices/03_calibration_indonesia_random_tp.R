@@ -249,29 +249,16 @@ setkey(targets, location, sex, cause)
 #===============================================================================
 
 ## ----------------------------------------------------------------------------
-## Single-year age (20-95) -> 5-year GBD age-group label. Identical breaks to
-## 031's age_match so model output aggregates onto GBD's age bins.
+## Single-year age (full model grid) -> GBD age-group label via the central
+## helper in 01_utils. NOTE: this alternative calibration is NOT the production
+## script (00 sources 03_calibration_indonesia_nelder_mead.R). Its project_combo
+## below is still the legacy age-20-boundary version; bring it to full-lifecycle
+## parity with the Nelder-Mead script (age-0 entry + open 95+ terminal) before
+## activating this variant.
 ## ----------------------------------------------------------------------------
 make_age_match <- function() {
-      am <- data.table(age = 20:95)
-      am[, age.group := fcase(
-            age < 25, "20-24 years",
-            age < 30, "25-29 years",
-            age < 35, "30-34 years",
-            age < 40, "35-39 years",
-            age < 45, "40-44 years",
-            age < 50, "45-49 years",
-            age < 55, "50-54 years",
-            age < 60, "55-59 years",
-            age < 65, "60-64 years",
-            age < 70, "65-69 years",
-            age < 75, "70-74 years",
-            age < 80, "75-79 years",
-            age < 85, "80-84 years",
-            age < 90, "85-89 years",
-            age < 95, "90-94 years",
-            default = "95+ years"
-      )]
+      am <- data.table(age = age_single)
+      am[, age.group := gbd_band_label(age)]
       am
 }
 

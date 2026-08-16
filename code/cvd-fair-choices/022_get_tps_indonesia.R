@@ -47,9 +47,13 @@ dt <- as.data.frame(dt)
 
 get.new.rates<-function(dt, year1, year2, cause_map = cause_map){
   
-  all_long <- unname(cause_map["all"])           # "All causes"
+  all_long <- unname(cause_map[all_cause_code])  # "All causes"
   spec_long <- setdiff(cause_map, all_long)      # every specific cause
-  
+
+  ## Ordered GBD band labels (0 -> 95+) from the central helper in 01_utils.
+  ## Used to build the cohort index below.
+  ordered_bands <- gbd_age_bands(min_model_age, max_model_age)$label
+
     #year1<-1995
     #year2<-2000
   prevyear1<-as.data.table(dt%>%filter(measure=="Prevalence" & metric=="Number" & year==year1)%>%
@@ -106,41 +110,15 @@ get.new.rates<-function(dt, year1, year2, cause_map = cause_map){
   dt19<-Reduce(mymerge, list(prevyear2,prevrtyear2,deathyear2,deathrtyear2))
   
   dt14[, pop14:=death14/deathrt14*100000]
-  dt14<-dt14%>%mutate(age2 = ifelse(age=="20-24 years", 1, NA),
-                      age2 = ifelse(age=="25-29 years", 2, age2),
-                      age2 = ifelse(age=="30-34 years", 3, age2),
-                      age2 = ifelse(age=="35-39 years", 4, age2),
-                      age2 = ifelse(age=="40-44 years", 5, age2),
-                      age2 = ifelse(age=="45-49 years", 6, age2),
-                      age2 = ifelse(age=="50-54 years", 7, age2),
-                      age2 = ifelse(age=="55-59 years", 8, age2),
-                      age2 = ifelse(age=="60-64 years", 9, age2),
-                      age2 = ifelse(age=="65-69 years", 10, age2),
-                      age2 = ifelse(age=="70-74 years", 11, age2),
-                      age2 = ifelse(age=="75-79 years", 12, age2),
-                      age2 = ifelse(age=="80-84 years", 13, age2),
-                      age2 = ifelse(age=="85-89 years", 14, age2),
-                      age2 = ifelse(age=="90-94 years", 15, age2),
-                      age2 = ifelse(age=="95+ years", 16, age2))
-  
+  ## Cohort index: position of the band in the ordered GBD band list. dt14 uses
+  ## the position; dt19 uses position-1, so merging on age2 aligns a cohort in
+  ## year1 with the SAME cohort (aged into the next band) in year2. This replaces
+  ## the hand-written 16-level adult age ladder and extends it to ages 0-95.
+  dt14[, age2 := match(age, ordered_bands)]
+
   dt19[, pop19:=death19/deathrt19*100000]
-  dt19<-dt19%>%mutate(age2 = ifelse(age=="20-24 years", 0, NA),
-                      age2 = ifelse(age=="25-29 years", 1, age2),
-                      age2 = ifelse(age=="30-34 years", 2, age2),
-                      age2 = ifelse(age=="35-39 years", 3, age2),
-                      age2 = ifelse(age=="40-44 years", 4, age2),
-                      age2 = ifelse(age=="45-49 years", 5, age2),
-                      age2 = ifelse(age=="50-54 years", 6, age2),
-                      age2 = ifelse(age=="55-59 years", 7, age2),
-                      age2 = ifelse(age=="60-64 years", 8, age2),
-                      age2 = ifelse(age=="65-69 years", 9, age2),
-                      age2 = ifelse(age=="70-74 years", 10, age2),
-                      age2 = ifelse(age=="75-79 years", 11, age2),
-                      age2 = ifelse(age=="80-84 years", 12, age2),
-                      age2 = ifelse(age=="85-89 years", 13, age2),
-                      age2 = ifelse(age=="90-94 years", 14, age2),
-                      age2 = ifelse(age=="95+ years", 15, age2))
-  
+  dt19[, age2 := match(age, ordered_bands) - 1L]
+
   dt19[, age:=NULL]
   
   dt<-merge(dt14, dt19, by=c("age2", "location", "sex", "cause"))
@@ -228,12 +206,15 @@ get.new.rates<-function(dt, year1, year2, cause_map = cause_map){
   
   DT[ , avgIR:=mean(na.omit(IR)), by=.(age, sex, location, cause)]
   DT[ , avgCF:=mean(na.omit(CF)), by=.(age, sex, location, cause)]
-  DT[ , midptage:=as.numeric(substr(age,1,2))+2]
-  
+  DT[ , midptage:=gbd_band_midpoint(age)]   # band -> midpoint via 01_utils helper
+
   DT_final<-unique(DT[,c("midptage", "age", "sex", "location", "cause", "avgIR", "avgCF")])
   DT_final[, year:=year2]
-  
+
   DT_final[avgIR<0 | is.na(avgIR), avgIR:=0]
+  ## Young ages with zero deaths give CF = 0/0 = NaN (is.na covers NaN); treat
+  ## as 0 (no case fatality where there are no cases/deaths).
+  DT_final[avgCF<0 | is.na(avgCF), avgCF:=0]
   DT_final[avgCF>1, avgCF:=0.9]
   DT_final[avgIR>1, avgIR:=0.9]
 }
@@ -251,20 +232,36 @@ for(i in 1:19){
 DT_final<-newrates #store for debugging
 any(is.na(DT_final))
 
+# Open-ended 95+ rates: the cohort method cannot compute an AARC for the top
+# band (no older band to age into), so the 95+ IR/CF re-use the 90-94 values.
 over95<-DT_final[age=="90-94 years"]
 over95[, age:="95+ years"]
-over95[, midptage:=97]
+over95[, midptage := gbd_band_midpoint("95+ years")]   # open 95+ interpolation anchor (= max_model_age)
 
 new<-rbindlist(list(over95, DT_final))
-new<-new[order(location, sex, midptage)]
-unique(new$midptage)
 setnames(new, c("avgIR", "avgCF"), c("IR", "CF"))
 
+## Complete the band grid so every (sex, cause, year, location) has all modeled
+## GBD bands. Bands dropped upstream because GBD reports no Deaths for a disease
+## at young ages (e.g. IHD/dm2 below 15y) are filled with IR = CF = 0 (no burden).
+## This anchors the single-age interpolation at 0 for children instead of
+## flat-extrapolating an adolescent rate downward.
+band_tab  <- gbd_age_bands(min_model_age, max_model_age)[, .(age = label, midptage = midpt)]
+full_grid <- CJ(age = band_tab$age, sex = unique(new$sex), cause = unique(new$cause),
+                year = unique(new$year), location = unique(new$location), unique = TRUE)
+full_grid <- merge(full_grid, band_tab, by = "age")
+new <- merge(full_grid, new[, .(age, sex, cause, year, location, IR, CF)],
+             by = c("age","sex","cause","year","location"), all.x = TRUE)
+new[is.na(IR), IR := 0]
+new[is.na(CF), CF := 0]
+new <- new[order(location, sex, cause, year, midptage)]
+
 get.data <- function(sx, cse, var, dfin, yr, country){
-  x        <- c(seq(22,92,5), 95)
-  y        <- dfin %>% filter(sex==sx & cause==cse) %>% pull(var)
-  d        <- approx(x,y, xout=20:95, rule=2, method="linear")
-  df       <- data.table(age = d$x, dname = d$y, cause = cse, sex = sx, location = country, year = yr)
+  ## interpolate band-level rates (anchored at band midpoints) to single years
+  ## of age across the full model grid (age_single = 0:95).
+  d0 <- as.data.table(dfin)[sex==sx & cause==cse][order(midptage)]
+  d  <- approx(d0$midptage, d0[[var]], xout = age_single, rule=2, method="linear")
+  df <- data.table(age = d$x, dname = d$y, cause = cse, sex = sx, location = country, year = yr)
   setnames(df, "dname", var)
   df
 }
@@ -332,9 +329,12 @@ if (dir.exists(folder)) {
 dir.create(folder)
 
 
-if(run_aod_par == TRUE){
-  
-  # Patch. Rates for AOD not computed (rare incidence/prevalence) 
+# Dementia (AOD) patch stays gated behind run_aod_par. Extra guard: only inject
+# AOD if it is actually a configured cause (in cause_map), so this block can
+# never reintroduce a cause absent from the central config in 00.
+if(run_aod_par == TRUE && "Alzheimer's disease and other dementias" %in% cause_map){
+
+  # Patch. Rates for AOD not computed (rare incidence/prevalence)
   new_aod <- new[age %in% c("20-24 years","25-29 years","30-34 years","35-39 years") & cause=="Ischemic heart disease",]
   
   new_aod[, cause := "Alzheimer's disease and other dementias"]

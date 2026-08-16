@@ -48,11 +48,16 @@ b_rates<-left_join(b_rates, wpp.adj%>%
 # Update to UNWPP 2024
 dt_pop_unwpp <- as.data.table(readRDS(paste0(wd_data,"PopulationsSingleAge0050.rds")))
 
-dt_pop_unwpp[age>=95, age:= 95]
+## `age` in this file is a 1-based INDEX (index 1 == actual age 0, ...,
+## index 101 == actual age 100+). Convert index -> actual age so it aligns with
+## the GBD single-year ages used everywhere else, then pool all ages >=
+## max_model_age into the open-ended terminal group (95+).
+dt_pop_unwpp[, age := age - 1L]
+dt_pop_unwpp[age >= max_model_age, age := max_model_age]
 
 setnames(dt_pop_unwpp, c("year_id"), c("year"))
 
-dt_pop_unwpp <- dt_pop_unwpp[, .(Nx = sum(Nx)), by = .(location, year, sex, age)]
+dt_pop_unwpp <- dt_pop_unwpp[age >= min_model_age, .(Nx = sum(Nx)), by = .(location, year, sex, age)]
 
 b_rates <- merge(b_rates,
                  dt_pop_unwpp[, .(location,year,age,sex,Nx2=Nx)],
@@ -206,25 +211,10 @@ if(run_adjustment_model == TRUE) {
   adjustments <- fread(file = paste0(wd_data,"adjustments2023_age.csv"))
   
   adjustments <- adjustments[,c("location","sex","cause","age_group","IRadjust", "CFadjust"),with=FALSE]
-  
-  gbd_breaks <- c(seq(20, 95, by = 5), Inf)
-  gbd_labels <- c(
-    paste0(seq(20, 90, by = 5), "-", seq(24, 94, by = 5)),
-    "95+"
-  )
-  
-  # 2) (Optionally) wrap in a helper
-  create_gbd_age_group <- function(age) {
-    cut(
-      age,
-      breaks        = gbd_breaks,
-      labels        = gbd_labels,
-      right         = FALSE,      # [20,25), [25,30), …, [95,Inf)
-      include.lowest = TRUE
-    )
-  }
-  
-  b_rates[,age_group := create_gbd_age_group(age)]
+
+  # Use the central GBD band helper (01_utils) so labels match everywhere and
+  # cover the full 0-95 grid (was a local 20-95 "95+" ladder here).
+  b_rates[,age_group := as.character(gbd_band_label(age))]
   # Adjustments for age group
   #b_rates <- merge(b_rates,adjustments,by=c("location","sex","cause"),all.x = T)
   b_rates <- merge(b_rates,adjustments,by=c("location","sex","cause","age_group"),all.x = T)
@@ -275,14 +265,12 @@ if(run_bgmx_trend == TRUE){
   
   bgmx_fcst <- unique(bgmx_fcst,by=c("age","sex","cause","year"))
   
-  bgmx_fcst[, cause := fcase(
-    cause == "Ischemic heart disease", "ihd",
-    cause == "Ischemic stroke", "istroke",
-    cause == "Intracerebral hemorrhage", "hstroke",
-    cause == "Hypertensive heart disease", "hhd",
-    cause == "Alzheimer's disease and other dementias", "aod",
-    default = cause
-  )]
+  ## Long GBD name -> short code for ALL modeled causes via the central
+  ## cause_lookup (defined above). Replaces a hand-written fcase that omitted
+  ## rhd/cmd/dm2 and therefore silently applied NO secular trend to them. Per the
+  ## model config, the secular background-mortality / case-fatality trends now
+  ## apply to every modeled cause.
+  bgmx_fcst[, cause := fcoalesce(cause_lookup[cause], cause)]
   
   summary(b_rates$BG.mx)
   
@@ -302,14 +290,12 @@ if(run_bgmx_trend == TRUE){
   
   bgmx_fcst <- unique(bgmx_fcst,by=c("age","sex","cause","year"))
   
-  bgmx_fcst[, cause := fcase(
-    cause == "Ischemic heart disease", "ihd",
-    cause == "Ischemic stroke", "istroke",
-    cause == "Intracerebral hemorrhage", "hstroke",
-    cause == "Hypertensive heart disease", "hhd",
-    cause == "Alzheimer's disease and other dementias", "aod",
-    default = cause
-  )]
+  ## Long GBD name -> short code for ALL modeled causes via the central
+  ## cause_lookup (defined above). Replaces a hand-written fcase that omitted
+  ## rhd/cmd/dm2 and therefore silently applied NO secular trend to them. Per the
+  ## model config, the secular background-mortality / case-fatality trends now
+  ## apply to every modeled cause.
+  bgmx_fcst[, cause := fcoalesce(cause_lookup[cause], cause)]
   
   summary(b_rates$BG.mx.all)
   
@@ -350,14 +336,8 @@ if(run_CF_trend== TRUE){
     
     bgmx_fcst <- unique(bgmx_fcst,by=c("age","sex","cause","year"))
     
-    bgmx_fcst[, cause := fcase(
-      cause == "Ischemic heart disease", "ihd",
-      cause == "Ischemic stroke", "istroke",
-      cause == "Intracerebral hemorrhage", "hstroke",
-      cause == "Hypertensive heart disease", "hhd",
-      cause == "Alzheimer's disease and other dementias", "aod",
-      default = cause
-    )]
+    ## Long GBD name -> short code for ALL modeled causes (see note above).
+    bgmx_fcst[, cause := fcoalesce(cause_lookup[cause], cause)]
     
     
     b_rates <- merge(b_rates,bgmx_fcst,by=c("age","sex","cause","year"),all.x = T)
