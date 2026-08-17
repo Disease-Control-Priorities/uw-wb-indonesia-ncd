@@ -62,6 +62,28 @@ run_CF_trend_80   <- TRUE
 run_CF_trend_ihme  <- FALSE
 
 #===========================================================================
+# COST / VALUE (Model 09) EXECUTION CONFIG -- execution metaparameters only ----
+#---------------------------------------------------------------------------
+# Single source of truth for execution-level settings shared by Models 04/06/09.
+# ANALYTIC assumptions (selected intervention-cause links, effects, affected
+# fractions, coverage, cost components, cost discount rate, analysis years,
+# price year, economic perspective) live ONLY in the input workbook below --
+# never duplicate them here.
+#===========================================================================
+# Path to the user-editable analytic input workbook (authoritative contract).
+model_inputs_file             <- paste0(wd, "data/indonesia_model_inputs.xlsx")
+# Final cost/value workbook written by Model 09.
+cost_value_output_file        <- paste0(wd_outp, "indonesia_model_cost_value.xlsx")
+# Whether to run Model 09 (costing / budget impact / cost-effectiveness).
+run_cost_value                <- TRUE
+# Scenario id treated as the no-new-intervention comparator.
+baseline_scenario_id          <- "baseline"
+# TRUE  = STOP the run if any SELECTED workbook link/cost has a FAIL-level issue.
+# FALSE = drop the invalid links/scenarios (with a consolidated diagnostic) and
+#         run only the valid scenarios; blockers are reported in Model 09.
+strict_model_input_validation <- FALSE
+
+#===========================================================================
 # CENTRAL MODEL CONFIGURATION  (SINGLE SOURCE OF TRUTH) ----
 #---------------------------------------------------------------------------
 # Ages and causes are declared ONLY here. Every downstream script (021-06 and
@@ -189,7 +211,13 @@ setwd(wd_code)
 source("08_economic_value_calculation.R")
 
 #...........................................................
-# 09. Run Validation ----
+# 09. Cost & Value (costing, budget impact, cost-effectiveness) ----
 #...........................................................
 setwd(wd_code)
-source("09_validation_indonesia.R")
+if (run_cost_value) source("09_cost_value.R")
+
+#...........................................................
+# 10. Run Validation ----
+#...........................................................
+setwd(wd_code)
+source("10_validation_indonesia.R")
