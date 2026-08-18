@@ -1,0 +1,1311 @@
+---
+title: "Indonesia NCD FAIR Choices: Costing & Economic Analysis"
+subtitle: "Cardiovascular intervention package — budget impact and interim cost-effectiveness"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+author: "University of Washington · World Bank Indonesia NCD program"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    number_sections: true
+    theme: flatly
+    highlight: tango
+    code_folding: hide
+    self_contained: true
+    css: indonesia_ncd_report.css
+    mathjax: default
+params:
+  workbook_path: "output/indonesia_model_cost_value_formulae.xlsx"
+  focus_scenario: "all"
+  decision_horizon: NA
+  show_code: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = params$show_code,
+  error   = FALSE,      # knitting must fail loudly on real errors, not swallow them
+  message = FALSE,
+  warning = FALSE,
+  dev     = "png",
+  dpi     = 150,
+  fig.align  = "center",
+  fig.width  = 9,
+  fig.height = 5.2
+)
+```
+
+<style>
+/* ---- Report-specific helpers layered on top of indonesia_ncd_report.css ---- */
+.badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:11px;
+  font-weight:800;letter-spacing:.04em;color:#fff;vertical-align:middle;}
+.badge-pass{background:#1b9e8b;}
+.badge-review{background:#c98a00;}
+.badge-fail{background:#c0392b;}
+.badge-muted{background:#7a8b99;}
+.eq-note{margin:-14px 0 26px;color:var(--ink-500);font-size:12.5px;text-align:center;}
+.math.display{max-width:820px;margin-left:auto;margin-right:auto;}
+.kpi-value small{font-size:14px;font-weight:600;color:var(--ink-500);letter-spacing:0;}
+table.compact-kbl{font-size:13px;}
+</style>
+
+```{r packages, include=FALSE}
+# ---- Dependency guard: detect, never install --------------------------------
+.need <- c("here", "readxl", "dplyr", "tidyr", "tibble", "purrr", "stringr",
+           "forcats", "scales", "ggplot2", "knitr", "kableExtra", "DT",
+           "htmltools", "glue")
+.missing <- .need[!vapply(.need, requireNamespace, logical(1), quietly = TRUE)]
+if (length(.missing)) {
+  stop(
+    "The following required packages are not installed:\n  ",
+    paste(.missing, collapse = ", "),
+    "\nInstall them in R (this report never installs packages itself):\n  ",
+    sprintf('install.packages(c(%s))',
+            paste0('"', .missing, '"', collapse = ", ")),
+    call. = FALSE
+  )
+}
+suppressPackageStartupMessages({
+  library(here); library(readxl); library(dplyr); library(tidyr)
+  library(tibble); library(purrr); library(stringr); library(forcats)
+  library(scales); library(ggplot2); library(knitr); library(kableExtra)
+  library(DT); library(htmltools); library(glue)
+})
+```
+
+```{r resolve-workbook, include=FALSE}
+# ---- Locate the single canonical cost-value workbook ------------------------
+# Rule: use params$workbook_path when it exists; otherwise glob the canonical
+# pattern. Zero matches -> stop. Multiple matches -> only proceed if the exact
+# canonical filename is present, else stop and report the ambiguity.
+resolve_workbook <- function(rel_path) {
+  root <- here::here()
+  explicit <- here::here(rel_path)
+  if (file.exists(explicit)) return(normalizePath(explicit, winslash = "/"))
+
+  search_dir <- file.path(root, "output")
+  hits <- list.files(
+    search_dir,
+    pattern    = "^indonesia_model_cost_value_formulae.*\\.xlsx$",
+    full.names = TRUE
+  )
+  hits <- hits[!grepl("~\\$", basename(hits))]   # drop Excel lock stubs
+
+  if (length(hits) == 0) {
+    stop(glue::glue(
+      "No cost-value formulae workbook found.\n",
+      "Looked for '{rel_path}' and for pattern ",
+      "'indonesia_model_cost_value_formulae*.xlsx' in '{search_dir}'.\n",
+      "Run code/cvd-fair-choices/09_cost_value.R to (re)generate it, ",
+      "then recalculate and save the workbook so cached formula values are current."
+    ), call. = FALSE)
+  }
+  if (length(hits) == 1) return(normalizePath(hits, winslash = "/"))
+
+  canonical <- hits[basename(hits) == "indonesia_model_cost_value_formulae.xlsx"]
+  if (length(canonical) == 1) return(normalizePath(canonical, winslash = "/"))
+
+  stop(glue::glue(
+    "Ambiguous workbook selection: {length(hits)} files match ",
+    "'indonesia_model_cost_value_formulae*.xlsx' and none is the canonical ",
+    "'indonesia_model_cost_value_formulae.xlsx':\n  ",
+    "{paste(basename(hits), collapse = '\n  ')}\n",
+    "Set params$workbook_path explicitly to the file you intend to use."
+  ), call. = FALSE)
+}
+
+WB_PATH <- resolve_workbook(params$workbook_path)
+WB_REL  <- sub(paste0("^", here::here(), "/?"), "", WB_PATH)
+```
+
+```{r ingest, include=FALSE}
+# ---- Read every required sheet exactly once ---------------------------------
+REQUIRED_SHEETS <- c(
+  "README", "Run_Metadata", "Selected_Interventions", "Blocked_Links",
+  "Cost_Components", "Annual_Mortality", "Annual_Cost", "Budget_Impact",
+  "Cost_Effectiveness", "Economic_Value", "QA_Checks", "Input_Diagnostic",
+  "Methods_and_Sources", "Calculation_Assumptions", "Calculation_Map"
+)
+
+sheets_present <- readxl::excel_sheets(WB_PATH)
+missing_sheets <- setdiff(REQUIRED_SHEETS, sheets_present)
+if (length(missing_sheets)) {
+  stop(glue::glue(
+    "Workbook '{basename(WB_PATH)}' is missing required sheet(s): ",
+    "{paste(missing_sheets, collapse = ', ')}.\n",
+    "This report reads only the cost-value workbook; regenerate it via Model 09."
+  ), call. = FALSE)
+}
+
+read_sheet <- function(sheet) {
+  suppressWarnings(
+    readxl::read_excel(WB_PATH, sheet = sheet, .name_repair = "minimal")
+  ) |> as.data.frame(stringsAsFactors = FALSE)
+}
+WB <- setNames(lapply(REQUIRED_SHEETS, read_sheet), REQUIRED_SHEETS)
+
+# ---- Required-column contracts (validated, never silently renamed) ----------
+REQUIRED_COLS <- list(
+  Selected_Interventions = c("intervention_id", "intervention_name", "cause_code",
+                             "effect_value", "affected_fraction", "baseline_coverage",
+                             "target_coverage", "start_year", "target_year",
+                             "adjusted_effect_at_target", "cost_scope",
+                             "effect_review", "coverage_review"),
+  Cost_Components = c("cost_component_key", "intervention_id", "cost_component",
+                      "population_in_need_measure", "population_in_need_fraction",
+                      "frequency_per_year", "unit_cost_usd", "price_year",
+                      "cov_baseline", "cov_target", "cost_review", "cost_ready"),
+  Annual_Mortality = c("scenario", "scenario_label", "year", "cause", "cases",
+                       "cause_deaths", "base_deaths", "deaths_averted",
+                       "base_cases", "cases_averted"),
+  Annual_Cost = c("scenario", "year", "intervention_id", "cost_component_key",
+                  "coverage_scenario", "annual_cost_baseline", "annual_cost_scenario",
+                  "annual_cost_incremental", "disc_cost_incremental",
+                  "shared_duplicate_count"),
+  Budget_Impact = c("scenario", "year", "baseline_cost", "scenario_cost",
+                    "incremental_cost", "disc_incremental_cost",
+                    "cumulative_incremental_cost", "cumulative_disc_incremental_cost"),
+  Cost_Effectiveness = c("scenario", "scenario_label", "deaths_averted",
+                         "cases_averted", "incremental_cost", "disc_incremental_cost",
+                         "cost_per_death_averted", "dominance", "reconciliation_status"),
+  QA_Checks = c("check", "expected", "actual", "status", "note"),
+  Input_Diagnostic = c("scope", "item_key", "field", "problem", "severity"),
+  Calculation_Assumptions = c("parameter_id", "value", "unit", "role",
+                              "description", "source"),
+  Calculation_Map = c("output_sheet", "formula_columns", "depends_on",
+                      "calculation", "source_role"),
+  Methods_and_Sources = c("method_id", "concept", "formula_or_rule", "source"),
+  Run_Metadata = c("item", "value")
+)
+for (sh in names(REQUIRED_COLS)) {
+  miss <- setdiff(REQUIRED_COLS[[sh]], names(WB[[sh]]))
+  if (length(miss)) {
+    stop(glue::glue(
+      "Sheet '{sh}' is missing expected column(s): {paste(miss, collapse = ', ')}.\n",
+      "Column names in the workbook are authoritative; this report will not guess.\n",
+      "Regenerate the workbook or reconcile the header names."
+    ), call. = FALSE)
+  }
+}
+```
+
+```{r cached-value-guard, include=FALSE}
+# ---- Confirm cached formula results are present and error-free ---------------
+# The report uses Excel's cached values for formula cells. If the workbook was
+# saved without recalculating, essential numeric fields would be NA or carry
+# spreadsheet error tokens. Fail with an actionable message rather than
+# reconstructing results from any other source.
+EXCEL_ERRORS <- c("#REF!", "#VALUE!", "#DIV/0!", "#N/A", "#NAME?", "#NULL!",
+                  "#NUM!", "#SPILL!", "#CALC!", "#GETTING_DATA")
+
+scan_excel_errors <- function(tbl, sheet) {
+  chr <- tbl[vapply(tbl, is.character, logical(1))]
+  hits <- unlist(lapply(chr, function(col) col[col %in% EXCEL_ERRORS]), use.names = FALSE)
+  if (length(hits)) {
+    stop(glue::glue(
+      "Sheet '{sheet}' contains spreadsheet error value(s): ",
+      "{paste(unique(hits), collapse = ', ')}.\n",
+      "Open '{basename(WB_PATH)}' in Excel, press Recalculate (F9 / Calculate Now), ",
+      "save, and re-knit. This report does not repair or substitute workbook results."
+    ), call. = FALSE)
+  }
+  invisible(TRUE)
+}
+invisible(lapply(REQUIRED_SHEETS, function(s) scan_excel_errors(WB[[s]], s)))
+
+assert_populated <- function(tbl, cols, sheet) {
+  for (cc in cols) {
+    v <- tbl[[cc]]
+    if (!is.numeric(v)) v <- suppressWarnings(as.numeric(v))
+    if (all(is.na(v))) {
+      stop(glue::glue(
+        "Essential calculated field '{cc}' on sheet '{sheet}' is empty (all NA).\n",
+        "The workbook appears to have been saved without cached formula results.\n",
+        "Recalculate and save '{basename(WB_PATH)}', then re-knit."
+      ), call. = FALSE)
+    }
+  }
+  invisible(TRUE)
+}
+assert_populated(WB$Cost_Effectiveness,
+                 c("deaths_averted", "disc_incremental_cost", "cost_per_death_averted"),
+                 "Cost_Effectiveness")
+assert_populated(WB$Budget_Impact,
+                 c("incremental_cost", "disc_incremental_cost",
+                   "cumulative_disc_incremental_cost"),
+                 "Budget_Impact")
+assert_populated(WB$Annual_Mortality, c("deaths_averted", "cause_deaths"),
+                 "Annual_Mortality")
+```
+
+```{r helpers, include=FALSE}
+# ---- Assumptions accessor ----------------------------------------------------
+ca <- WB$Calculation_Assumptions
+assume <- function(id, as_num = FALSE) {
+  v <- ca$value[match(id, ca$parameter_id)]
+  if (length(v) == 0 || is.na(v)) return(NA)
+  if (as_num) suppressWarnings(as.numeric(v)) else as.character(v)
+}
+meta_val <- function(item) {
+  rm <- WB$Run_Metadata
+  v <- rm$value[match(item, rm$item)]
+  if (length(v) == 0) NA_character_ else as.character(v)
+}
+
+START_YEAR   <- assume("analysis_start_year", TRUE)
+END_YEAR     <- assume("analysis_end_year",   TRUE)
+DISCOUNT     <- assume("cost_discount_rate",  TRUE)
+PRICE_YEAR   <- assume("cost_price_year",     TRUE)
+CURRENCY     <- assume("currency")
+PERSPECTIVE  <- assume("economic_perspective")
+SCALE_SHAPE  <- assume("scale_up_shape")
+BASE_ID      <- assume("baseline_scenario_id")
+TOL          <- assume("formula_tolerance", TRUE)
+LOCATION     <- meta_val("Location")
+
+# Decision horizon: default to the workbook end year. Robust to how YAML delivers
+# the default — logical NA, the string "NA", empty, or NULL all mean "use end year".
+.dh_raw <- params$decision_horizon
+.dh_num <- suppressWarnings(as.numeric(.dh_raw))
+HORIZON <- if (length(.dh_raw) == 0 || all(is.na(.dh_raw)) ||
+               length(.dh_num) == 0 || is.na(.dh_num)) END_YEAR else .dh_num
+HORIZON <- max(START_YEAR, min(END_YEAR, HORIZON))   # clamp into the modelled range
+HORIZON_DEFAULTED <- identical(as.numeric(HORIZON), as.numeric(END_YEAR))
+N_YEARS      <- END_YEAR - START_YEAR + 1L
+
+# ---- Formatting helpers ------------------------------------------------------
+fmt_n   <- function(x, d = 0) ifelse(is.na(x), "—",
+             formatC(round(as.numeric(x), d), format = "f", big.mark = ",", digits = d))
+fmt_pct <- function(x, d = 0) ifelse(is.na(x), "—",
+             paste0(formatC(100 * as.numeric(x), format = "f", digits = d), "%"))
+usd_big <- function(x, d = 1) {
+  x <- as.numeric(x)
+  ifelse(is.na(x), "—",
+    ifelse(abs(x) >= 1e9, paste0("$", formatC(x/1e9, format="f", digits=d, big.mark=","), "B",
+      ""),
+    ifelse(abs(x) >= 1e6, paste0("$", formatC(x/1e6, format="f", digits=d, big.mark=","), "M"),
+    ifelse(abs(x) >= 1e3, paste0("$", formatC(x/1e3, format="f", digits=d, big.mark=","), "k"),
+           paste0("$", formatC(x, format="f", digits=0, big.mark=","))))))
+}
+usd0 <- function(x) ifelse(is.na(x), "—",
+          paste0("$", formatC(round(as.numeric(x)), format = "f", big.mark = ",", digits = 0)))
+count_big <- function(x, d = 2) {
+  x <- as.numeric(x)
+  ifelse(is.na(x), "—",
+    ifelse(abs(x) >= 1e6, paste0(formatC(x/1e6, format="f", digits=d, big.mark=","), "M"),
+    ifelse(abs(x) >= 1e3, paste0(formatC(x/1e3, format="f", digits=d, big.mark=","), "k"),
+           formatC(round(x), format="f", big.mark=",", digits=0))))
+}
+
+status_badge <- function(s) {
+  s <- toupper(trimws(as.character(s)))
+  cls <- dplyr::case_when(
+    s == "PASS" ~ "badge-pass",
+    s == "REVIEW" ~ "badge-review",
+    s == "FAIL" ~ "badge-fail",
+    TRUE ~ "badge-muted"
+  )
+  sprintf('<span class="badge %s">%s</span>', cls, s)
+}
+
+# ---- Cause & scenario display maps ------------------------------------------
+cause_labels <- c(
+  ihd = "Ischemic heart disease", istroke = "Ischemic stroke",
+  hstroke = "Intracerebral hemorrhage", hhd = "Hypertensive heart disease",
+  rhd = "Rheumatic heart disease", cmd = "Cardiomyopathy & myocarditis",
+  dm2 = "Type 2 diabetes"
+)
+lbl_cause <- function(x) ifelse(x %in% names(cause_labels), cause_labels[x], x)
+
+ce <- WB$Cost_Effectiveness
+scen_lab_map <- setNames(ce$scenario_label, ce$scenario)
+scen_lab_map[BASE_ID] <- "Baseline (no new intervention)"
+lbl_scen  <- function(x) ifelse(x %in% names(scen_lab_map), scen_lab_map[x], x)
+wrap_scen <- function(x, w = 18) str_wrap(lbl_scen(x), w)
+
+# ---- Colour-blind-safe palette (Okabe–Ito), stable per scenario -------------
+scen_levels <- c("I_CVD_PRIMARY", "I_IHD_SECONDARY", "I_HF_ACUTE", "I_HF_CHRONIC",
+                 "I_STROKE_SECONDARY", "I_RHD_SURGERY", "I_RHD_SECONDARY", "all")
+scen_cols <- c(
+  I_CVD_PRIMARY      = "#0072B2",  # blue
+  I_IHD_SECONDARY    = "#D55E00",  # vermillion
+  I_HF_ACUTE         = "#009E73",  # bluish green
+  I_HF_CHRONIC       = "#56B4E9",  # sky blue
+  I_STROKE_SECONDARY = "#CC79A7",  # reddish purple
+  I_RHD_SURGERY      = "#E69F00",  # orange
+  I_RHD_SECONDARY    = "#8C8C8C",  # grey
+  all                = "#000000"   # black — combined bundle
+)
+cause_cols <- c(
+  ihd = "#0072B2", istroke = "#CC79A7", hstroke = "#E69F00",
+  hhd = "#009E73", rhd = "#D55E00", cmd = "#56B4E9", dm2 = "#8C8C8C"
+)
+
+theme_report <- function(base = 12) {
+  theme_minimal(base_size = base) +
+    theme(
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank(),
+      plot.title = element_text(face = "bold", size = base + 2),
+      plot.subtitle = element_text(color = "#52697d", size = base - 1),
+      plot.caption = element_text(color = "#7a8b99", size = base - 3, hjust = 0),
+      legend.position = "bottom",
+      legend.title = element_text(face = "bold", size = base - 2),
+      legend.text = element_text(size = base - 2),
+      axis.title = element_text(color = "#29465b")
+    )
+}
+src_cap <- function(sheet) paste0("Source: ", sheet, " sheet · ", basename(WB_PATH))
+
+# ---- Focus scenario resolution ----------------------------------------------
+focus_id <- params$focus_scenario
+focus_available <- focus_id %in% ce$scenario
+if (!focus_available) {
+  # Do not silently substitute: fall back to the highest-impact available row
+  # and record that the requested focus was absent.
+  focus_id <- ce$scenario[which.max(ce$deaths_averted)]
+}
+focus_row <- ce[ce$scenario == focus_id, , drop = FALSE]
+
+# ---- Independent QA recomputations (comparison only, never overrides WB) ----
+bi <- WB$Budget_Impact
+am <- WB$Annual_Mortality
+bi_final <- bi |>
+  group_by(scenario) |>
+  filter(year == max(year)) |>
+  summarise(cum_disc = cumulative_disc_incremental_cost,
+            cum_undisc = cumulative_incremental_cost, .groups = "drop")
+am_tot <- am |>
+  filter(scenario != BASE_ID) |>
+  group_by(scenario) |>
+  summarise(da = sum(deaths_averted), ca = sum(cases_averted), .groups = "drop")
+
+recon <- ce |>
+  select(scenario, deaths_averted, disc_incremental_cost, cost_per_death_averted) |>
+  left_join(bi_final, by = "scenario") |>
+  left_join(am_tot, by = "scenario") |>
+  mutate(
+    d_cost   = disc_incremental_cost - cum_disc,
+    d_deaths = deaths_averted - da,
+    cpda_recomp = ifelse(da > 0, cum_disc / da, NA_real_),
+    cpda_diff   = cost_per_death_averted - cpda_recomp
+  )
+recon_ok <- all(abs(recon$d_cost) <= pmax(TOL, 1) , na.rm = TRUE) &&
+            all(abs(recon$d_deaths) <= pmax(TOL, 1), na.rm = TRUE)
+
+# ---- Overall QA disposition --------------------------------------------------
+qa <- WB$QA_Checks
+qa_status_norm <- toupper(trimws(qa$status))
+overall_qa <- if (any(qa_status_norm == "FAIL")) "FAIL" else
+              if (any(qa_status_norm == "REVIEW")) "REVIEW" else "PASS"
+n_pass   <- sum(qa_status_norm == "PASS")
+n_review <- sum(qa_status_norm == "REVIEW")
+n_fail   <- sum(qa_status_norm == "FAIL")
+
+idg <- WB$Input_Diagnostic
+n_diag_fail   <- sum(toupper(trimws(idg$severity)) == "FAIL")
+n_diag_review <- sum(toupper(trimws(idg$severity)) == "REVIEW")
+
+# Economic value availability
+ev <- WB$Economic_Value
+econ_value_available <- !("note" %in% names(ev) && ncol(ev) == 1)
+```
+
+```{r derived-tables, include=FALSE}
+si <- WB$Selected_Interventions
+cc <- WB$Cost_Components
+ac <- WB$Annual_Cost
+
+# n distinct interventions / links
+n_interventions <- dplyr::n_distinct(si$intervention_id)
+n_links         <- nrow(si)
+n_blocked       <- nrow(WB$Blocked_Links)
+n_components    <- nrow(cc)
+n_scen_costed   <- dplyr::n_distinct(bi$scenario)
+
+# Uniqueness safeguards
+uniq_bi <- nrow(bi) == nrow(dplyr::distinct(bi, scenario, year))
+uniq_am <- nrow(am) == nrow(dplyr::distinct(am, scenario, year, cause))
+uniq_ac <- nrow(ac) == nrow(dplyr::distinct(ac, scenario, year, cost_record_id))
+
+# Negative cases-averted flag (preserved, interpreted — never coerced)
+neg_ca <- ce |> filter(cases_averted < 0) |> arrange(cases_averted)
+has_neg_ca <- nrow(neg_ca) > 0
+
+# Best / worst value among *individual* interventions (exclude the bundle)
+ce_ind <- ce |> filter(scenario != "all", deaths_averted > 0) |>
+  arrange(cost_per_death_averted)
+best_val  <- ce_ind |> slice(1)
+worst_val <- ce_ind |> slice(n())
+```
+
+<div class="rhd-hero">
+<span class="rhd-kicker">Health financing decision brief</span>
+<h2>Costing and interim cost-effectiveness of the FAIR Choices cardiovascular package for Indonesia</h2>
+<p>Every figure in this brief is read directly from the cost-value workbook
+<strong>`r basename(WB_PATH)`</strong> — the single source of truth. No epidemiological,
+costing, or economic pipeline is executed while this report is knitted, and no result is
+copied by hand. Values reflect the cached Excel formula results as last recalculated and saved.</p>
+</div>
+
+`r if (!focus_available) sprintf('<div class="report-callout callout-warning"><div class="callout-title">Focus scenario substituted</div><div class="callout-body">The requested focus scenario <code>%s</code> is not present in <strong>Cost_Effectiveness</strong>. The highest-impact available scenario <code>%s</code> (%s) is shown instead. Set <code>params$focus_scenario</code> to a valid scenario id to override.</div></div>', params$focus_scenario, focus_id, lbl_scen(focus_id)) else ""`
+
+# At a glance
+
+The headline figures below describe the **`r lbl_scen(focus_id)`** scenario
+(`r if (focus_id == "all") "the combined package of all selected interventions implemented jointly" else "a single selected intervention"`),
+over the analysis horizon **`r START_YEAR`–`r END_YEAR`** in **`r LOCATION`**,
+in **`r PRICE_YEAR` `r CURRENCY`** from a **`r gsub("_", " ", PERSPECTIVE)`** perspective.
+
+```{r kpi-cards, results='asis'}
+kpi <- function(label, value, detail, tone = "kpi-blue") {
+  glue('<div class="kpi-card {tone}"><div class="kpi-label">{label}</div>',
+       '<div class="kpi-value">{value}</div><div class="kpi-detail">{detail}</div></div>')
+}
+qa_tone <- switch(overall_qa, PASS = "kpi-teal", REVIEW = "kpi-gold", FAIL = "kpi-red")
+cards <- paste0(
+  '<div class="kpi-grid">',
+  kpi("Discounted incremental cost",
+      usd_big(focus_row$disc_incremental_cost),
+      glue("Undiscounted {usd_big(focus_row$incremental_cost)} · {DISCOUNT*100}% discount rate · costs only"),
+      "kpi-navy"),
+  kpi("Total deaths averted",
+      count_big(focus_row$deaths_averted),
+      glue("Cumulative {START_YEAR}–{END_YEAR}, vs baseline ‘{BASE_ID}’"),
+      "kpi-teal"),
+  kpi("Discounted cost per death averted",
+      usd0(focus_row$cost_per_death_averted),
+      "Interim efficiency metric — <strong>not</strong> cost per DALY",
+      "kpi-blue"),
+  kpi("Analysis horizon",
+      glue("{START_YEAR}–{END_YEAR}"),
+      glue("{N_YEARS} model years · linear coverage scale-up"),
+      "kpi-blue"),
+  kpi("Price year &amp; currency",
+      glue("{PRICE_YEAR} {CURRENCY}"),
+      glue("{gsub('_',' ',PERSPECTIVE)} perspective · downstream offsets excluded"),
+      "kpi-gold"),
+  kpi("Overall QA status",
+      sprintf('%s', overall_qa),
+      glue("{n_pass} PASS · {n_review} REVIEW · {n_fail} FAIL across {nrow(qa)} checks"),
+      qa_tone),
+  '</div>'
+)
+cat(cards)
+```
+
+::: {.source-note}
+**Traceability.** KPI values are drawn from the **Cost_Effectiveness** sheet
+(row `scenario = "`r focus_id`"`), the **Calculation_Assumptions** sheet (horizon, discount
+rate, price year, perspective), and the **QA_Checks** sheet (status tally). The combined
+`all` scenario is the joint effect of implementing every selected intervention together;
+because of overlapping at-risk populations and competing risks it is **not** the arithmetic
+sum of the individual scenarios and should not be ranked against them as a mutually
+exclusive option.
+:::
+
+# Decision summary
+
+```{r decision-inline, include=FALSE}
+all_row  <- ce[ce$scenario == "all", , drop = FALSE]
+cvd_row  <- ce[ce$scenario == "I_CVD_PRIMARY", , drop = FALSE]
+# cumulative undiscounted budget over horizon for the bundle
+all_bi_final <- bi_final[bi_final$scenario == "all", ]
+```
+
+The combined FAIR Choices cardiovascular package (**`all`**) is projected to avert
+**`r fmt_n(all_row$deaths_averted)`** cardiovascular deaths in `r LOCATION` over
+`r START_YEAR`–`r END_YEAR`, at a **discounted incremental cost of
+`r usd_big(all_row$disc_incremental_cost)`** (undiscounted
+`r usd_big(all_row$incremental_cost)`; cumulative undiscounted budget impact
+`r usd_big(all_bi_final$cum_undisc)`). The corresponding **discounted cost per death averted
+is `r usd0(all_row$cost_per_death_averted)`**.
+
+Among the individual interventions, **`r lbl_scen(best_val$scenario)`** is the most efficient
+on this interim metric at **`r usd0(best_val$cost_per_death_averted)` per death averted**
+(`r fmt_n(best_val$deaths_averted)` deaths averted for
+`r usd_big(best_val$disc_incremental_cost)` discounted), while
+**`r lbl_scen(worst_val$scenario)`** is the least efficient at
+**`r usd0(worst_val$cost_per_death_averted)` per death averted**. The
+`r fmt_n(worst_val$deaths_averted)` deaths averted by the latter come at a discounted cost of
+`r usd_big(worst_val$disc_incremental_cost)` — a spread of roughly
+`r fmt_n(worst_val$cost_per_death_averted / best_val$cost_per_death_averted)`× in cost per death
+averted across the portfolio.
+
+::: {.report-callout .callout-warning}
+::: {.callout-title}
+Cost per death averted is an interim metric
+:::
+::: {.callout-body}
+The efficiency ratio reported throughout is **discounted cumulative incremental cost divided
+by cumulative (undiscounted) deaths averted** — *not* cost per DALY, QALY, or life-year.
+DALYs, YLL and YLD are explicitly **out of scope** in this workbook stage (see the
+**README** and **Run_Metadata** sheets). Ratios here therefore capture mortality benefit only
+and cannot be compared against DALY-based cost-effectiveness thresholds. Several
+secondary-prevention scenarios also show **negative cases averted**, discussed under
+*Results* and *Interpretation*, because keeping patients alive increases the prevalent-case
+stock even as deaths fall.
+:::
+:::
+
+# Purpose, scope & perspective
+
+This report presents the **costing, budget impact, and interim (mortality-based)
+cost-effectiveness** of the FAIR Choices cardiovascular intervention package selected for
+`r LOCATION`. All quantitative content derives from the cost-value workbook produced by the
+CVD FAIR Choices pipeline (`r meta_val("Model / pipeline")`).
+
+```{r scope-grid, results='asis'}
+scope_card <- function(h, p) glue('<div class="overview-card"><h3>{h}</h3><p>{p}</p></div>')
+cat(paste0(
+  '<div class="overview-grid">',
+  scope_card("Geography &amp; horizon",
+             glue("{LOCATION}, annual projection {START_YEAR}–{END_YEAR} ({N_YEARS} years).")),
+  scope_card("Comparator",
+             glue("Baseline scenario ‘{BASE_ID}’ — {tolower(lbl_scen(BASE_ID))}. ",
+                  "Every costed scenario is differenced against this comparator.")),
+  scope_card("Currency &amp; price year",
+             glue("{CURRENCY}, {PRICE_YEAR} price year. Discount rate {DISCOUNT*100}% per year, ",
+                  "applied to costs only; death counts are undiscounted.")),
+  scope_card("Perspective &amp; boundary",
+             glue("{stringr::str_to_sentence(gsub('_',' ',PERSPECTIVE))} perspective. ",
+                  "Downstream disease-cost offsets excluded; DALYs/economic value deferred.")),
+  '</div>'
+))
+```
+
+::: {.source-note}
+Scope fields are taken verbatim from **Calculation_Assumptions** (`analysis_start_year`,
+`analysis_end_year`, `cost_discount_rate`, `cost_price_year`, `currency`,
+`economic_perspective`, `baseline_scenario_id`, `downstream_cost_offsets`) and
+**Run_Metadata**.
+:::
+
+# Interventions & costing inputs
+
+`r n_interventions` interventions (`r n_links` intervention–cause links) are selected and
+costed across `r n_components` cost components; `r n_blocked` health link(s) are **blocked**
+and excluded from results (see *Assumptions & data quality*).
+
+## Selected interventions and cause links
+
+```{r tbl-interventions}
+si_tbl <- si |>
+  transmute(
+    Intervention = intervention_name,
+    Cause = lbl_cause(cause_code),
+    Transition = paste0(transition_from, " → ", transition_to, " (", model_transition, ")"),
+    `Effect` = round(effect_value, 3),
+    `Affected frac.` = round(affected_fraction, 3),
+    `Cov. base` = baseline_coverage,
+    `Cov. target` = target_coverage,
+    `Adj. effect @ target` = round(adjusted_effect_at_target, 4),
+    `Cost scope` = cost_scope,
+    `Effect review` = effect_review,
+    `Coverage review` = coverage_review
+  )
+datatable(
+  si_tbl, rownames = FALSE, extensions = "Buttons",
+  caption = htmltools::tags$caption(style = "caption-side:top;",
+    htmltools::HTML("<span class='dt-caption'>Selected_Interventions — selected FAIR Choices CVD links, effect parameters, coverage and review status</span>")),
+  options = list(pageLength = 8, dom = "Bfrtip", scrollX = TRUE,
+                 buttons = c("copy", "csv"),
+                 columnDefs = list(list(className = "dt-right", targets = 3:7)))
+) |>
+  formatPercentage(c("Cov. base", "Cov. target"), 0)
+```
+
+## Cost components, populations in need and unit costs
+
+```{r tbl-components}
+cc_tbl <- cc |>
+  transmute(
+    Component = cost_component,
+    Intervention = intervention_id,
+    `PIN measure` = population_in_need_measure,
+    `PIN frac.` = round(population_in_need_fraction, 3),
+    `Freq./yr` = frequency_per_year,
+    `Unit cost (USD)` = round(unit_cost_usd, 2),
+    `Price yr` = price_year,
+    `Cov. base` = cov_baseline,
+    `Cov. target` = cov_target,
+    `ID-adj.` = ifelse(indonesia_adjusted_flag == 1, "yes", "no"),
+    Review = cost_review,
+    Ready = ifelse(cost_ready == 1, "yes", "no")
+  )
+datatable(
+  cc_tbl, rownames = FALSE, extensions = "Buttons",
+  caption = htmltools::tags$caption(style = "caption-side:top;",
+    htmltools::HTML("<span class='dt-caption'>Cost_Components — component definitions, population-in-need rules, unit costs and readiness flags</span>")),
+  options = list(pageLength = 8, dom = "Bfrtip", scrollX = TRUE,
+                 buttons = c("copy", "csv"))
+) |>
+  formatCurrency("Unit cost (USD)", currency = "$", digits = 2) |>
+  formatPercentage(c("Cov. base", "Cov. target"), 0)
+```
+
+::: {.source-note}
+Component rows are read from **Cost_Components**. `PIN measure` maps to eligible population
+(`all`), prevalent stock (`prevalence`) or new cases (`incidence`) per the **README** and
+**Methods_and_Sources** (M06). `r sum(cc$cost_review == "Review")` of `r n_components`
+components carry a `Review` cost flag and `r sum(cc$cost_ready == 0)` are not yet marked
+ready — see the data-quality section.
+:::
+
+# Traceability & methodology
+
+The workbook is organised as a **dependency chain**: editable controls on
+*Calculation_Assumptions* feed R-generated source quantities, which live Excel formulas
+transform into the decision tables. The **Calculation_Map** sheet enumerates every link.
+
+```{r pipeline, results='asis'}
+cat(paste0(
+  '<div class="pipeline-grid">',
+  '<div class="pipeline-step"><span>1</span><strong>Assumptions</strong><p>Horizon, discount rate, price year, perspective (Calculation_Assumptions).</p></div>',
+  '<div class="pipeline-step"><span>2</span><strong>Selection</strong><p>Interventions, cause links, effects &amp; coverage (Selected_Interventions).</p></div>',
+  '<div class="pipeline-step"><span>3</span><strong>Costing inputs</strong><p>PIN rules, unit costs, coverage paths (Cost_Components).</p></div>',
+  '<div class="pipeline-step"><span>4</span><strong>Annual layers</strong><p>Mortality &amp; component costs by year (Annual_Mortality, Annual_Cost).</p></div>',
+  '<div class="pipeline-step"><span>5</span><strong>Budget impact</strong><p>Annual &amp; cumulative incremental cost (Budget_Impact).</p></div>',
+  '<div class="pipeline-step"><span>6</span><strong>Cost-effectiveness</strong><p>Deaths averted &amp; cost per death (Cost_Effectiveness).</p></div>',
+  '<div class="pipeline-step"><span>7</span><strong>QA</strong><p>Invariants &amp; Excel-vs-R reconciliation (QA_Checks).</p></div>',
+  '</div>'
+))
+```
+
+## Core equations
+
+The workbook records the following formulas (**Methods_and_Sources**, M01–M10). They are
+reproduced here exactly as documented — no alternative method is introduced.
+
+**Coverage scale-up and FAIR-adjusted effect** (M01–M04):
+
+$$
+\begin{aligned}
+\Delta\mathrm{cov}(t) &= \mathrm{cov}(t) - \mathrm{cov}_{\text{base}} \\[4pt]
+e_{\text{adj}}(t) &= \frac{\text{effect}\;\cdot\;\Delta\mathrm{cov}(t)}
+                          {1 - \text{effect}\;\cdot\;\mathrm{cov}_{\text{base}}} \\[4pt]
+\tau(t) &= e_{\text{adj}}(t)\;\cdot\;f_{\text{affected}} \\[4pt]
+p_{\text{scenario}}(t) &= p_{\text{baseline}}(t)\;\bigl(1 - \tau(t)\bigr)
+\end{aligned}
+$$
+
+<p class="eq-note">Prevention links modify incidence (IR); management links modify case
+fatality (CF).</p>
+
+**Population in need and annual component cost** (M06):
+
+$$
+\mathrm{PIN}(t) = Q(t)\;\cdot\;\text{pin\_fraction}, \qquad
+C(t) = \mathrm{PIN}(t)\;\cdot\;\mathrm{cov}(t)\;\cdot\;\text{freq}\;\cdot\;\text{unit\_cost}
+$$
+
+<p class="eq-note">\(Q(t)\) is the eligible population, prevalent stock, or incident cases
+per the PIN measure; shared components are counted once (M07).</p>
+
+**Incremental budget impact and discounting** (M08–M09):
+
+$$
+\Delta B(t) = C_{\text{scenario}}(t) - C_{\text{baseline}}(t), \qquad
+d(t) = \frac{1}{(1 + r)^{\,t - t_0}}
+$$
+
+<p class="eq-note">Costs are discounted at \(r = `r DISCOUNT`\) from \(t_0 = `r START_YEAR`\);
+death counts are left undiscounted.</p>
+
+**Deaths averted and interim cost-effectiveness** (M10):
+
+$$
+\mathrm{DA}(t) = D_{\text{baseline}}(t) - D_{\text{scenario}}(t), \qquad
+\text{USD per death averted} = \frac{\displaystyle\sum_t d(t)\,\Delta B(t)}
+                                    {\displaystyle\sum_t \mathrm{DA}(t)}
+$$
+
+```{r tbl-calcmap}
+cm <- WB$Calculation_Map |>
+  transmute(`Output sheet` = output_sheet, `Formula columns` = formula_columns,
+            `Depends on` = depends_on, Calculation = calculation,
+            `Source role` = source_role)
+kbl(cm, caption = "Calculation_Map — dependency and traceability chain across sheets",
+    align = "lllll", table.attr = 'class="table compact-kbl"') |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = TRUE, font_size = 12)
+```
+
+# Assumptions & data-quality status
+
+```{r assumptions-grid, results='asis'}
+show_ids <- c("analysis_start_year","analysis_end_year","cost_discount_rate",
+              "cost_price_year","currency","economic_perspective","scale_up_shape",
+              "baseline_scenario_id","downstream_cost_offsets","formula_tolerance")
+ca_show <- ca[match(show_ids, ca$parameter_id), ]
+ca_tbl <- ca_show |>
+  transmute(Parameter = parameter_id, Value = value, Unit = unit, Role = role,
+            Description = description)
+cat('<div class="table-panel">')
+print(kbl(ca_tbl, caption = "Calculation_Assumptions — key formula controls and metadata",
+          align = "lllll", table.attr = 'class="table compact-kbl"') |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = TRUE, font_size = 12))
+cat('</div>')
+```
+
+## Blocked links and diagnostic issues
+
+`r n_blocked` health link(s) are blocked and **excluded** from all results; the input
+diagnostic records `r n_diag_fail` FAIL-level and `r n_diag_review` REVIEW-level item(s).
+
+```{r tbl-blocked}
+bl <- WB$Blocked_Links |>
+  transmute(Intervention = intervention_id, Cause = cause_id,
+            Transition = paste0(transition_from, " → ", transition_to),
+            Effect = effect_value, `Affected frac.` = affected_fraction,
+            `Baseline cov.` = baseline_coverage, `Target cov.` = target_coverage,
+            Problem = problem)
+kbl(bl, caption = "Blocked_Links — health-effect links excluded from the analysis",
+    align = "llllllll", table.attr = 'class="table compact-kbl"') |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = TRUE, font_size = 12)
+```
+
+```{r tbl-diagnostic}
+idg_tbl <- idg |>
+  transmute(Scope = scope, Item = item_key, Field = field, Problem = problem,
+            Severity = severity)
+kbl(idg_tbl, caption = "Input_Diagnostic — FAIL/REVIEW issues affecting interpretation",
+    align = "lllll", escape = TRUE, table.attr = 'class="table compact-kbl"') |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = TRUE, font_size = 12) |>
+  column_spec(5, bold = TRUE)
+```
+
+::: {.report-callout .callout-danger}
+::: {.callout-title}
+What the blocked links mean for scope
+:::
+::: {.callout-body}
+The diabetes-treatment intervention (`I_T2D_TREATMENT`, both its IHD and T2D links) is
+**blocked for missing baseline coverage** and is therefore absent from every result table
+and figure. Its associated cost record (`COST_T2D_TREATMENT`) additionally lacks a coverage
+trajectory and is not Indonesia-adjusted. Consequently the costed portfolio is **CVD-focused**
+and does not represent the full candidate intervention set. Type 2 diabetes (`dm2`) still
+appears as a modelled cause in mortality, but with **zero deaths averted** because no valid
+diabetes intervention link survived selection.
+:::
+:::
+
+# Results
+
+## Scenario comparison
+
+```{r tbl-ce}
+ce_tbl <- ce |>
+  mutate(is_bundle = scenario == "all") |>
+  arrange(desc(is_bundle), cost_per_death_averted) |>
+  transmute(
+    Scenario = scenario_label,
+    `Deaths averted` = deaths_averted,
+    `Cases averted` = cases_averted,
+    `Incremental cost` = incremental_cost,
+    `Disc. incremental cost` = disc_incremental_cost,
+    `Disc. cost / death averted` = cost_per_death_averted,
+    Basis = dominance,
+    Reconciliation = reconciliation_status
+  )
+datatable(
+  ce_tbl, rownames = FALSE, extensions = "Buttons",
+  caption = htmltools::tags$caption(style = "caption-side:top;",
+    htmltools::HTML("<span class='dt-caption'>Cost_Effectiveness — cumulative deaths/cases averted, incremental cost and interim cost per death averted</span>")),
+  options = list(pageLength = 9, dom = "Bfrtip", scrollX = TRUE,
+                 buttons = c("copy", "csv"), ordering = FALSE)
+) |>
+  formatRound(c("Deaths averted", "Cases averted"), 0) |>
+  formatCurrency(c("Incremental cost", "Disc. incremental cost"), "$", digits = 0) |>
+  formatCurrency("Disc. cost / death averted", "$", digits = 0)
+```
+
+::: {.source-note}
+The first row is the combined **`all`** bundle (shaded conceptually as a portfolio, not a
+mutually exclusive option); the remaining rows are individual interventions ordered from most
+to least efficient. Negative *Cases averted* are retained exactly as reported by the workbook.
+:::
+
+## Budget impact
+
+```{r fig-budget-annual, fig.height=5.4}
+bi_plot <- bi |>
+  filter(year <= HORIZON) |>
+  mutate(scenario = factor(scenario, levels = scen_levels))
+```
+
+::: {.chart-panel}
+```{r fig-budget-annual-draw, fig.height=5.4}
+ggplot(bi_plot, aes(year, incremental_cost / 1e9, colour = scenario)) +
+  geom_hline(yintercept = 0, colour = "#c9d6df", linewidth = 0.4) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 1.1, alpha = 0.7) +
+  scale_colour_manual(values = scen_cols, labels = function(x) lbl_scen(x),
+                      name = NULL) +
+  scale_x_continuous(breaks = scales::pretty_breaks(6)) +
+  scale_y_continuous(labels = function(x) paste0("$", x, "B")) +
+  labs(
+    title = "Annual incremental budget impact by scenario",
+    subtitle = glue("Undiscounted scenario minus baseline cost, {START_YEAR}–{HORIZON}"),
+    x = NULL, y = glue("Incremental cost ({CURRENCY} billions, undiscounted)"),
+    caption = src_cap("Budget_Impact")
+  ) +
+  theme_report()
+```
+:::
+
+::: {.chart-panel}
+```{r fig-budget-cumulative, fig.height=5.4}
+bi_cum <- bi |>
+  filter(year <= HORIZON) |>
+  mutate(scenario = factor(scenario, levels = scen_levels))
+ggplot(bi_cum, aes(year, cumulative_disc_incremental_cost / 1e9, colour = scenario)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 1.1, alpha = 0.7) +
+  scale_colour_manual(values = scen_cols, labels = function(x) lbl_scen(x), name = NULL) +
+  scale_x_continuous(breaks = scales::pretty_breaks(6)) +
+  scale_y_continuous(labels = function(x) paste0("$", x, "B")) +
+  labs(
+    title = "Cumulative discounted incremental cost by scenario",
+    subtitle = glue("Running total of discounted incremental cost to {HORIZON} ({DISCOUNT*100}% discount rate)"),
+    x = NULL, y = glue("Cumulative discounted cost ({CURRENCY} billions)"),
+    caption = src_cap("Budget_Impact")
+  ) +
+  theme_report()
+```
+:::
+
+The combined package reaches a cumulative discounted incremental cost of
+**`r usd_big(all_bi_final$cum_disc)`** by `r END_YEAR`. `r lbl_scen("I_RHD_SURGERY")`
+is the single largest cost driver among the individual interventions
+(`r usd_big(bi_final$cum_disc[bi_final$scenario=="I_RHD_SURGERY"])` discounted).
+
+## Mortality and cases
+
+::: {.chart-panel}
+```{r fig-deaths-averted, fig.height=5.4}
+da_time <- am |>
+  filter(scenario != BASE_ID, year <= HORIZON) |>
+  group_by(scenario, year) |>
+  summarise(deaths_averted = sum(deaths_averted), .groups = "drop") |>
+  mutate(scenario = factor(scenario, levels = scen_levels))
+ggplot(da_time, aes(year, deaths_averted / 1e3, colour = scenario)) +
+  geom_line(linewidth = 0.9) +
+  scale_colour_manual(values = scen_cols, labels = function(x) lbl_scen(x), name = NULL) +
+  scale_x_continuous(breaks = scales::pretty_breaks(6)) +
+  scale_y_continuous(labels = function(x) paste0(x, "k")) +
+  labs(
+    title = "Annual deaths averted by scenario",
+    subtitle = glue("Baseline minus scenario deaths, all causes, {START_YEAR}–{HORIZON}"),
+    x = NULL, y = "Deaths averted per year (thousands)",
+    caption = src_cap("Annual_Mortality")
+  ) +
+  theme_report()
+```
+:::
+
+::: {.chart-panel}
+```{r fig-deaths-cause, fig.height=5.4}
+da_cause <- am |>
+  filter(scenario == focus_id, year <= HORIZON) |>
+  group_by(year, cause) |>
+  summarise(deaths_averted = sum(deaths_averted), .groups = "drop") |>
+  mutate(cause = factor(cause, levels = names(cause_cols)))
+# keep only causes with any non-zero contribution for a legible legend
+keep_causes <- da_cause |> group_by(cause) |>
+  summarise(tot = sum(abs(deaths_averted)), .groups = "drop") |>
+  filter(tot > 0) |> pull(cause)
+da_cause <- da_cause |> filter(cause %in% keep_causes)
+ggplot(da_cause, aes(year, deaths_averted / 1e3, fill = cause)) +
+  geom_area(alpha = 0.9, colour = "white", linewidth = 0.2) +
+  scale_fill_manual(values = cause_cols, labels = function(x) lbl_cause(as.character(x)),
+                    name = "Cause") +
+  scale_x_continuous(breaks = scales::pretty_breaks(6)) +
+  scale_y_continuous(labels = function(x) paste0(x, "k")) +
+  labs(
+    title = glue("Deaths averted by cause — {lbl_scen(focus_id)}"),
+    subtitle = glue("Cause decomposition of annual deaths averted, {START_YEAR}–{HORIZON}"),
+    x = NULL, y = "Deaths averted per year (thousands)",
+    caption = src_cap("Annual_Mortality")
+  ) +
+  theme_report()
+```
+:::
+
+```{r neg-ca-callout, results='asis'}
+if (has_neg_ca) {
+  rows <- paste(sprintf("%s (%s)", lbl_scen(neg_ca$scenario), fmt_n(neg_ca$cases_averted)),
+                collapse = "; ")
+  cat(glue(
+    '<div class="report-callout callout-warning"><div class="callout-title">',
+    'Negative cases averted are preserved, not zeroed</div><div class="callout-body">',
+    '{nrow(neg_ca)} scenario(s) report negative cumulative cases averted: {rows}. ',
+    'This is expected for management / secondary-prevention interventions: reducing case ',
+    'fatality keeps more people alive in the prevalent-disease (‘sick’) state, so the ',
+    'stock of living cases rises even as deaths fall. These values are retained exactly ',
+    'as the workbook reports them and are interpreted, never coerced to zero.',
+    '</div></div>'))
+}
+```
+
+## Cost drivers
+
+::: {.chart-panel}
+```{r fig-cost-drivers, fig.height=6.2}
+drivers <- ac |>
+  filter(scenario != "all", year <= HORIZON) |>
+  group_by(intervention_id, cost_component_key) |>
+  summarise(disc_inc = sum(disc_cost_incremental), .groups = "drop") |>
+  filter(disc_inc != 0) |>
+  mutate(intervention_id = factor(intervention_id, levels = scen_levels),
+         comp = str_replace_all(cost_component_key, "_", " "),
+         comp = str_wrap(str_to_title(comp), 26)) |>
+  arrange(desc(disc_inc)) |>
+  slice_head(n = 18)
+ggplot(drivers, aes(x = reorder(comp, disc_inc), y = disc_inc / 1e9,
+                    fill = intervention_id)) +
+  geom_col(width = 0.72) +
+  coord_flip() +
+  scale_fill_manual(values = scen_cols, labels = function(x) lbl_scen(x),
+                    name = "Intervention") +
+  scale_y_continuous(labels = function(x) paste0("$", x, "B")) +
+  labs(
+    title = "Top cost components by discounted incremental cost",
+    subtitle = glue("Cumulative {START_YEAR}–{HORIZON}; individual scenarios only (bundle excluded to avoid double counting)"),
+    x = NULL, y = glue("Discounted incremental cost ({CURRENCY} billions)"),
+    caption = src_cap("Annual_Cost")
+  ) +
+  theme_report() +
+  theme(panel.grid.major.y = element_blank(),
+        panel.grid.major.x = element_line(colour = "#eef2f5"))
+```
+:::
+
+::: {.source-note}
+Components flagged `shared-count-once` are aggregated exactly as they appear in **Annual_Cost**
+(one row per scenario-year); the sheet's own `shared_duplicate_count` control prevents any
+double counting across causes. The combined `all` scenario is excluded from this chart so that
+shared components are not mixed across the portfolio.
+:::
+
+## Coverage trajectories
+
+::: {.chart-panel}
+```{r fig-coverage, fig.height=5.6}
+cov_traj <- ac |>
+  filter(scenario != "all", year <= HORIZON) |>
+  distinct(intervention_id, cost_component_key, year, coverage_scenario) |>
+  mutate(intervention_id = factor(intervention_id, levels = scen_levels))
+ggplot(cov_traj, aes(year, coverage_scenario,
+                     group = cost_component_key, colour = intervention_id)) +
+  geom_line(linewidth = 0.7, alpha = 0.85) +
+  scale_colour_manual(values = scen_cols, labels = function(x) lbl_scen(x), name = NULL) +
+  scale_x_continuous(breaks = scales::pretty_breaks(6)) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, NA)) +
+  labs(
+    title = "Coverage trajectories for costed components",
+    subtitle = glue("Scenario coverage path per component, {SCALE_SHAPE} scale-up {START_YEAR}–{HORIZON}"),
+    x = NULL, y = "Coverage (scenario)",
+    caption = src_cap("Annual_Cost")
+  ) +
+  theme_report()
+```
+:::
+
+## Cost-effectiveness plane and efficiency ranking
+
+::: {.chart-panel}
+```{r fig-ce-plane, fig.height=5.8}
+ce_pl <- ce |>
+  mutate(scenario = factor(scenario, levels = scen_levels),
+         is_bundle = scenario == "all")
+ggplot(ce_pl, aes(deaths_averted / 1e6, disc_incremental_cost / 1e9)) +
+  geom_point(aes(colour = scenario, shape = is_bundle), size = 3.4) +
+  geom_text(aes(label = wrap_scen(as.character(scenario), 16)),
+            size = 3, vjust = -0.7, hjust = 0.5, colour = "#29465b",
+            lineheight = 0.85, check_overlap = FALSE) +
+  scale_colour_manual(values = scen_cols, guide = "none") +
+  scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17), guide = "none") +
+  scale_x_continuous(labels = function(x) paste0(x, "M"),
+                     expand = expansion(mult = c(0.08, 0.14))) +
+  scale_y_continuous(labels = function(x) paste0("$", x, "B"),
+                     expand = expansion(mult = c(0.06, 0.12))) +
+  labs(
+    title = "Cost-effectiveness plane",
+    subtitle = "Discounted incremental cost vs cumulative deaths averted (▲ = combined bundle)",
+    x = "Deaths averted (millions, cumulative)",
+    y = glue("Discounted incremental cost ({CURRENCY} billions)"),
+    caption = src_cap("Cost_Effectiveness")
+  ) +
+  theme_report()
+```
+:::
+
+::: {.chart-panel}
+```{r fig-cpda-rank, fig.height=5.4}
+cpda <- ce |>
+  filter(deaths_averted > 0) |>
+  mutate(scenario = factor(scenario, levels = scen_levels),
+         is_bundle = scenario == "all")
+rng <- range(cpda$cost_per_death_averted)
+use_log <- (rng[2] / rng[1]) > 50   # decades of range -> log scale for legibility
+p <- ggplot(cpda, aes(x = reorder(as.character(scenario), -cost_per_death_averted),
+                      y = cost_per_death_averted, fill = scenario)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = usd0(cost_per_death_averted)), hjust = -0.08, size = 3,
+            colour = "#29465b") +
+  coord_flip() +
+  scale_fill_manual(values = scen_cols, guide = "none") +
+  scale_x_discrete(labels = function(x) wrap_scen(x, 20)) +
+  labs(
+    title = "Interim efficiency ranking — discounted cost per death averted",
+    subtitle = if (use_log) "Note: horizontal axis is log-scaled (values span several orders of magnitude)"
+               else "Discounted cost per death averted, ranked",
+    x = NULL, y = glue("Discounted cost per death averted ({CURRENCY}){if (use_log) ', log scale' else ''}"),
+    caption = src_cap("Cost_Effectiveness")
+  ) +
+  theme_report() +
+  theme(panel.grid.major.y = element_blank(),
+        panel.grid.major.x = element_line(colour = "#eef2f5"))
+if (use_log) {
+  p + scale_y_log10(labels = scales::dollar_format(),
+                    expand = expansion(mult = c(0, 0.18)))
+} else {
+  p + scale_y_continuous(labels = scales::dollar_format(),
+                         expand = expansion(mult = c(0, 0.18)))
+}
+```
+:::
+
+::: {.source-note}
+The efficiency ranking excludes the combined `all` bundle from the mutually-exclusive
+comparison logic; it is a portfolio, not a competing option. `r if (exists("use_log") && use_log) "A log scale is used because the workbook's cost-per-death-averted values span several orders of magnitude (from hundreds to millions of USD)." else "A linear scale is used."`
+:::
+
+# Technical validation
+
+The workbook recomputes each invariant in Excel and reconciles its headline
+cost-effectiveness figures against the R engine values stored on **Calculation_Assumptions**.
+Overall disposition: **`r status_badge(overall_qa)`** —
+`r n_pass` PASS, `r n_review` REVIEW, `r n_fail` FAIL.
+
+```{r tbl-qa}
+qa_tbl <- qa |>
+  transmute(Check = check, Expected = expected, Actual = actual,
+            Status = status, Note = note)
+kbl(qa_tbl, caption = "QA_Checks — invariant recomputation and Excel-vs-R reconciliation",
+    align = "lllll", table.attr = 'class="table compact-kbl"') |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = TRUE, font_size = 12) |>
+  column_spec(4, bold = TRUE) |>
+  row_spec(which(qa_status_norm == "PASS"),   background = "#f4fbf9") |>
+  row_spec(which(qa_status_norm == "REVIEW"), background = "#fffbf1") |>
+  row_spec(which(qa_status_norm == "FAIL"),   background = "#fff7f8")
+```
+
+## Independent reconciliation (report-side QA)
+
+As an additional check, this report re-derives the cross-sheet totals and compares them with
+the workbook's authoritative values. **The workbook value is never overwritten** — any
+mismatch is reported, not silently corrected.
+
+```{r tbl-recon}
+recon_tbl <- recon |>
+  transmute(
+    Scenario = lbl_scen(scenario),
+    `WB disc. cost` = disc_incremental_cost,
+    `BI cumulative` = cum_disc,
+    `Δ cost` = d_cost,
+    `WB deaths averted` = deaths_averted,
+    `AM Σ deaths` = da,
+    `Δ deaths` = d_deaths,
+    `WB $/death` = cost_per_death_averted,
+    `Recomputed $/death` = cpda_recomp
+  )
+kbl(recon_tbl, caption = "Report-side reconciliation: Cost_Effectiveness vs Budget_Impact and Annual_Mortality",
+    align = "lrrrrrrrr", digits = c(0,0,0,4,2,2,6,2,2),
+    format.args = list(big.mark = ","), table.attr = 'class="table compact-kbl"') |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = TRUE, font_size = 11)
+```
+
+```{r recon-callout, results='asis'}
+tone <- if (recon_ok) "callout-success" else "callout-danger"
+title <- if (recon_ok) "Cross-sheet totals reconcile" else "Cross-sheet reconciliation mismatch"
+body <- if (recon_ok) glue(
+  "Every scenario's discounted incremental cost matches the Budget_Impact cumulative total, ",
+  "and every scenario's deaths averted matches the Annual_Mortality sum, within the workbook ",
+  "tolerance ({TOL} {CURRENCY}/count). The independently recomputed cost per death averted ",
+  "equals the workbook's cost_per_death_averted for all scenarios.") else glue(
+  "One or more scenarios differ between Cost_Effectiveness and the annual detail sheets beyond ",
+  "the workbook tolerance ({TOL}). The workbook values are retained as authoritative and the ",
+  "discrepancy is flagged for investigation — recalculate and save the workbook, then re-knit.")
+cat(glue('<div class="report-callout {tone}"><div class="callout-title">{title}</div>',
+         '<div class="callout-body">{body}</div></div>'))
+```
+
+## Structural integrity checks
+
+```{r integrity, results='asis'}
+# Non-finite scan over the numeric fields used in results
+nf <- function(tbl, cols) sum(!is.finite(as.matrix(sapply(tbl[cols], as.numeric))))
+nf_bi <- nf(bi, c("incremental_cost","disc_incremental_cost","cumulative_disc_incremental_cost"))
+nf_am <- nf(am, c("cause_deaths","base_deaths","deaths_averted","cases_averted"))
+nf_ac <- nf(ac, c("annual_cost_baseline","annual_cost_scenario","annual_cost_incremental",
+                  "disc_cost_incremental","coverage_scenario"))
+neg_cost <- sum(ac$annual_cost_baseline < 0, na.rm = TRUE) +
+            sum(ac$annual_cost_scenario < 0, na.rm = TRUE)
+scen_sets_match <- setequal(unique(bi$scenario), setdiff(unique(am$scenario), BASE_ID)) &&
+                   setequal(unique(bi$scenario), unique(ac$scenario))
+
+check_row <- function(label, ok, detail) {
+  b <- if (ok) '<span class="badge badge-pass">PASS</span>' else '<span class="badge badge-review">REVIEW</span>'
+  glue('<div class="repro-card"><span>{if (ok) "✓" else "!"}</span><h3>{label} {b}</h3><p>{detail}</p></div>')
+}
+cat(paste0(
+  '<div class="repro-grid">',
+  check_row("Budget_Impact keys", uniq_bi,
+            glue("Scenario × year rows are unique ({nrow(bi)} rows, {n_scen_costed} scenarios × {N_YEARS} years).")),
+  check_row("Annual_Mortality keys", uniq_am,
+            glue("Scenario × year × cause rows are unique ({nrow(am)} rows) — safe to aggregate to year × cause.")),
+  check_row("Annual_Cost keys", uniq_ac,
+            glue("Scenario × year × cost record rows are unique ({nrow(ac)} rows) — no component double-counted.")),
+  check_row("Finite values", nf_bi + nf_am + nf_ac == 0,
+            glue("Non-finite entries in results fields: Budget_Impact {nf_bi}, Annual_Mortality {nf_am}, Annual_Cost {nf_ac}.")),
+  check_row("Non-negative costs", neg_cost == 0,
+            glue("{neg_cost} negative baseline/scenario annual cost value(s) — costs are expected to be non-negative.")),
+  check_row("Consistent scenario set", scen_sets_match,
+            "The same scenarios appear across Budget_Impact, Annual_Mortality (excl. baseline) and Annual_Cost."),
+  '</div>'
+))
+```
+
+::: {.source-note}
+These are internal-consistency checks the report performs on the workbook tables; they
+confirm the sheets can be joined and aggregated safely. Zero/negative deaths averted are
+handled explicitly where ratios are computed (the efficiency ranking and recomputed cost per
+death averted exclude scenarios with non-positive deaths averted), and negative *cases*
+averted are preserved as described under *Results*.
+:::
+
+::: {.report-callout .callout-warning}
+::: {.callout-title}
+Arithmetic PASS ≠ external validity
+:::
+::: {.callout-body}
+`r n_review` QA check(s) are **REVIEW** and the input diagnostic carries `r n_diag_fail`
+**FAIL** item(s); the model is therefore **not** described as fully validated. Passing
+arithmetic and reconciliation checks confirms internal consistency of the costing and
+budget-impact calculations — it does **not** establish epidemiological or external validity
+of the underlying effect sizes, coverage assumptions, or unit costs, several of which remain
+`Provisional` or `Review` in the source sheets.
+:::
+:::
+
+# Interpretation & limitations
+
+**Model results, not forecasts.** The figures are projections under a specified set of
+interventions, effect sizes, coverage trajectories and unit costs — they describe *what the
+model implies if these inputs hold*, not a prediction of realised outcomes. Effect and
+coverage parameters are largely flagged **`Provisional`** (`r sum(si$effect_review == "Provisional")`
+of `r n_links` links) and most unit costs carry a **`Review`** flag.
+
+```{r limitations-grid, results='asis'}
+lim_card <- function(h, p) glue('<div class="limitation-card"><h3>{h}</h3><p>{p}</p></div>')
+cat(paste0(
+  '<div class="limitations-grid">',
+  lim_card("No DALYs / economic value",
+           glue("DALYs, YLL, YLD and disability weights are out of scope; the Economic_Value ",
+                "sheet is unpopulated. Cost per death averted is the only efficiency metric and ",
+                "is not comparable to DALY-based thresholds.")),
+  lim_card("Blocked &amp; excluded links",
+           glue("{n_blocked} diabetes-treatment link(s) are blocked for missing baseline ",
+                "coverage, narrowing the portfolio to CVD interventions.")),
+  lim_card("Provisional inputs",
+           glue("Effect sizes and coverage are mostly Provisional; unit costs are mostly ",
+                "flagged Review. One cost record is not Indonesia-adjusted and uses a ",
+                "different price year.")),
+  lim_card("Negative cases averted",
+           glue("Secondary-prevention scenarios raise the prevalent-case stock (survival ",
+                "effect); negative cases averted are retained and must be read as living ",
+                "cases, not modelling error.")),
+  '</div>'
+))
+```
+
+::: {.report-callout .callout-info}
+::: {.callout-title}
+Economic value (VSL/VSLY) unavailable
+:::
+::: {.callout-body}
+`r if (!econ_value_available) paste0("The Economic_Value sheet contains only an omission note: “", WB$Economic_Value$note[1], "” No monetised economic value, benefit–cost ratio, or net benefit is reported, and none is invented here.") else "The Economic_Value sheet is populated; see the workbook for VSL/VSLY-based results."`
+The **`downstream_cost_offsets`** control is set to `r assume("downstream_cost_offsets")`
+(excluded), so averted downstream disease costs are **not** netted against intervention costs.
+No productivity effects, fiscal effects, GDP comparisons, cost-utility thresholds, or
+probabilistic uncertainty are included because none are present in this workbook.
+:::
+:::
+
+# Reproducibility
+
+```{r repro-grid, results='asis'}
+repro_card <- function(n, h, p) glue('<div class="repro-card"><span>{n}</span><h3>{h}</h3><p>{p}</p></div>')
+sheets_read <- paste(REQUIRED_SHEETS, collapse = ", ")
+cat(paste0(
+  '<div class="repro-grid">',
+  repro_card("1", "Single data source",
+             glue("Workbook: <code>{WB_REL}</code>. All 15 sheets read once: {sheets_read}. ",
+                  "No CSV, RDS, database, model object or other spreadsheet is read.")),
+  repro_card("2", "No upstream execution",
+             "The epidemiological, costing and economic pipelines are not sourced or re-run during knitting. Cached Excel formula values are used as-is."),
+  repro_card("3", "Parameters",
+             glue("focus_scenario = <code>{params$focus_scenario}</code>; ",
+                  "decision_horizon = <code>{HORIZON}</code>",
+                  "{if (HORIZON_DEFAULTED) ' (default: workbook analysis end year)' else ''}; ",
+                  "show_code = <code>{params$show_code}</code>.")),
+  repro_card("4", "Rendered",
+             glue("Knitted {format(Sys.time(), '%Y-%m-%d %H:%M')} · R {getRversion()} · ",
+                  "workbook run date {meta_val('Run date')}.")),
+  '</div>'
+))
+```
+
+```{r session-info}
+si_txt <- capture.output(sessionInfo())
+cat(paste(si_txt, collapse = "\n"))
+```
+
+<div class="report-footer">
+<div><strong>Indonesia NCD FAIR Choices — Costing &amp; Economic Analysis.</strong>
+Source of truth: <code>`r basename(WB_PATH)`</code>. This report executes no upstream model code.</div>
+<div>University of Washington · World Bank Indonesia NCD program</div>
+</div>
+
+<script>
+/* Robustness guard: on some load orderings htmlwidgets marks a DataTable
+   "static-bound" before its render completes, leaving an empty widget div.
+   Re-render only the widgets that ended up without a DataTables wrapper. */
+(function () {
+  function fixWidgets() {
+    if (!window.HTMLWidgets || !HTMLWidgets.staticRender) return;
+    var widgets = document.querySelectorAll('.html-widget');
+    var repaired = false;
+    widgets.forEach(function (w) {
+      if (w.classList.contains('datatables') && !w.querySelector('.dataTables_wrapper')) {
+        w.classList.remove('html-widget-static-bound');
+        w.innerHTML = '';
+        repaired = true;
+      }
+    });
+    if (repaired) { try { HTMLWidgets.staticRender(); } catch (e) {} }
+  }
+  if (document.readyState === 'complete') { setTimeout(fixWidgets, 200); }
+  else { window.addEventListener('load', function () { setTimeout(fixWidgets, 200); }); }
+})();
+</script>

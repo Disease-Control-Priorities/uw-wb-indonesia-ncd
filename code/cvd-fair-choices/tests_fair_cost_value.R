@@ -35,6 +35,7 @@ repo <- find_repo()
 code_dir <- file.path(repo, "code", "cvd-fair-choices")
 wb_in    <- file.path(repo, "data", "indonesia_model_inputs.xlsx")
 wb_out   <- file.path(repo, "output", "indonesia_model_cost_value.xlsx")
+wb_form  <- file.path(repo, "output", "indonesia_model_cost_value_formulae.xlsx")
 
 cat("== 1. Syntax (parse) of changed R files ==\n")
 for (f in c("00_run_model_cvd_fair.R", "04_define_interventions_indonesia.R",
@@ -127,6 +128,36 @@ if (file.exists(wb_out) && requireNamespace("openxlsx", quietly = TRUE)) {
         all(abs(s$cost_per_death_averted - s$disc_incremental_cost / s$deaths_averted) < 1e-3) })
 } else {
   cat("   (cost/value workbook not found; run Model 09 first -- skipping section 6)\n")
+}
+
+cat("\n== 7. Formula-driven workbook (if present) ==\n")
+# Portable structural checks (no Excel/COM needed): required sheets, live Excel
+# formulas present in the decision tables, editable assumptions sheet, and a
+# well-formed package (no dangling drawing parts).
+if (file.exists(wb_form) && requireNamespace("openxlsx", quietly = TRUE)) {
+  snf <- openxlsx::getSheetNames(wb_form)
+  needf <- c("README", "Run_Metadata", "Selected_Interventions", "Cost_Components",
+             "Annual_Mortality", "Annual_Cost", "Budget_Impact", "Cost_Effectiveness",
+             "QA_Checks", "Calculation_Assumptions", "Calculation_Map", "Methods_and_Sources")
+  chk("formula workbook required sheets present", all(needf %in% snf))
+  ca <- as.data.table(openxlsx::read.xlsx(wb_form, "Calculation_Assumptions"))
+  chk("Calculation_Assumptions exposes editable controls",
+      all(c("analysis_start_year", "cost_discount_rate", "baseline_scenario_id") %in%
+            ca$parameter_id))
+  # Scan the sheet XML for <f> formula elements and for dangling drawing parts.
+  tdir <- file.path(tempdir(), "fmlchk"); unlink(tdir, recursive = TRUE); dir.create(tdir)
+  utils::unzip(wb_form, exdir = tdir)
+  sx <- list.files(file.path(tdir, "xl", "worksheets"), pattern = "\\.xml$", full.names = TRUE)
+  nf <- sum(vapply(sx, function(f) {
+    x <- paste(readLines(f, warn = FALSE), collapse = "")
+    length(gregexpr("<f>", x, fixed = TRUE)[[1]][gregexpr("<f>", x, fixed = TRUE)[[1]] > 0])
+  }, integer(1)))
+  chk("formula workbook contains live Excel formulas (>1000)", nf > 1000)
+  ct <- paste(readLines(file.path(tdir, "[Content_Types].xml"), warn = FALSE), collapse = "")
+  chk("formula workbook is well-formed (no dangling drawing parts)",
+      !grepl("drawings/drawing", ct) && !dir.exists(file.path(tdir, "xl", "drawings")))
+} else {
+  cat("   (formula workbook not found; run Model 09 first -- skipping section 7)\n")
 }
 
 cat(sprintf("\n==== RESULT: %d passed, %d failed ====\n", .n_pass, .n_fail))
