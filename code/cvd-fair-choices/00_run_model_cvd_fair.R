@@ -84,6 +84,42 @@ baseline_scenario_id          <- "baseline"
 strict_model_input_validation <- FALSE
 
 #===========================================================================
+# INTERVENTION-FAMILY EXECUTION SWITCHES  (execution-level only) ----
+#---------------------------------------------------------------------------
+# Choose which intervention FAMILIES this run analyses. Both are user-editable
+# and independently honoured by Models 04 (catalogue), 06 (scenarios) and 09
+# (cost/value workbooks). The baseline (no-new-intervention) comparator ALWAYS
+# runs regardless of these switches -- it is required for valid deaths-averted
+# and incremental-cost comparisons.
+#   TRUE / TRUE   -> both clinical (FAIR Choices) and public-health families
+#   TRUE / FALSE  -> public-health interventions only
+#   FALSE / TRUE  -> clinical interventions only
+#   FALSE / FALSE -> nothing to analyse: the run stops early with an error.
+# NOTE: analytic assumptions (exposures, effects, lags, costs, coverage, years,
+# discounting) stay in the Excel input workbooks -- NEVER duplicate them here.
+run_public_health_interventions <- TRUE
+run_clinical_interventions      <- TRUE
+if (!isTRUE(run_public_health_interventions) && !isTRUE(run_clinical_interventions))
+  stop("No intervention family selected: set run_public_health_interventions ",
+       "and/or run_clinical_interventions to TRUE. With both FALSE there is no ",
+       "intervention analysis to run.", call. = FALSE)
+
+# Public-health analytic input workbook (authoritative PH contract) and the
+# public-health cost/value formula workbook Model 09 writes. Names are kept
+# deliberately distinct from the clinical `model_inputs_file` /
+# `cost_value_output_file` above so the two families can never be confused.
+# The repository file name contains a space ("indonesia_model_inputs_ public_health.xlsx");
+# use the ACTUAL file, falling back to the no-space variant if it is ever renamed.
+public_health_inputs_file <- paste0(wd, "data/indonesia_model_inputs_ public_health.xlsx")
+if (!file.exists(public_health_inputs_file)) {
+  .ph_alt <- paste0(wd, "data/indonesia_model_inputs_public_health.xlsx")
+  if (file.exists(.ph_alt)) public_health_inputs_file <- .ph_alt
+  rm(.ph_alt)
+}
+public_health_cost_value_formulae_file <- paste0(
+  wd_outp, "indonesia_cost_value_public_health_formulae.xlsx")
+
+#===========================================================================
 # CENTRAL MODEL CONFIGURATION  (SINGLE SOURCE OF TRUTH) ----
 #---------------------------------------------------------------------------
 # Ages and causes are declared ONLY here. Every downstream script (021-06 and

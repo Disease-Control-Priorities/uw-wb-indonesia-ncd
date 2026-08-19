@@ -1808,6 +1808,132 @@ calculate_fair_workbook_impact <- function(intervention_rates, Country, effect_r
 }
 
 #...........................................................
+# PUBLIC-HEALTH WORKBOOK-driven impact (Model 04 PH catalogue) ----
+#...........................................................
+# Applies the validated public-health effect rows built by Model 04
+# (public_health_scenarios[[scenario]]$ph_effect_rows) to incidence
+# (IR / eff_ir) ONLY -- this contract maps public-health policies to the
+# well -> sick transition. This is the EXPOSURE-based analogue of
+# calculate_fair_workbook_impact(); it does NOT use the clinical FAIR
+# apply_coverage_adjustment() coverage formula.
+#
+# For each intervention-cause row and model year t:
+#   1. achieved exposure pt(t): linear baseline -> target path over
+#      [start_year, target_year], floored at exposure_floor;
+#   2. full effect via the row's declared effect_model
+#      (direct_smoking_prevalence_shift_rr / direct_loglinear_rr_per_unit_reduction
+#       / tfa_attributable_ihd_PAF_x_policy_score);
+#   3. lag model: immediate_after_full_implementation -> effect tracks the
+#      exposure path; delayed_exponential_remaining_effect -> full target effect
+#      accrues as 1-(1-rate)^(years since start);
+#   4. constrain the realised effect to a valid proportional reduction [0,1];
+#   5. multiply the cause-specific incidence by the surviving fraction 1 - eff_t;
+#   6. multiple policies on the same cause/year combine MULTIPLICATIVELY on the
+#      surviving fraction (order-invariant; no double counting).
+calculate_public_health_workbook_impact <- function(intervention_rates, Country, effect_rows) {
+
+  cat("  - Calculating public-health (workbook) policy impact\n")
+
+  if (is.null(effect_rows) || nrow(effect_rows) == 0) {
+    cat("    (no public-health effect rows supplied; rates returned unchanged)\n")
+    return(intervention_rates[])
+  }
+
+  # Exposure-tracking proportional incidence reduction for a vector of exposures.
+  ph_effect_from_exposure <- function(model, p0, pt, RR, paf) {
+    if (identical(model, "direct_smoking_prevalence_shift_rr"))
+      return(1 - (1 + pt * (RR - 1)) / (1 + p0 * (RR - 1)))
+    if (identical(model, "direct_loglinear_rr_per_unit_reduction"))
+      return(1 - 1 / (RR ^ (p0 - pt)))
+    if (identical(model, "tfa_attributable_ihd_PAF_x_policy_score"))
+      return(rep(ifelse(is.na(paf), 0, paf) * ifelse(is.na(RR), 0, RR), length(pt)))
+    stop("PH wb: unsupported effect_model '", model, "'.", call. = FALSE)
+  }
+
+  dt <- copy(intervention_rates)
+  er <- as.data.table(copy(effect_rows))
+
+  present <- unique(dt$cause)
+  miss    <- setdiff(unique(er$cause_code), present)
+  if (length(miss) > 0)
+    cat("    PH wb: mapped cause(s) not present in rates, skipped:",
+        paste(miss, collapse = ", "), "\n")
+  er <- er[cause_code %in% present]
+
+  # Surviving incidence fraction (1 = no effect); accumulate (1 - effect) products.
+  dt[, ph_surv_ir := 1]
+
+  for (i in seq_len(nrow(er))) {
+    r <- er[i]
+
+    p0   <- r$baseline_exposure; ptgt <- r$target_exposure
+    flr  <- r$exposure_floor;    sy   <- r$start_year; ty <- r$target_year
+    RR   <- r$response_value;    paf  <- r$paf_value
+    Efull <- r$full_effect_at_target
+
+    # Achieved exposure path pt(t): before start = baseline; linear baseline ->
+    # target between start and target (inclusive); target thereafter; floored.
+    span <- max(ty - sy + 1, 1)
+    frac <- pmin(pmax((dt$year - sy + 1) / span, 0), 1)
+    expo <- p0 + (ptgt - p0) * frac
+    expo[dt$year < sy] <- p0
+    expo[dt$year > ty] <- ptgt
+    if (!is.na(flr)) expo <- pmax(expo, flr)
+
+    # Realised proportional incidence reduction (0 before start year).
+    if (identical(r$lag_model, "immediate_after_full_implementation")) {
+      realized <- ph_effect_from_exposure(r$effect_model, p0, expo, RR, paf)
+    } else if (identical(r$lag_model, "delayed_exponential_remaining_effect")) {
+      yrs_since <- pmax(0, dt$year - sy)
+      lag_frac  <- 1 - (1 - r$lag_parameter) ^ yrs_since
+      realized  <- Efull * lag_frac
+    } else {
+      stop("PH wb: unsupported lag_model '", r$lag_model, "' for link ",
+           r$intervention_cause_key, call. = FALSE)
+    }
+    realized[dt$year < sy] <- 0
+    realized[!is.finite(realized)] <- 0
+    realized <- pmin(pmax(realized, 0), 1)
+
+    # Public-wide policy applied to the mapped cause across its age/sex band.
+    gender_ok <- if (identical(r$sex, "Both")) rep(TRUE, nrow(dt)) else dt$sex == r$sex
+    mask <- dt$cause == r$cause_code &
+            dt$age  >= r$age_start &
+            dt$age  <= r$age_stop &
+            dt$year >= sy &
+            gender_ok
+    mask[is.na(mask)] <- FALSE
+    realized[!mask] <- 0
+
+    if (identical(r$model_transition, "incidence")) {
+      dt[, ph_surv_ir := ph_surv_ir * (1 - realized)]
+    } else {
+      stop("PH wb: model_transition '", r$model_transition, "' for link ",
+           r$intervention_cause_key, " is not the supported well -> sick incidence.",
+           call. = FALSE)
+    }
+  }
+
+  # Public-health effects act on incidence only (no case-fatality transition).
+  dt[, `:=`(
+    IR     = IR     * ph_surv_ir,
+    eff_ir = eff_ir * ph_surv_ir
+  )]
+
+  dt[IR > 0.99, IR := 0.99]
+  dt[IR < 0, IR := 0]
+  dt[, ph_surv_ir := NULL]
+
+  if (dt[, any(is.na(IR))])
+    stop("PH workbook computation produced NA in IR.", call. = FALSE)
+
+  setorder(dt, year, sex, location, cause, age)
+  cat("    Applied", nrow(er), "public-health effect row(s) across cause(s):",
+      paste(sort(unique(er$cause_code)), collapse = ", "), "\n")
+  dt[]
+}
+
+#...........................................................
 # Model. Project.all function ----
 #...........................................................
 #
@@ -1884,7 +2010,10 @@ project.all <- function(Country,
                         fair_bundle_coverage   = NULL,  # named per-bundle coverage overrides
                         # FAIR-Choices WORKBOOK effect rows (validated Model 04
                         # catalogue); drives the "fair_wb" intervention.
-                        fair_effect_rows       = NULL
+                        fair_effect_rows       = NULL,
+                        # PUBLIC-HEALTH WORKBOOK effect rows (validated Model 04 PH
+                        # catalogue); drives the "ph_wb" intervention.
+                        ph_effect_rows         = NULL
 ) {
 
   cat("\n========================================\n")
@@ -1893,8 +2022,8 @@ project.all <- function(Country,
   cat("========================================\n\n")
   
   # Validate interventions
-  valid_interventions <- c("antihypertensive", "antihypertensive_diabetes", "sodium", "tfa", "statins", "fair_cvd", "fair_wb")
-  
+  valid_interventions <- c("antihypertensive", "antihypertensive_diabetes", "sodium", "tfa", "statins", "fair_cvd", "fair_wb", "ph_wb")
+
   if (!all(interventions %in% valid_interventions)) {
     stop("Invalid intervention(s). Must be one or more of: ", 
          paste(valid_interventions, collapse = ", "))
@@ -2226,6 +2355,23 @@ project.all <- function(Country,
     applied_interventions <- c(applied_interventions, "FAIR")
   }
 
+  #..................................
+  ## Apply PUBLIC-HEALTH WORKBOOK Package (Model 04 PH catalogue) ----
+  ## Public-health scenarios use this branch (interventions == "ph_wb").
+  #..................................
+
+  if ("ph_wb" %in% interventions) {
+    cat("\n=== Applying Public-Health (workbook) Package ===\n")
+
+    intervention_rates <- calculate_public_health_workbook_impact(
+      intervention_rates = intervention_rates,
+      Country            = Country,
+      effect_rows        = ph_effect_rows
+    )
+
+    applied_interventions <- c(applied_interventions, "PublicHealth")
+  }
+
   # Create intervention label
   if (length(applied_interventions) > 0) {
     intervention_label <- paste(applied_interventions, collapse = " + ")
@@ -2427,20 +2573,26 @@ run_multiple_scenarios <- function(Country,
 
     # Scenario entries may be either a legacy character vector of intervention
     # tokens, OR a richer list (workbook-driven, from Model 04) carrying
-    # $interventions and $fair_effect_rows. Support both.
+    # $interventions, $fair_effect_rows (clinical) and/or $ph_effect_rows
+    # (public health) plus a $family trace tag. Support both.
     entry <- scenario_list[[scenario_name]]
     if (is.list(entry) && !is.null(entry$interventions)) {
       ints_arg <- entry$interventions
       fer_arg  <- entry$fair_effect_rows
+      per_arg  <- entry$ph_effect_rows
+      fam_arg  <- if (!is.null(entry$family)) entry$family else NA_character_
     } else {
       ints_arg <- entry
       fer_arg  <- NULL
+      per_arg  <- NULL
+      fam_arg  <- NA_character_
     }
 
     results[[scenario_name]] <- project.all(
       Country             = Country,
       interventions       = ints_arg,
       fair_effect_rows    = fer_arg,
+      ph_effect_rows      = per_arg,
       target_control      = target_control,
       control_start_year  = control_start_year,
       control_target_year = control_target_year,
@@ -2471,6 +2623,11 @@ run_multiple_scenarios <- function(Country,
       fair_baseline_coverage = fair_baseline_coverage,
       fair_bundle_coverage   = fair_bundle_coverage
     )
+
+    # Trace the intervention family on every output row for unambiguous
+    # downstream selection (baseline / clinical / public_health / combined).
+    if (is.data.frame(results[[scenario_name]]))
+      results[[scenario_name]][, intervention_family := fam_arg]
   }
 
   combined_results <- rbindlist(results, idcol = "scenario")
@@ -2723,15 +2880,71 @@ htn_target_cols <- c("htncov2_aspirational")
 #   all_plus_fair = c("antihypertensive", "sodium", "tfa", "statins", "fair_cvd")
 # )
 
-# WORKBOOK-DRIVEN scenarios: the scenario catalogue is built by Model 04 from
-# indonesia_model_inputs.xlsx (baseline + one "fair_wb" scenario per selected
-# valid intervention + a combined "all" scenario). No FAIR intervention list,
-# scenario list, effect size, coverage target or cause map is hard-coded here.
-if (!exists("fair_scenarios"))
-  stop("Model 06: `fair_scenarios` not found. Source Model 04 ",
-       "(04_define_interventions_indonesia.R) first so the workbook-driven ",
-       "scenario catalogue is available.", call. = FALSE)
-scenarios <- fair_scenarios
+# WORKBOOK-DRIVEN scenarios: the scenario catalogue(s) are built by Model 04
+# from the input workbook(s). Which intervention FAMILIES run is controlled by
+# the Model 00 switches run_clinical_interventions / run_public_health_interventions.
+# The baseline (no-new-intervention) comparator is ALWAYS included exactly once
+# (required for valid deaths-averted / incremental-cost comparisons). Clinical
+# and public-health scenario ids are collision-safe (clinical: I_* / all;
+# public health: I_PH_* / all_public_health). No intervention list, effect size,
+# coverage/exposure target or cause map is hard-coded here.
+if (!exists("run_public_health_interventions")) run_public_health_interventions <- FALSE
+if (!exists("run_clinical_interventions"))      run_clinical_interventions      <- TRUE
+if (!isTRUE(run_public_health_interventions) && !isTRUE(run_clinical_interventions))
+  stop("Model 06: both intervention-family switches are FALSE; nothing to run. ",
+       "Set run_clinical_interventions and/or run_public_health_interventions to TRUE.",
+       call. = FALSE)
+
+baseline_id <- if (exists("baseline_scenario_id")) baseline_scenario_id else "baseline"
+
+scenarios <- list()
+# Baseline (shared comparator, included once) -- take it from whichever enabled
+# catalogue defines it; both families use the same id/label.
+if (isTRUE(run_clinical_interventions) && exists("fair_scenarios") &&
+    baseline_id %in% names(fair_scenarios)) {
+  scenarios[[baseline_id]] <- fair_scenarios[[baseline_id]]
+} else if (isTRUE(run_public_health_interventions) && exists("public_health_scenarios") &&
+           !is.null(public_health_scenarios) &&
+           baseline_id %in% names(public_health_scenarios)) {
+  scenarios[[baseline_id]] <- public_health_scenarios[[baseline_id]]
+}
+if (is.null(scenarios[[baseline_id]]))
+  scenarios[[baseline_id]] <- list(scenario_id = baseline_id,
+                                   scenario_label = "Baseline (no new intervention)",
+                                   intervention_ids = character(0),
+                                   interventions = character(0))
+scenarios[[baseline_id]]$family <- "baseline"
+
+# Clinical (FAIR Choices) family
+if (isTRUE(run_clinical_interventions)) {
+  if (!exists("fair_scenarios"))
+    stop("Model 06: run_clinical_interventions = TRUE but `fair_scenarios` not found. ",
+         "Source Model 04 (04_define_interventions_indonesia.R) first.", call. = FALSE)
+  for (nm in setdiff(names(fair_scenarios), baseline_id)) {
+    ent <- fair_scenarios[[nm]]
+    if (is.null(ent$family)) ent$family <- "clinical"
+    scenarios[[nm]] <- ent
+  }
+}
+
+# Public-health family
+if (isTRUE(run_public_health_interventions)) {
+  if (!exists("public_health_scenarios") || is.null(public_health_scenarios))
+    stop("Model 06: run_public_health_interventions = TRUE but `public_health_scenarios` ",
+         "not found. Source Model 04 (04_define_interventions_indonesia.R) first.", call. = FALSE)
+  for (nm in setdiff(names(public_health_scenarios), baseline_id)) {
+    if (nm %in% names(scenarios))
+      stop("Model 06: scenario id collision between families: '", nm,
+           "'. Rename one catalogue's scenario id.", call. = FALSE)
+    ent <- public_health_scenarios[[nm]]
+    if (is.null(ent$family)) ent$family <- "public_health"
+    scenarios[[nm]] <- ent
+  }
+}
+
+cat(sprintf("\nModel 06 families: clinical=%s, public_health=%s | scenarios (%d): %s\n\n",
+            isTRUE(run_clinical_interventions), isTRUE(run_public_health_interventions),
+            length(scenarios), paste(names(scenarios), collapse = ", ")))
 
 # explicit hypertension control parameters
 target_control <- 0.5
@@ -2785,6 +2998,7 @@ clusterExport(
     "calculate_statins_impact",
     "calculate_fair_cvd_impact",
     "calculate_fair_workbook_impact",
+    "calculate_public_health_workbook_impact",
     "load_fair_cvd_params",
     ".fair_clean_chr",
     "dt_fair_params",
