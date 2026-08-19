@@ -1867,3 +1867,510 @@ if (!exists("baseline_scenario_id"))
 fair_scenarios <- .fair_built$scenarios
 fair_inputs    <- .fair_built$inputs
 rm(.fair_built)
+
+
+#===========================================================================
+# PUBLIC-HEALTH WORKBOOK-DRIVEN CATALOGUE  (feeds Models 06 and 09) ----
+#---------------------------------------------------------------------------
+# The public-health (fiscal / regulatory policy) family is a SEPARATE catalogue
+# from the clinical FAIR Choices one above. It is driven entirely by the
+# public-health input workbook (path supplied by Model 00 as
+# `public_health_inputs_file`, e.g. indonesia_model_inputs_ public_health.xlsx).
+# Every relevant column is read by NAME (never by fixed cell), and every derived
+# value (exposure target, exposure path, full effect at target) is REPRODUCED in
+# R -- cached Excel formula results are not trusted and are only used for a QA
+# cross-check against the R reproduction.
+#
+# Two objects are exported (mirroring the clinical fair_* objects but never
+# overwriting them):
+#   * public_health_scenarios : named list consumed by Model 06 -- baseline +
+#       one scenario per runnable public-health intervention + a combined
+#       "all_public_health" scenario (when >= 2 interventions are runnable).
+#       Each non-baseline entry carries interventions = "ph_wb" and the
+#       validated per-link `ph_effect_rows`.
+#   * public_health_inputs    : list of validated catalogues consumed by Model 09
+#       (links, exposure paths, effect parameters, policy levers, costs,
+#       assumptions, validation report, blocked links, cause/transition maps and
+#       the raw workbook views used to build the audit sheets).
+#
+# KEY DIFFERENCES from the clinical workbook (absorbed here, not forced onto the
+# clinical schema):
+#   * policy_start_year / exposure_target_year (NOT coverage-year fields);
+#   * Effect_Parameters (NOT Effect_Sizes); Exposure_Targets (NOT Coverage);
+#   * `population` PIN measure (public-wide policy) -> the model's all-population
+#     quantity (deduplicated, once per age/sex/year -- never summed over causes);
+#   * public-health cause ids C_T2DM -> dm2 and C_CMYO -> cmd (plus the shared
+#     C_IHD/C_IS/C_ICH/C_HHD/C_RHD mappings);
+#   * shared policy costs keyed by C_SHARED with cost_scope "shared-count-once".
+#
+# Effect models implemented (exposure-based; NOT the clinical coverage formula):
+#   1. direct_smoking_prevalence_shift_rr
+#        effect = 1 - (1 + pt*(RR-1)) / (1 + p0*(RR-1))
+#   2. direct_loglinear_rr_per_unit_reduction
+#        effect = 1 - 1 / (RR ^ (p0 - pt))          # delta = p0 - pt
+#   3. tfa_attributable_ihd_PAF_x_policy_score
+#        effect = PAF * achieved_policy_score
+# The exposure path pt = pt(t) (baseline -> target over start..target year,
+# floored) and the lag model are applied per YEAR in Model 06; here we reproduce
+# only the target-exposure full effect (illustrative_full_effect) for validation
+# and for the Model 09 audit sheets. Public-health effects map to well -> sick
+# incidence ONLY (no case-fatality transition in this contract).
+#===========================================================================
+
+# Execution metaparameters: single source of truth is Model 00. Provide safe
+# fallbacks so this script can also be sourced stand-alone.
+if (!exists("run_public_health_interventions"))
+  run_public_health_interventions <- TRUE
+if (!exists("public_health_inputs_file"))
+  public_health_inputs_file <- paste0(wd, "data/indonesia_model_inputs_public_health.xlsx")
+
+.build_public_health_catalogue <- function(inputs_path,
+                                           cause_map,
+                                           strict      = FALSE,
+                                           baseline_id = "baseline") {
+
+  if (!file.exists(inputs_path))
+    stop("Public-health: input workbook not found: ", inputs_path)
+
+  req_sheets <- c("Assumptions", "Intervention_Cause_Map", "Policy_Levers",
+                  "Exposure_Targets", "Effect_Parameters", "Risk_Response",
+                  "Model_Input_View", "Cost_Components")
+  have <- readxl::excel_sheets(inputs_path)
+  miss <- setdiff(req_sheets, have)
+  if (length(miss))
+    stop("Public-health: workbook missing required sheet(s): ",
+         paste(miss, collapse = ", "))
+
+  rd   <- function(sheet) as.data.table(readxl::read_excel(inputs_path, sheet = sheet))
+  numv <- function(x) suppressWarnings(as.numeric(as.character(x)))
+  chrv <- function(x) trimws(as.character(x))
+
+  # Optional (audit-only) sheets -- read if present, else NULL.
+  rd_opt <- function(sheet) if (sheet %in% have) rd(sheet) else NULL
+
+  ## -- Consolidated validation issue log --------------------------------------
+  issues <- data.table(scope = character(), item_key = character(), field = character(),
+                       problem = character(), severity = character())
+  add_issue <- function(scope, item_key, field, problem, severity = "FAIL")
+    issues <<- rbind(issues, data.table(scope = scope, item_key = as.character(item_key),
+                                        field = field, problem = problem,
+                                        severity = severity))
+
+  ## -- Assumptions (parameter_id -> value) ------------------------------------
+  asmp <- rd("Assumptions")
+  A    <- setNames(as.character(asmp$value), as.character(asmp$parameter_id))
+  getA <- function(id, default = NA) if (id %in% names(A)) A[[id]] else default
+
+  analysis_start_year   <- as.integer(numv(getA("analysis_start_year", 2025)))
+  analysis_end_year     <- as.integer(numv(getA("analysis_end_year", 2050)))
+  policy_start_year     <- as.integer(numv(getA("policy_start_year", analysis_start_year + 1L)))
+  exposure_target_year  <- as.integer(numv(getA("exposure_target_year", 2030)))
+  policy_cost_ramp_years <- numv(getA("policy_cost_ramp_years", 3))
+  cost_discount_rate    <- numv(getA("cost_discount_rate", 0.03))
+  health_discount_rate  <- numv(getA("health_discount_rate", 0.03))
+  reporting_price_year  <- as.integer(numv(getA("reporting_price_year", 2023)))
+  source_cost_price_year <- as.integer(numv(getA("source_cost_price_year", 2017)))
+  scale_up_shape        <- chrv(getA("scale_up_shape", "linear"))
+
+  ## -- cause_id -> model cause short code (explicit translation table) --------
+  # C_CMYO -> cmd and C_T2DM -> dm2 as required, plus the shared CVD mappings.
+  # C_SHARED intentionally absent (shared-cost bucket; not a modeled cause).
+  cause_id2code <- c(C_IHD = "ihd", C_IS = "istroke", C_ICH = "hstroke",
+                     C_HHD = "hhd", C_RHD = "rhd", C_CMYO = "cmd", C_T2DM = "dm2")
+  bad_codes <- setdiff(unname(cause_id2code), names(cause_map))
+  if (length(bad_codes))
+    stop("Public-health: cause translation maps to code(s) absent from Model 00 ",
+         "cause_map: ", paste(bad_codes, collapse = ", "))
+
+  ## -- transition translation (workbook from/to -> model transition) ----------
+  # This contract maps public-health effects to well -> sick incidence ONLY.
+  translate_transition <- function(from, to) {
+    from <- tolower(chrv(from)); to <- tolower(chrv(to))
+    out <- rep(NA_character_, length(from))
+    out[from == "well" & to == "sick"] <- "incidence"
+    out
+  }
+
+  ## -- Exposure-path reproduction helpers (R, not Excel-cached) ---------------
+  # Reproduce the Countdown target-exposure identity (M01/M02/M03).
+  reproduce_target <- function(baseline, method, red_or_tgt, floor) {
+    method <- tolower(chrv(method))
+    out <- rep(NA_real_, length(baseline))
+    rel <- method == "relative"
+    abso <- method == "absolute"
+    lvl <- method %in% c("target", "level")
+    out[rel]  <- baseline[rel]  * (1 - red_or_tgt[rel])
+    out[abso] <- baseline[abso] - red_or_tgt[abso]
+    out[lvl]  <- red_or_tgt[lvl]
+    pmax(floor, out)
+  }
+  # Target-exposure full proportional incidence reduction (illustrative).
+  reproduce_full_effect <- function(model, p0, pt, RR, paf) {
+    model <- chrv(model)
+    n <- length(model); e <- rep(NA_real_, n)
+    sm <- model == "direct_smoking_prevalence_shift_rr"
+    ll <- model == "direct_loglinear_rr_per_unit_reduction"
+    tf <- model == "tfa_attributable_ihd_PAF_x_policy_score"
+    e[sm] <- 1 - (1 + pt[sm] * (RR[sm] - 1)) / (1 + p0[sm] * (RR[sm] - 1))
+    e[ll] <- 1 - 1 / (RR[ll] ^ (p0[ll] - pt[ll]))
+    # TFA: PAF * achieved policy-score effect (response_value carries the score
+    # effect; paf the attributable fraction). Missing PAF -> 0 (flagged below).
+    e[tf] <- ifelse(is.na(paf[tf]), 0, paf[tf]) * ifelse(is.na(RR[tf]), 0, RR[tf])
+    e
+  }
+
+  ## -- Read the contract sheets -----------------------------------------------
+  map <- rd("Intervention_Cause_Map")
+  exp <- rd("Exposure_Targets")
+  eff <- rd("Effect_Parameters")
+  lev <- rd("Policy_Levers")
+  cst <- rd("Cost_Components")
+  rr  <- rd("Risk_Response")
+  miv <- rd("Model_Input_View")
+
+  map[, include_flag := as.integer(numv(include_flag))]
+  map_sel <- map[include_flag == 1L]
+
+  # Duplicate / missing intervention_cause_key (selected links) ----------------
+  dupk <- map_sel[, .N, by = intervention_cause_key][N > 1L]
+  if (nrow(dupk))
+    for (k in dupk$intervention_cause_key)
+      add_issue("ph_link", k, "intervention_cause_key", "duplicate selected link key", "FAIL")
+  if (any(is.na(map_sel$intervention_cause_key) | !nzchar(chrv(map_sel$intervention_cause_key))))
+    add_issue("ph_link", "<NA>", "intervention_cause_key", "missing link key", "FAIL")
+
+  ## -- Per-intervention exposure table (reproduce derived values) -------------
+  E <- exp[, .(intervention_id = chrv(intervention_id), risk_id = chrv(risk_id),
+               risk_exposure_measure = chrv(risk_exposure_measure),
+               exposure_unit = chrv(exposure_unit),
+               baseline_exposure = numv(baseline_exposure),
+               reduction_method  = chrv(reduction_method),
+               desired_reduction_override = numv(desired_reduction_override),
+               applied_reduction_or_target = numv(applied_reduction_or_target),
+               recommended_reduction_or_target = numv(recommended_reduction_or_target),
+               exposure_floor = numv(exposure_floor),
+               target_exposure_wb = numv(target_exposure),
+               absolute_reduction_wb = numv(absolute_reduction),
+               relative_reduction_wb = numv(relative_reduction),
+               start_year  = as.integer(numv(start_year)),
+               target_year = as.integer(numv(target_year)),
+               scale_up_shape = chrv(scale_up_shape),
+               exposure_review = chrv(review_status))]
+  # applied reduction/target: desired override > applied > recommended
+  E[, red_or_target := fcoalesce(desired_reduction_override, applied_reduction_or_target,
+                                 recommended_reduction_or_target)]
+  E[is.na(exposure_floor), exposure_floor := 0]
+  E[, target_exposure := reproduce_target(baseline_exposure, reduction_method,
+                                          red_or_target, exposure_floor)]
+  E[, absolute_reduction := baseline_exposure - target_exposure]
+  E[, relative_reduction := ifelse(baseline_exposure > 0,
+                                   (baseline_exposure - target_exposure) / baseline_exposure, 0)]
+  # Fall back to workbook start/target year when the exposure row omits them.
+  E[is.na(start_year),  start_year  := policy_start_year]
+  E[is.na(target_year), target_year := exposure_target_year]
+  E[is.na(scale_up_shape) | !nzchar(scale_up_shape), scale_up_shape := scale_up_shape]
+  # QA: reproduced target vs workbook cached target
+  E[, target_reproduction_ok :=
+      is.na(target_exposure_wb) | abs(target_exposure - target_exposure_wb) <=
+        1e-6 + 1e-4 * pmax(abs(target_exposure_wb), 1)]
+  for (i in which(!E$target_reproduction_ok))
+    add_issue("ph_exposure", E$intervention_id[i], "target_exposure",
+              sprintf("reproduced target %.6g != workbook %.6g",
+                      E$target_exposure[i], E$target_exposure_wb[i]), "REVIEW")
+  # Exposure-input validity
+  bad_exp <- E[is.na(baseline_exposure) | baseline_exposure < 0 |
+                 is.na(target_exposure) | target_exposure < 0 |
+                 is.na(start_year) | is.na(target_year) | start_year > target_year |
+                 !(tolower(reduction_method) %in% c("relative", "absolute", "target", "level"))]
+  if (nrow(bad_exp))
+    for (i in seq_len(nrow(bad_exp)))
+      add_issue("ph_exposure", bad_exp$intervention_id[i], "exposure",
+                "invalid baseline/target exposure, dates, or reduction_method", "FAIL")
+
+  ## -- Per-link effect table (reproduce full effect at target) ----------------
+  supported_effect_models <- c("direct_smoking_prevalence_shift_rr",
+                               "direct_loglinear_rr_per_unit_reduction",
+                               "tfa_attributable_ihd_PAF_x_policy_score")
+  supported_lag_models <- c("delayed_exponential_remaining_effect",
+                            "immediate_after_full_implementation")
+  F <- eff[, .(intervention_cause_key = chrv(intervention_cause_key),
+               intervention_id = chrv(intervention_id), risk_id = chrv(risk_id),
+               cause_id = chrv(cause_id), effect_model = chrv(effect_model),
+               response_key = chrv(response_key),
+               response_parameter = chrv(response_parameter),
+               response_value = numv(response_value),
+               paf_value = numv(paf_value),
+               paf_required_flag = as.integer(numv(paf_required_flag)),
+               lag_model = chrv(lag_model), lag_parameter = numv(lag_parameter),
+               transition_from = chrv(transition_from), transition_to = chrv(transition_to),
+               effect_review = chrv(review_status))]
+  # one effect row per selected link
+  eff_n <- F[, .(n_eff = .N), by = intervention_cause_key]
+
+  # Age band / sex of applicability from Risk_Response (by response_key). Public
+  # policies otherwise apply population-wide; defaults 0-95, Both if unmatched.
+  rr_age <- rr[, .(response_key = chrv(response_key), rr_age_start = numv(age_start),
+                   rr_age_stop = numv(age_stop), rr_sex = chrv(sex))]
+  rr_age <- unique(rr_age, by = "response_key")
+  F <- merge(F, rr_age, by = "response_key", all.x = TRUE)
+  F[is.na(rr_age_start), rr_age_start := 0]
+  F[is.na(rr_age_stop),  rr_age_stop  := 95]
+  F[is.na(rr_sex) | !nzchar(rr_sex), rr_sex := "Both"]
+
+  ## -- Assemble the selected-link table ---------------------------------------
+  L <- merge(map_sel[, .(intervention_cause_key = chrv(intervention_cause_key),
+                         intervention_id = chrv(intervention_id),
+                         intervention_name = chrv(intervention_name),
+                         risk_id = chrv(risk_id), cause_id = chrv(cause_id),
+                         cause_name = chrv(cause_name),
+                         cost_join_key = chrv(cost_join_key), cost_scope = chrv(cost_scope),
+                         transition_from, transition_to,
+                         requires_cause_expansion = as.integer(numv(requires_cause_expansion)))],
+             F[, .(intervention_cause_key, effect_model, response_key, response_parameter,
+                   response_value, paf_value, paf_required_flag, lag_model, lag_parameter,
+                   effect_review, rr_age_start, rr_age_stop, rr_sex)],
+             by = "intervention_cause_key", all.x = TRUE)
+  L <- merge(L, eff_n, by = "intervention_cause_key", all.x = TRUE)
+  L[is.na(n_eff), n_eff := 0L]
+  L[, model_transition := translate_transition(transition_from, transition_to)]
+  L[, cause_code := cause_id2code[cause_id]]
+  # bring exposure-path parameters onto each link (by intervention)
+  L <- merge(L, E[, .(intervention_id, baseline_exposure, target_exposure, exposure_floor,
+                      exposure_start_year = start_year, exposure_target_year = target_year,
+                      exposure_scale_up_shape = scale_up_shape, reduction_method,
+                      exposure_review)],
+             by = "intervention_id", all.x = TRUE)
+  L[, full_effect_at_target := reproduce_full_effect(effect_model, baseline_exposure,
+                                                     target_exposure, response_value, paf_value)]
+  # QA: reproduced full effect vs Model_Input_View illustrative_full_effect
+  miv_e <- miv[, .(intervention_cause_key = chrv(intervention_cause_key),
+                   illustrative_full_effect = numv(illustrative_full_effect))]
+  L <- merge(L, miv_e, by = "intervention_cause_key", all.x = TRUE)
+
+  ## -- Per-link validation -----------------------------------------------------
+  in01 <- function(x) !is.na(x) & x >= 0 & x <= 1
+  L[, problem := ""]
+  padd <- function(cond, msg) {
+    cond[is.na(cond)] <- FALSE
+    L[cond, problem := paste0(problem, ifelse(nchar(problem) > 0L, "; ", ""), msg)]
+  }
+  padd(L$n_eff != 1L,                              "effect match != 1")
+  padd(is.na(L$cause_code),                        "cause_id absent from Model 00 cause_map")
+  padd(is.na(L$model_transition),                  "transition not the intended well -> sick incidence")
+  padd(!(L$effect_model %in% supported_effect_models), "unsupported effect_model")
+  padd(!(L$lag_model %in% supported_lag_models),   "unsupported lag_model")
+  padd(is.na(L$lag_parameter) | L$lag_parameter < 0, "missing/negative lag_parameter")
+  padd(is.na(L$response_value),                    "missing response parameter")
+  padd(is.na(L$baseline_exposure) | is.na(L$target_exposure), "missing exposure row for link")
+  padd(!in01(L$full_effect_at_target),             "full effect at target out of [0,1]")
+  padd(L$requires_cause_expansion == 1L,           "link requires unresolved cause expansion")
+  # PAF-required links must carry a PAF (TFA); flag but keep (REVIEW), not FAIL.
+  L[, valid := problem == ""]
+  # PAF review (numerically usable at effect 0, but flagged for review)
+  paf_missing <- L$paf_required_flag == 1L & (is.na(L$paf_value) | L$paf_value == 0)
+  paf_missing[is.na(paf_missing)] <- FALSE
+  for (i in which(paf_missing))
+    add_issue("ph_effect", L$intervention_cause_key[i], "paf_value",
+              "PAF-dependent effect missing/zero PAF (kept; effect provisional)", "REVIEW")
+  # full-effect reproduction vs workbook illustrative value (REVIEW on drift)
+  fe_drift <- !is.na(L$illustrative_full_effect) & !is.na(L$full_effect_at_target) &
+    abs(L$full_effect_at_target - L$illustrative_full_effect) > 1e-4 + 1e-3 * abs(L$illustrative_full_effect)
+  fe_drift[is.na(fe_drift)] <- FALSE
+  for (i in which(fe_drift))
+    add_issue("ph_effect", L$intervention_cause_key[i], "full_effect_at_target",
+              sprintf("reproduced full effect %.6g != workbook %.6g",
+                      L$full_effect_at_target[i], L$illustrative_full_effect[i]), "REVIEW")
+  for (i in which(!L$valid))
+    add_issue("ph_link", L$intervention_cause_key[i], "effect/exposure",
+              L$problem[i], "FAIL")
+
+  ## -- Cost components ---------------------------------------------------------
+  sel_int <- unique(map_sel$intervention_id)
+  C <- cst[, .(cost_record_id = chrv(cost_record_id),
+               cost_component_key = chrv(cost_component_key), cost_option = chrv(cost_option),
+               selected_for_base_case = as.integer(numv(selected_for_base_case)),
+               intervention_id = chrv(intervention_id), cause_id = chrv(cause_id),
+               cost_join_key = chrv(cost_join_key), cost_component = chrv(cost_component),
+               population_in_need_measure  = tolower(chrv(population_in_need_measure)),
+               population_in_need_fraction = numv(population_in_need_fraction),
+               frequency_per_year = numv(frequency_per_year),
+               c_age_start = numv(age_start), c_age_stop = numv(age_stop),
+               c_sex = chrv(sex), platform = chrv(platform),
+               unit_cost_usd = numv(unit_cost_usd),
+               price_year = as.integer(numv(price_year)),
+               indonesia_adjusted_flag = as.integer(numv(indonesia_adjusted_flag)),
+               source_country = chrv(source_country), source_file = chrv(source_file),
+               cost_review = chrv(review_status), notes = chrv(notes))]
+  C <- C[intervention_id %in% sel_int]
+
+  # Exactly one selected base-case row per in-scope cost_component_key -----------
+  C[, n_sel := sum(selected_for_base_case == 1L, na.rm = TRUE), by = cost_component_key]
+  sel_counts <- unique(C[, .(cost_component_key, n_sel)])
+  for (i in seq_len(nrow(sel_counts))) {
+    if (isTRUE(sel_counts$n_sel[i] > 1L))
+      add_issue("ph_cost", sel_counts$cost_component_key[i], "selected_for_base_case",
+                "more than one base-case cost option selected", "FAIL")
+    if (isTRUE(sel_counts$n_sel[i] == 0L))
+      add_issue("ph_cost", sel_counts$cost_component_key[i], "selected_for_base_case",
+                "no base-case cost option selected (component omitted from costing)", "REVIEW")
+  }
+
+  Cbase <- C[selected_for_base_case == 1L]
+  valid_cjk <- unique(chrv(map$cost_join_key))
+  # Normalize the public-wide `population` PIN measure to the model's all-population
+  # quantity so Model 09 can reuse the shared "all" costing path (deduplicated
+  # population once per age/sex/year, never summed over causes).
+  Cbase[, population_in_need_measure := ifelse(population_in_need_measure == "population",
+                                               "all", population_in_need_measure)]
+
+  padc <- function(dt, cond, field, msg, severity) {
+    cond[is.na(cond)] <- FALSE
+    if (any(cond))
+      for (i in which(cond))
+        add_issue("ph_cost", dt$cost_record_id[i], field, msg, severity)
+  }
+  padc(Cbase, is.na(Cbase$unit_cost_usd) | Cbase$unit_cost_usd < 0, "unit_cost_usd",
+       "missing or negative unit cost on a selected base-case row", "FAIL")
+  padc(Cbase, is.na(Cbase$frequency_per_year) | Cbase$frequency_per_year < 0, "frequency_per_year",
+       "missing or negative frequency", "FAIL")
+  padc(Cbase, is.na(Cbase$population_in_need_fraction) |
+         Cbase$population_in_need_fraction < 0 | Cbase$population_in_need_fraction > 1,
+       "population_in_need_fraction", "PIN fraction missing/out of [0,1]", "FAIL")
+  padc(Cbase, !(chrv(Cbase$cost_join_key) %in% valid_cjk), "cost_join_key",
+       "cost_join_key not present in Intervention_Cause_Map", "FAIL")
+  padc(Cbase, !(Cbase$population_in_need_measure %in% c("all", "prevalence", "incidence")),
+       "population_in_need_measure", "unsupported PIN measure", "FAIL")
+  padc(Cbase, Cbase$indonesia_adjusted_flag == 0L, "indonesia_adjusted_flag",
+       "cost not Indonesia-adjusted (proxy/review estimate; kept but flagged)", "REVIEW")
+  padc(Cbase, !is.na(Cbase$price_year) & Cbase$price_year != reporting_price_year, "price_year",
+       paste0("cost price year != reporting price year (", reporting_price_year, ")"), "REVIEW")
+
+  # cost_scope per cost_join_key (from the map) --------------------------------
+  scope_by_cjk <- unique(map[, .(cost_join_key = chrv(cost_join_key), cost_scope = chrv(cost_scope))])
+  scope_by_cjk <- scope_by_cjk[, .(cost_scope = cost_scope[1]), by = cost_join_key]
+  Cbase[, cost_join_key := chrv(cost_join_key)]
+  Cbase <- merge(Cbase, scope_by_cjk, by = "cost_join_key", all.x = TRUE)
+  Cbase[, cost_ready := !is.na(unit_cost_usd) & unit_cost_usd >= 0 &
+          !is.na(frequency_per_year) & frequency_per_year >= 0 &
+          !is.na(population_in_need_fraction) &
+          population_in_need_measure %in% c("all", "prevalence", "incidence") &
+          chrv(cost_join_key) %in% valid_cjk]
+
+  ## -- Runnable interventions & scenario catalogue ----------------------------
+  valid_links   <- L[valid == TRUE]
+  runnable_ints <- unique(valid_links$intervention_id)
+  blocked_ints  <- setdiff(sel_int, runnable_ints)
+
+  to_engine <- function(dd)
+    dd[, .(intervention_id, intervention_cause_key, cause_code, model_transition,
+           effect_model, baseline_exposure, target_exposure, exposure_floor,
+           start_year = exposure_start_year, target_year = exposure_target_year,
+           scale_up_shape = exposure_scale_up_shape,
+           response_value, paf_value, lag_model, lag_parameter,
+           full_effect_at_target,
+           # age band / sex of applicability from Risk_Response (else population-wide)
+           age_start = rr_age_start, age_stop = rr_age_stop, sex = rr_sex)]
+
+  scen <- list()
+  scen[[baseline_id]] <- list(scenario_id = baseline_id,
+                              scenario_label = "Baseline (no new intervention)",
+                              family = "baseline",
+                              intervention_ids = character(0),
+                              interventions = character(0),
+                              ph_effect_rows = NULL)
+  for (iid in runnable_ints) {
+    nm <- unique(map_sel[intervention_id == iid, chrv(intervention_name)])[1]
+    scen[[iid]] <- list(scenario_id = iid, scenario_label = nm,
+                        family = "public_health",
+                        intervention_ids = iid, interventions = "ph_wb",
+                        ph_effect_rows = to_engine(valid_links[intervention_id == iid]))
+  }
+  if (length(runnable_ints) >= 2L)
+    scen[["all_public_health"]] <- list(scenario_id = "all_public_health",
+                        scenario_label = "All selected public-health interventions (combined)",
+                        family = "public_health",
+                        intervention_ids = runnable_ints,
+                        interventions = "ph_wb",
+                        ph_effect_rows = to_engine(valid_links))
+
+  ## -- Assemble public_health_inputs (consumed by Model 09) -------------------
+  public_health_inputs <- list(
+    links          = L,
+    valid_links    = valid_links,
+    blocked_links  = L[valid == FALSE],
+    effect_rows_engine = to_engine(valid_links),
+    exposure       = E,
+    policy_levers  = lev,
+    effect_parameters = eff,
+    risk_response  = rr,
+    model_input_view = miv,
+    countdown_methods = rd_opt("Countdown_Methods"),
+    scope_sources  = rd_opt("Scope_and_Sources"),
+    qa_workbook    = rd_opt("QA_Checks"),
+    costs          = Cbase,
+    cost_all       = C,
+    validation     = issues,
+    cause_translation = data.table(cause_id = names(cause_id2code),
+                                   cause_code = unname(cause_id2code)),
+    runnable_interventions = runnable_ints,
+    blocked_interventions  = blocked_ints,
+    inputs_path    = inputs_path,
+    baseline_scenario_id = baseline_id,
+    assumptions    = list(
+      analysis_start_year    = analysis_start_year,
+      analysis_end_year      = analysis_end_year,
+      policy_start_year      = policy_start_year,
+      exposure_target_year   = exposure_target_year,
+      policy_cost_ramp_years  = policy_cost_ramp_years,
+      cost_discount_rate     = cost_discount_rate,
+      health_discount_rate   = health_discount_rate,
+      cost_price_year        = reporting_price_year,
+      source_cost_price_year = source_cost_price_year,
+      currency               = getA("currency", "USD"),
+      scale_up_shape         = scale_up_shape,
+      economic_perspective   = getA("economic_perspective", "health_system")))
+
+  ## -- Report ------------------------------------------------------------------
+  n_fail <- sum(issues$severity == "FAIL")
+  n_rev  <- sum(issues$severity == "REVIEW")
+  cat("\n--- Public-health workbook catalogue --------------------------------\n")
+  cat(sprintf("Workbook: %s\n", inputs_path))
+  cat(sprintf("Selected links: %d | valid: %d | invalid: %d\n",
+              nrow(map_sel), nrow(valid_links), nrow(L[valid == FALSE])))
+  cat(sprintf("Runnable interventions (%d): %s\n",
+              length(runnable_ints), paste(runnable_ints, collapse = ", ")))
+  if (length(blocked_ints))
+    cat(sprintf("BLOCKED interventions (%d): %s\n",
+                length(blocked_ints), paste(blocked_ints, collapse = ", ")))
+  cat(sprintf("Selected base-case cost rows: %d (ready: %d)\n",
+              nrow(Cbase), sum(Cbase$cost_ready)))
+  cat(sprintf("Validation issues: %d FAIL, %d REVIEW\n", n_fail, n_rev))
+  if (nrow(issues)) { cat("Consolidated validation diagnostic:\n"); print(issues) }
+  cat(sprintf("Scenarios built (%d): %s\n",
+              length(scen), paste(names(scen), collapse = ", ")))
+  cat("---------------------------------------------------------------------\n\n")
+
+  if (strict && n_fail > 0L)
+    stop("Public-health: strict_model_input_validation = TRUE and ", n_fail,
+         " FAIL-level workbook issue(s) present (see diagnostic above). ",
+         "Resolve them or set strict_model_input_validation = FALSE to run only ",
+         "the valid scenarios.", call. = FALSE)
+
+  list(scenarios = scen, inputs = public_health_inputs)
+}
+
+if (isTRUE(run_public_health_interventions)) {
+  .ph_built <- .build_public_health_catalogue(public_health_inputs_file, cause_map,
+                                              strict      = strict_model_input_validation,
+                                              baseline_id = baseline_scenario_id)
+  public_health_scenarios <- .ph_built$scenarios
+  public_health_inputs    <- .ph_built$inputs
+  rm(.ph_built)
+} else {
+  # Public-health family disabled: define empty catalogues so downstream models
+  # can detect "PH not requested" without erroring.
+  public_health_scenarios <- NULL
+  public_health_inputs    <- NULL
+  cat("\nPublic-health interventions disabled (run_public_health_interventions = FALSE); ",
+      "PH catalogue not built.\n\n", sep = "")
+}

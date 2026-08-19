@@ -1,0 +1,285 @@
+########
+
+#Creating output formulae excel workbook
+
+
+Work in the repository:
+
+code/cvd-fair-choices
+
+Update script 09 so that, instead of producing the current unformatted Excel output, it generates fully formatted, user-friendly, downloadable .xlsx workbook(s).
+
+Requirements:
+
+Inspect the existing script 09, preceding pipeline scripts, input workbook, and current outputs before changing the implementation.
+Preserve the existing R calculations and results. Do not alter the underlying epidemiological, costing, or economic-evaluation logic unless required to correct a demonstrated error.
+Generate a multi-sheet workbook organized logically, using the existing output structure where appropriate. Include sheets for:
+Instructions/readme and calculation map
+Key assumptions and parameters
+Model results used for costing
+Intervention/component costs
+Annual and cumulative budget impact
+Deaths and cases averted
+Cost per death averted
+Economic-value results, if available
+QA and reconciliation checks
+Use working Excel formulas within and across sheets wherever practical, rather than exporting only hard-coded R-calculated values. A user changing an exposed assumption should be able to see the dependent Excel results update.
+Keep large or computationally intensive model traces as R-generated source tables when embedding formulas would make the workbook unstable. Clearly distinguish:
+R-generated source values
+User-editable assumptions
+Excel-calculated cells
+Use explicit cross-sheet references and avoid hidden calculations. Do not duplicate assumptions across sheets.
+Apply professional custom styling consistent with indonesia_model_inputs.xlsx, including:
+Workbook title and section headers
+Consistent colors and fonts
+Different fill colors for inputs, R-generated values, formulas, and QA checks
+Appropriate number formats for people, percentages, currency, rates, and ratios
+Frozen panes, filters, sensible column widths, wrapped text, and readable row heights
+Clear units, notes, data sources, and parameter descriptions
+Add QA formulas that reconcile Excel results with the corresponding R results and identify discrepancies using clear PASS/FAIL indicators and conditional formatting.
+Ensure formulas contain no broken references, circular references, or Excel errors.
+Create the output directory automatically if it does not exist and save the final workbook using a clear filename such as:
+
+output/indonesia_model_cost_value_formulae.xlsx
+
+Use a suitable R Excel library, preferably openxlsx or openxlsx2, and add any required dependency checks consistently with the rest of the repository.
+
+After implementation:
+
+Run the complete relevant pipeline through script 09.
+Confirm that the .xlsx file is created successfully and can be opened.
+Verify sheet names, formulas, cross-sheet references, formatting, filters, frozen panes, and QA results.
+Compare principal outputs against the original R-calculated results using numerical tolerances.
+Report the files changed, output workbook location, validation results, and any calculations that intentionally remain R-generated rather than formula-driven.
+
+Do not merely describe the changes. Implement, run, test, and validate them.
+
+
+###############3
+
+# Creating markdown for CEA
+Claude Code prompt: costing and economic analysis R Markdown report
+
+You are working in the Indonesia NCD/CVD model repository. Create a production-quality R Markdown report at:
+
+reports/indonesia_costing_economic_analysis_report.Rmd
+
+Use these two files as your references:
+
+indonesia_model_cost_value_formulae.xlsx (or the uniquely matching indonesia_model_cost_value_formulae*.xlsx in the repository): the sole source of quantitative data and analytical results.
+
+indonesia_costing_economic_analysis_report.Rmd: the structural and visual template. Follow its overall organization, tone, formatting quality, helper-function approach, decision orientation, traceability emphasis, tables, callouts, and technical-validation sections, but do not retain its dependencies on pipeline CSV files.
+
+Non-negotiable data rule
+
+The cost-value workbook is the source of truth. The new report must read all numbers used in text, KPI cards, tables, and figures directly from that workbook. Do not read any CSV, RDS, database, model object, earlier report output, or other spreadsheet. Do not source or rerun the epidemiological, costing, or economic-analysis pipeline. Do not hard-code calculated results copied from the workbook.
+
+The sample RMD may be used only for report design, narrative structure, and reusable presentation patterns—not as a quantitative source. Do not use the internet or external data to fill gaps. If a requested result is absent from the workbook, clearly label it unavailable and explain why using the workbook's own metadata or diagnostic note.
+
+First inspect, then implement
+
+Before editing, inspect:
+
+The complete sample RMD and any report conventions already present in the repository.
+
+The workbook sheet names, headers, data types, cached formula results, scenario IDs, years, and QA statuses.
+
+Existing reports/ naming and rendering conventions.
+
+Use the workbook filename/path found in the repository. If no matching workbook exists, stop with an actionable error. If more than one matching workbook exists, do not silently choose one: select only if the repository clearly identifies the canonical current file; otherwise report the ambiguity.
+
+Workbook sheets and intended uses
+
+Build the report directly from the available sheets, especially:
+
+README: workbook purpose, scope, and interpretation notes.
+
+Run_Metadata: run date, location, years, currency, pipeline provenance, and workbook status.
+
+Selected_Interventions: selected interventions, causes, effect parameters, coverage, timing, and review status.
+
+Blocked_Links: excluded or blocked health-effect links.
+
+Cost_Components: component definitions, population-in-need rules, frequency, unit cost, coverage, price year, and readiness/review flags.
+
+Annual_Mortality: annual cases, deaths, baseline deaths, deaths averted, baseline cases, and cases averted by scenario and cause.
+
+Annual_Cost: annual component-level baseline, scenario, incremental, and discounted costs, plus PIN, coverage, frequency, unit cost, and audit fields.
+
+Budget_Impact: annual and cumulative undiscounted and discounted budget impact by scenario.
+
+Cost_Effectiveness: cumulative deaths/cases averted, incremental cost, discounted incremental cost, cost per death averted, dominance label, and reconciliation status.
+
+Economic_Value: use only if populated with valid results; if it contains only an omission note, display that limitation and do not invent an economic-value estimate.
+
+QA_Checks: validation results and notes.
+
+Input_Diagnostic: FAIL/REVIEW issues that affect interpretation.
+
+Methods_and_Sources: formulas, rules, and sources already documented in the workbook.
+
+Calculation_Assumptions: analysis horizon, discount rate, price year, currency, perspective, and other controls.
+
+Calculation_Map: dependency and traceability map.
+
+Treat actual workbook headers as authoritative. Validate them explicitly and adapt only where the intended field is unambiguous. Do not silently rename or reinterpret measures.
+
+Report requirements
+
+Produce a polished, self-contained HTML-oriented RMD suitable for World Bank/Ministry of Health technical and policy audiences. Preserve the sample's concise decision-focused style while making all content consistent with the workbook.
+
+Use a structure close to the sample:
+
+At a glance
+
+KPI cards for the combined all scenario when available: discounted incremental cost, total deaths averted, discounted cost per death averted, analysis horizon, price year/currency, and overall QA status.
+
+If all is absent, use a parameterized focus scenario or clearly identified available scenario; do not silently substitute.
+
+Decision summary
+
+Summarize the main budget-impact and interim efficiency findings using dynamically generated inline R values.
+
+Clearly state that cost per death averted is an interim metric and not cost per DALY.
+
+Purpose, scope, and perspective
+
+Derive years, geography, currency, price year, comparator, and perspective from workbook metadata/assumptions.
+
+Interventions and costing inputs
+
+Summarize selected interventions, cause links, coverage changes, cost components, PIN measures, frequencies, unit costs, and review/readiness flags.
+
+Traceability and methodology
+
+Explain the workbook's calculation chain using Calculation_Map and Methods_and_Sources.
+
+Show the core equations for coverage, population in need, annual cost, incremental budget impact, discounting, deaths averted, and cost per death averted. Use formulas/rules recorded in the workbook; do not introduce a conflicting method.
+
+Assumptions and data-quality status
+
+Present key controls from Calculation_Assumptions and important FAIL/REVIEW items from Input_Diagnostic, Blocked_Links, and the review fields in intervention/component sheets.
+
+Results
+
+Scenario comparison table from Cost_Effectiveness.
+
+Annual and cumulative budget-impact results from Budget_Impact.
+
+Mortality and case results from Annual_Mortality.
+
+Cost-driver results aggregated from Annual_Cost, with shared components handled according to workbook rows and never duplicated beyond what the source sheet reports.
+
+Technical validation
+
+Present QA_Checks, reconciliation statuses, missingness checks, and important diagnostic caveats.
+
+Never describe the model as fully validated when any relevant workbook check is REVIEW or FAIL.
+
+Interpretation and limitations
+
+Distinguish model results from forecasts.
+
+Discuss only limitations supported by the workbook, including unavailable DALYs/economic value, blocked links, provisional costs/effects/coverage, price-year issues, and diagnostic failures where applicable.
+
+Reproducibility
+
+State the exact workbook path and sheets read, render date, relevant parameters, package versions/session information, and the rule that no upstream model code is executed during knitting.
+
+Required visualizations
+
+Add clear, publication-quality ggplot2 visualizations, generated only from workbook sheets:
+
+Annual incremental budget impact by scenario (Budget_Impact).
+
+Cumulative discounted incremental cost by scenario (Budget_Impact).
+
+Deaths averted over time by intervention/scenario, with an optional cause breakdown (Annual_Mortality).
+
+Cost-effectiveness plane: discounted incremental cost versus deaths averted (Cost_Effectiveness).
+
+Ranked discounted cost per death averted (Cost_Effectiveness); use a log scale only if the range makes a linear scale unreadable, and disclose the scale.
+
+Cost-driver chart by intervention/component using Annual_Cost.
+
+Coverage trajectories for selected interventions/components when the required coverage fields are present in Annual_Cost.
+
+Apply a consistent, color-blind-accessible palette. Use readable labels, wrapped scenario names, sensible USD/count scaling, direct captions naming the workbook sheet, and no chart junk. Avoid overlapping text and misleading axes. Do not compare the combined all scenario as though it were an independent mutually exclusive intervention without explaining what it represents.
+
+Implementation details
+
+Use readxl for workbook ingestion and tidyverse packages for transformation/visualization unless repository conventions require an equivalent established package.
+
+Parameterize at least: workbook path, focus scenario (default all), decision horizon (default to the workbook's analysis end year), and show_code (default false).
+
+Resolve paths robustly from the repository root, preferably using here. Do not depend on the caller's current working directory.
+
+Read each required sheet once in the setup/data-ingestion stage and retain a named list of tables.
+
+Use cached Excel values for formula cells. Before analysis, check that essential calculated fields are populated. If cached formula results are missing/stale or contain spreadsheet errors, fail with a clear message instructing the user to recalculate and save the workbook; do not reconstruct the missing workbook results from another source.
+
+Create explicit required-sheet and required-column checks with informative errors.
+
+Treat optional or intentionally empty sheets gracefully with visible callouts.
+
+Keep all narrative result statements dynamic through inline R expressions or programmatically generated callouts; no pasted result values.
+
+Use consistent formatting helpers for USD, billions/millions, percentages, counts, scenarios, causes, and status badges.
+
+Use interactive DT tables where useful, with searchable/exportable views, but keep the main decision tables compact.
+
+Make the HTML self-contained. Embed any report-specific CSS in the RMD unless the repository already has a stable, tracked CSS dependency in reports/.
+
+Do not install packages inside the RMD. Detect missing packages and provide an actionable message.
+
+Suppress incidental messages/warnings in the rendered report, but do not suppress validation failures.
+
+Analytical safeguards
+
+Reconcile scenario totals reported in Cost_Effectiveness against Budget_Impact and Annual_Mortality, using the tolerance from Calculation_Assumptions where available.
+
+Confirm scenario-year uniqueness in Budget_Impact and appropriate scenario-year-cause uniqueness/aggregation in Annual_Mortality.
+
+Check for missing/non-finite values, negative costs where unexpected, zero/negative deaths averted before calculating ratios, and inconsistent scenario sets.
+
+Use the workbook's cost_per_death_averted result as authoritative. Any independently recomputed ratio is a QA comparison only; report mismatches rather than replacing the workbook value.
+
+Preserve negative cases/deaths averted if they exist; flag and interpret them rather than coercing them to zero.
+
+Do not add DALYs, QALYs, cost-utility thresholds, GDP comparisons, downstream cost offsets, fiscal effects, productivity effects, or probabilistic uncertainty unless those values are explicitly present in this workbook.
+
+Do not infer that PASS on arithmetic checks establishes epidemiological or external validity.
+
+Verification and completion
+
+After creating the RMD:
+
+Render it from a clean R session using the canonical workbook.
+
+Fix all knitting errors, broken links, missing objects, malformed tables, unreadable charts, clipped labels, and incorrect inline values.
+
+Confirm that every quantitative exhibit can be traced to a named workbook sheet.
+
+Confirm through a code search that the RMD reads no quantitative data source other than the cost-value workbook.
+
+Compare several representative KPIs and scenario totals against the corresponding workbook cells/sheets.
+
+Do not modify the source workbook.
+
+Do not create or change upstream model scripts unless a minimal report-specific helper is absolutely necessary; prefer a single self-contained RMD.
+
+Keep the requested RMD as the primary deliverable. A rendered HTML may be created for testing, but do not add it to version control unless that is already the repository convention.
+
+In your final response, briefly report:
+
+the file created;
+
+the workbook path used;
+
+the major sections and visualizations added;
+
+whether rendering succeeded;
+
+any workbook QA/diagnostic issues that the report necessarily surfaces; and
+
+any files changed besides the requested RMD.
