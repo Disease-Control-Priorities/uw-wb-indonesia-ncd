@@ -1922,7 +1922,7 @@ rm(.fair_built)
 if (!exists("run_public_health_interventions"))
   run_public_health_interventions <- TRUE
 if (!exists("public_health_inputs_file"))
-  public_health_inputs_file <- paste0(wd, "data/indonesia_model_inputs_ public_health.xlsx")
+  public_health_inputs_file <- paste0(wd, "data/indonesia_model_inputs_public_health.xlsx")
 
 .build_public_health_catalogue <- function(inputs_path,
                                            cause_map,
