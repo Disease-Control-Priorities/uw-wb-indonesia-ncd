@@ -1515,7 +1515,8 @@ source_public_health_cost_value <- function() {
                     full_effect_at_target = NA_real_, exposure_reduction_abs = NA_real_,
                     exposure_reduction_rel = NA_real_, cost_join_key,
                     review_status = effect_review, key_count = NA_real_,
-                    formula_status = NA_character_)]
+                    formula_status = NA_character_,
+                    parent_package_id, intervention_role, tfa_effect_method)]
   setorder(sel_out, intervention_id, cause_code)
 
   blocked_out <- phi$blocked_links[, .(intervention_id, intervention_cause_key, cause_id,
@@ -1534,14 +1535,28 @@ source_public_health_cost_value <- function() {
                            valid = as.integer(valid), review_status = effect_review)]
   setorder(eff_out, intervention_id, cause_code)
 
-  lev_out <- as.data.table(phi$policy_levers)[, .(
-    lever_id, intervention_id, intervention_name, component, lever_method,
-    baseline_value, target_value, lever_unit, effect_parameter, estimated_risk_reduction,
-    source, review_status, qa_status)]
+  # Policy levers with the new fiscal/regulatory/hierarchy fields; the derived
+  # gap / price-change / tax-delta / reduction cells are LIVE Excel formulas.
+  Lvp <- as.data.table(phi$policy_levers_processed)
+  lev_out <- Lvp[, .(lever_id, intervention_id, component, lever_method,
+                     parent_package_id, intervention_role,
+                     fiscal_baseline_tax_level, fiscal_target_tax_level, fiscal_tax_level_unit,
+                     regulatory_baseline_level, regulatory_target_level,
+                     regulatory_baseline_score = reg_baseline_score,
+                     regulatory_target_score   = reg_target_score,
+                     effect_parameter,
+                     implementation_gap = NA_real_, implied_price_change = NA_real_,
+                     fiscal_tax_delta = NA_real_, policy_reduction = NA_real_,
+                     estimated_risk_reduction_wb, review_status = lever_review, qa_status = lever_qa)]
 
+  # Cost components with the new allocation fields; allocated_child_cost and
+  # cost_ready are LIVE formulas (package total x share; cost-readiness rule).
   cc_out <- phi$costs[, .(cost_record_id, cost_component_key, cost_join_key, cost_scope,
-                          intervention_id, cost_component, population_in_need_measure,
+                          intervention_id, parent_package_id, scenario_role = cost_scenario_role,
+                          cost_component, population_in_need_measure,
                           population_in_need_fraction, frequency_per_year, unit_cost_usd,
+                          cost_allocation_share, package_total_cost_usd_per_capita, allocation_method,
+                          allocated_child_cost = NA_real_,
                           price_year, indonesia_adjusted_flag, source_country,
                           review_status = cost_review, cost_ready = NA_real_, notes)]
   diag_out <- phi$validation
@@ -1551,6 +1566,10 @@ source_public_health_cost_value <- function() {
   # ------------------------------------------------------------------------
   int2col <- openxlsx::int2col
   frows <- function(fn, rows) vapply(rows, fn, character(1))
+  # Excel column letter for a data-frame column BY NAME. Formula targets are
+  # derived through this so that inserting/reordering columns never silently
+  # misaligns a writeFormula() reference.
+  xlc <- function(nm_vec, name) int2col(match(name, nm_vec))
   C_HDR <- "#1F4E78"; C_FORMULA <- "#DDEBF7"; C_RSRC <- "#F2F2F2"; C_INPUT <- "#FFF2CC"
   st_hdr   <- createStyle(fontColour = "#FFFFFF", fgFill = C_HDR, textDecoration = "bold",
                           halign = "center", valign = "center", wrapText = TRUE,
@@ -1568,14 +1587,15 @@ source_public_health_cost_value <- function() {
   fmt_of2 <- function(col) {
     cl <- tolower(col)
     if (grepl("full_effect|_reduction_rel$|relative_reduction|estimated_risk", cl)) return("0.0000")
-    if (grepl("response_value|paf_value|lag_parameter|baseline_value|target_value", cl)) return("0.0000")
+    if (grepl("response_value|effect_value|paf_value|lag_parameter|baseline_value|target_value|_score$|implementation_gap|price_change|tax_delta|policy_reduction", cl)) return("0.0000")
     if (grepl("frequency", cl)) return("0.00")
     if (grepl("impl_frac|discount_factor|_ratio$", cl)) return("0.000")
     if (grepl("^year$|_year$|price_year|start_year|target_year", cl)) return("0")
     if (grepl("baseline_exposure|target_exposure|exposure_floor|red_or_target|absolute_reduction|reduction_abs|exposure$", cl)) return("0.0000")
     if (grepl("_fraction$|^fraction$|population_in_need_fraction", cl)) return("0.0%")
-    if (grepl("unit_cost", cl)) return("#,##0.0000")
-    if (grepl("per_death", cl)) return("#,##0")
+    if (grepl("allocation_share", cl)) return("0.000")
+    if (grepl("unit_cost|package_total_cost|allocated_child_cost", cl)) return("#,##0.0000")
+    if (grepl("per_death|per_case", cl)) return("#,##0")
     if (grepl("cost|value|budget|pin_|_cost$", cl)) return("#,##0")
     if (grepl("death|case|population|averted|pop_|_count$|^count$|residual|distinct|negative|key_count", cl)) return("#,##0")
     NA_character_
@@ -1641,7 +1661,7 @@ source_public_health_cost_value <- function() {
                    "R discounted incremental cost for the anchor scenario",
                    "R USD per death averted for the anchor scenario",
                    "Scenario used for Excel-vs-R reconciliation"),
-    source = c(rep("indonesia_model_inputs_public_health.xlsx", 12), "Model 09",
+    source = c(rep(basename(phi$inputs_path), 12), "Model 09",
                "Workbook QA rule","Workbook QA rule", rep("Model 09 current run",3),
                rep("Model 09 current run (R CEA)",4)))
   addWorksheet(wb, "Calculation_Assumptions")
@@ -1685,9 +1705,9 @@ source_public_health_cost_value <- function() {
     detail = c(
     "Costing, budget impact and mortality-based cost-effectiveness for the public-health (fiscal/regulatory) policies selected in the public-health input workbook.",
     "Grey cells are R-generated source values; light-blue cells are LIVE Excel formulas; pale-yellow cells on Calculation_Assumptions are editable controls. Change a yellow control and the blue results recompute. Calculation_Map lists the dependency chain.",
-    "Baseline + one scenario per runnable public-health intervention + a combined 'all_public_health' scenario. Membership derives only from the workbook selections (Model 04).",
+    "Baseline + one standalone scenario per runnable intervention + one JOINT scenario per parent package (tobacco, salt) + a combined 'all_public_health' scenario. Membership and the tobacco/salt package structure derive from the workbook Scenario_Hierarchy (Model 04). Parent-package cases/deaths come from a single joint run, never summed from standalone children; package cost = sum of selected child costs. See Scenario_Hierarchy, Child_Intervention_Summary and Parent_Package_Summary.",
     "Deaths averted = baseline deaths - scenario deaths, matched at year x cause (both-sex totals).",
-    "Incidence effect = exposure-based: prevalence-shift RR (tobacco), log-linear RR per unit reduction (alcohol/sodium/SSB) or PAF x policy score (TFA). NO clinical coverage-adjustment formula is used.",
+    "Incidence effect = exposure-based: prevalence-shift RR (tobacco), log-linear RR per unit reduction (alcohol/sodium/SSB and the DEFAULT industrial-TFA path, RR per 1 percentage-point energy). The optional TFA PAF path (PAF x implementation gap) is used only when Assumptions.tfa_effect_method='PAF'. Fiscal levers use baseline->target tax change x price elasticity; regulatory levers use the none/partial/full implementation gap. NO clinical coverage-adjustment formula is used.",
     "Achieved exposure pt(t) ramps linearly baseline->target over start_year..target_year, floored; exposure reductions are shown as formulas on Exposure_Targets.",
     "immediate_after_full_implementation: effect tracks the exposure path. delayed_exponential_remaining_effect (tobacco): full target effect accrues as 1-(1-rate)^(years since start).",
     "annual_cost = population(t) x PIN fraction x implementation_fraction(t) x frequency x unit_cost. Public-wide policies use the deduplicated total population (once per age/sex/year, never per cause).",
@@ -1712,7 +1732,8 @@ source_public_health_cost_value <- function() {
     "Model output source","Location","Analysis years","Baseline scenario",
     "Scenarios costed","Cost discount rate","Reporting price year","Currency",
     "Economic perspective","Policy start / target year","Cost ramp years",
-    "Health outcomes (DALYs/YLL/YLD)","R version","openxlsx / data.table"),
+    "Health outcomes (DALYs/YLL/YLD)","R version","openxlsx / data.table",
+    "TFA effect method","Public-health scenarios (n)"),
     value = c("Indonesia NCD public-health - cost & value", as.character(Sys.Date()),
     "CVD FAIR Choices pipeline (Models 00-06 -> 09), public-health family",
     phi$inputs_path, "output/out_model/model_output_*.rds (Model 06)", loc_run,
@@ -1721,7 +1742,9 @@ source_public_health_cost_value <- function() {
     PA$economic_perspective, paste0(policy_start, " / ", PA$exposure_target_year),
     as.character(ramp_years), "Out of scope in this stage (deferred)",
     R.version.string, paste0(as.character(packageVersion("openxlsx")), " / ",
-                             as.character(packageVersion("data.table")))))
+                             as.character(packageVersion("data.table"))),
+    as.character(PA$tfa_effect_method %||% "RR"),
+    paste0(length(comparators), " comparators + baseline")))
   addWorksheet(wb, "Run_Metadata")
   writeData(wb, "Run_Metadata", meta, headerStyle = st_hdr)
   writeFormula(wb, "Run_Metadata", startCol = 2, startRow = 8,
@@ -1768,15 +1791,37 @@ source_public_health_cost_value <- function() {
   }
 
   ## ===== Policy_Levers ===================================================
+  n_lv <- nrow(lev_out); r_lv <- max(n_lv + 1L, 2L)
   addWorksheet(wb, "Policy_Levers")
   writeData(wb, "Policy_Levers", as.data.frame(lev_out), headerStyle = st_hdr)
-  style_sheet("Policy_Levers", names(lev_out), nrow(lev_out), rsource_cols = 1:ncol(lev_out),
-              wrap_cols = which(names(lev_out) %in% c("source")))
+  # Derived fiscal/regulatory cells are LIVE formulas (M04-M06); targets by name.
+  Lm  <- xlc(names(lev_out), "lever_method");             Lfb <- xlc(names(lev_out), "fiscal_baseline_tax_level")
+  Lft <- xlc(names(lev_out), "fiscal_target_tax_level");  Lrb <- xlc(names(lev_out), "regulatory_baseline_score")
+  Lrt <- xlc(names(lev_out), "regulatory_target_score");  Lep <- xlc(names(lev_out), "effect_parameter")
+  Lig <- xlc(names(lev_out), "implementation_gap");       Lipc<- xlc(names(lev_out), "implied_price_change")
+  Ltd <- xlc(names(lev_out), "fiscal_tax_delta")
+  cig <- match("implementation_gap", names(lev_out)); cipc <- match("implied_price_change", names(lev_out))
+  ctd <- match("fiscal_tax_delta", names(lev_out));   cpr  <- match("policy_reduction", names(lev_out))
+  if (n_lv > 0) {
+    R <- 2:r_lv
+    writeFormula(wb, "Policy_Levers", startCol = cig, startRow = 2, x = frows(function(r)
+      sprintf("IF(%s%d=\"regulatory_gap_multiplicative\",MAX(0,%s%d-%s%d),\"\")", Lm,r,Lrt,r,Lrb,r), R))
+    writeFormula(wb, "Policy_Levers", startCol = ctd, startRow = 2, x = frows(function(r)
+      sprintf("IF(%s%d=\"price_elasticity\",MAX(0,%s%d-%s%d),\"\")", Lm,r,Lft,r,Lfb,r), R))
+    writeFormula(wb, "Policy_Levers", startCol = cipc, startRow = 2, x = frows(function(r)
+      sprintf("IF(%s%d=\"tax_share_to_price_elasticity\",(1-%s%d)/(1-%s%d)-1,IF(%s%d=\"price_elasticity\",%s%d,\"\"))",
+              Lm,r,Lfb,r,Lft,r,Lm,r,Ltd,r), R))
+    writeFormula(wb, "Policy_Levers", startCol = cpr, startRow = 2, x = frows(function(r)
+      sprintf("IF(%s%d=\"regulatory_gap_multiplicative\",%s%d*%s%d,IF(OR(%s%d=\"price_elasticity\",%s%d=\"tax_share_to_price_elasticity\"),ABS(%s%d)*%s%d,\"\"))",
+              Lm,r,Lep,r,Lig,r, Lm,r,Lm,r, Lep,r,Lipc,r), R))
+  }
+  style_sheet("Policy_Levers", names(lev_out), n_lv, formula_cols = c(cig,cipc,ctd,cpr),
+              rsource_cols = setdiff(seq_along(lev_out), c(cig,cipc,ctd,cpr)))
   rev_c <- which(names(lev_out) == "review_status")
-  if (length(rev_c) && nrow(lev_out)) {
-    conditionalFormatting(wb, "Policy_Levers", cols = rev_c, rows = 2:(nrow(lev_out)+1), rule = "Ready", type = "contains", style = cf_pass)
-    conditionalFormatting(wb, "Policy_Levers", cols = rev_c, rows = 2:(nrow(lev_out)+1), rule = "Review", type = "contains", style = cf_rev)
-    conditionalFormatting(wb, "Policy_Levers", cols = rev_c, rows = 2:(nrow(lev_out)+1), rule = "Missing", type = "contains", style = cf_rev)
+  if (length(rev_c) && n_lv) {
+    conditionalFormatting(wb, "Policy_Levers", cols = rev_c, rows = 2:r_lv, rule = "Ready", type = "contains", style = cf_pass)
+    conditionalFormatting(wb, "Policy_Levers", cols = rev_c, rows = 2:r_lv, rule = "Review", type = "contains", style = cf_rev)
+    conditionalFormatting(wb, "Policy_Levers", cols = rev_c, rows = 2:r_lv, rule = "Missing", type = "contains", style = cf_rev)
   }
 
   ## ===== Exposure_Targets ================================================
@@ -1817,11 +1862,24 @@ source_public_health_cost_value <- function() {
   n_cc <- nrow(cc_out); r_cc <- n_cc + 1L
   addWorksheet(wb, "Cost_Components")
   writeData(wb, "Cost_Components", as.data.frame(cc_out), headerStyle = st_hdr)
-  # H PIN measure(7) I frac(8) J freq(9) K unit(10) ... cost_ready(15)
-  writeFormula(wb, "Cost_Components", startCol = 15, startRow = 2, x = frows(function(r)
-    sprintf("IF(AND(J%d>=0,I%d<>\"\",I%d>=0,I%d<=1,OR(G%d=\"all\",G%d=\"prevalence\",G%d=\"incidence\")),1,0)",
-            r, r, r, r, r, r, r), 2:r_cc))
-  style_sheet("Cost_Components", names(cc_out), n_cc, formula_cols = 15,
+  # Formula targets derived BY NAME so the new allocation columns cannot misalign
+  # them. allocated_child_cost = package total x allocation share (M13, falling back
+  # to the row unit cost); cost_ready checks unit cost, PIN fraction and PIN measure.
+  Cpm <- xlc(names(cc_out), "population_in_need_measure")
+  Cpf <- xlc(names(cc_out), "population_in_need_fraction")
+  Cuc <- xlc(names(cc_out), "unit_cost_usd")
+  Cshare <- xlc(names(cc_out), "cost_allocation_share")
+  Cptot  <- xlc(names(cc_out), "package_total_cost_usd_per_capita")
+  c_alloc <- match("allocated_child_cost", names(cc_out))
+  c_ready <- match("cost_ready", names(cc_out))
+  if (n_cc > 0) {
+    writeFormula(wb, "Cost_Components", startCol = c_alloc, startRow = 2, x = frows(function(r)
+      sprintf("IFERROR(%s%d*%s%d,%s%d)", Cptot, r, Cshare, r, Cuc, r), 2:r_cc))
+    writeFormula(wb, "Cost_Components", startCol = c_ready, startRow = 2, x = frows(function(r)
+      sprintf("IF(AND(%s%d>=0,%s%d<>\"\",%s%d>=0,%s%d<=1,OR(%s%d=\"all\",%s%d=\"prevalence\",%s%d=\"incidence\")),1,0)",
+              Cuc, r, Cpf, r, Cpf, r, Cpf, r, Cpm, r, Cpm, r, Cpm, r), 2:r_cc))
+  }
+  style_sheet("Cost_Components", names(cc_out), n_cc, formula_cols = c(c_alloc, c_ready),
               wrap_cols = which(names(cc_out) %in% c("cost_component","notes")))
   ia_c <- which(names(cc_out) == "indonesia_adjusted_flag")
   conditionalFormatting(wb, "Cost_Components", cols = ia_c, rows = 2:r_cc, rule = "==0", style = cf_rev)
@@ -2003,6 +2061,34 @@ source_public_health_cost_value <- function() {
     sprintf("IF(ABS(C14-%s)<=ABS(%s)*0.000001+0.5,\"PASS\",\"FAIL\")", cA_rda, cA_rda),
     sprintf("IF(ABS(C15-%s)<=ABS(%s)*0.000001+1,\"PASS\",\"FAIL\")", cA_rdic, cA_rdic),
     sprintf("IF(ABS(C16-%s)<=ABS(%s)*0.000001+1,\"PASS\",\"FAIL\")", cA_rcpd, cA_rcpd))
+  # --- appended hierarchy / cost-allocation checks (Scenario_Hierarchy, Cost_Components,
+  # Annual_Mortality all exist in the final workbook; letters/rows derived by name) ---
+  r_sh   <- nrow(phi$hierarchy) + 1L
+  pk_all <- phi$package_ids
+  tob_pk <- c(pk_all[grepl("TOB", pk_all)],  "I_PH_TOBACCO_POLICY")[1]
+  salt_pk<- c(pk_all[grepl("SALT", pk_all)], "I_PH_SALT_POLICY")[1]
+  SHpar  <- xlc(names(phi$hierarchy), "parent_scenario_id"); SHrole <- xlc(names(phi$hierarchy), "scenario_role")
+  Ccpp   <- xlc(names(cc_out), "parent_package_id");         Ccsh   <- xlc(names(cc_out), "cost_allocation_share")
+  qa_check  <- c(qa_check, "Tobacco package child count","Salt package child count",
+                 "Child cost-allocation shares sum to 1 (per package)","Parent packages produced as joint runs")
+  qa_expect <- c(qa_expect, "3","4","<= tol","> 0")
+  qa_note   <- c(qa_note, "Scenario_Hierarchy: clean air, media, ad ban",
+                 "Scenario_Hierarchy: reformulation, FOPL, media, institutions",
+                 "Cost_Components allocation shares sum to 1 within each package (M13/M14)",
+                 "Package cases/deaths come from a produced JOINT scenario, never summed from children")
+  qa_actual <- c(qa_actual,
+    sprintf("COUNTIFS('Scenario_Hierarchy'!$%s$2:$%s$%d,\"%s\",'Scenario_Hierarchy'!$%s$2:$%s$%d,\"child\")",
+            SHpar, SHpar, r_sh, tob_pk, SHrole, SHrole, r_sh),
+    sprintf("COUNTIFS('Scenario_Hierarchy'!$%s$2:$%s$%d,\"%s\",'Scenario_Hierarchy'!$%s$2:$%s$%d,\"child\")",
+            SHpar, SHpar, r_sh, salt_pk, SHrole, SHrole, r_sh),
+    sprintf("ABS(SUMIFS('Cost_Components'!$%s$2:$%s$%d,'Cost_Components'!$%s$2:$%s$%d,\"%s\")-1)+ABS(SUMIFS('Cost_Components'!$%s$2:$%s$%d,'Cost_Components'!$%s$2:$%s$%d,\"%s\")-1)",
+            Ccsh, Ccsh, r_cc, Ccpp, Ccpp, r_cc, tob_pk, Ccsh, Ccsh, r_cc, Ccpp, Ccpp, r_cc, salt_pk),
+    sprintf("MIN(COUNTIF('Annual_Mortality'!$A$2:$A$%d,\"%s\"),COUNTIF('Annual_Mortality'!$A$2:$A$%d,\"%s\"))",
+            r_am, tob_pk, r_am, salt_pk))
+  qa_status <- c(qa_status,
+    "IF(C17=3,\"PASS\",\"FAIL\")","IF(C18=4,\"PASS\",\"FAIL\")",
+    sprintf("IF(C19<=%s,\"PASS\",\"FAIL\")", cA_tol),
+    "IF(C20>0,\"PASS\",\"FAIL\")")
   qa_df <- data.frame(check = qa_check, expected = qa_expect, actual = NA,
                       status = NA_character_, note = qa_note, stringsAsFactors = FALSE)
   addWorksheet(wb, "QA_Checks")
@@ -2032,24 +2118,40 @@ source_public_health_cost_value <- function() {
 
   ## ===== Methods_and_Sources =============================================
   methods <- data.table(
-    method_id = sprintf("M%02d", 1:12),
-    concept = c("Exposure target","Exposure path","Prevalence-shift RR effect","Log-linear RR effect",
-                "TFA policy-score effect","Effect lag","Incidence application","Policy implementation fraction",
-                "Annual policy cost","Shared cost","Discounting","Cost-effectiveness"),
+    method_id = sprintf("M%02d", 1:19),
+    concept = c("Exposure target","Exposure path","Regulatory score","Regulatory effect",
+                "Price-change tax","Tax-share tax","Prevalence-shift RR effect","Log-linear RR effect",
+                "TFA effect method (RR default / PAF optional)","Effect lag","Incidence application",
+                "Policy implementation fraction","Annual policy cost","Shared cost","Child cost allocation",
+                "Parent package cost","Package health outcomes","Discounting","Cost-effectiveness"),
     formula_or_rule = c(
       "relative: max(floor, baseline*(1-reduction)); absolute: max(floor, baseline-reduction); level: max(floor, target)",
       "pt(t) linear baseline->target over start_year..target_year, then held; floored at exposure_floor",
-      "effect = 1 - (1 + pt*(RR-1)) / (1 + p0*(RR-1))",
-      "effect = 1 - 1/(RR^(p0-pt))",
-      "effect = PAF * achieved_policy_score",
+      "implementation score: none=0; partial=0.5; full=1",
+      "implementation_gap = max(0, target_score - baseline_score); regulatory reduction = full_component_effect * implementation_gap",
+      "fiscal_tax_delta = max(0, target_tax - baseline_tax); reduction = abs(price_elasticity) * implied_price_change",
+      "tobacco excise share: implied_price_change = (1 - baseline_share)/(1 - target_share) - 1",
+      "effect = 1 - (1 + pt*(RR-1)) / (1 + p0*(RR-1))   [tobacco smoking prevalence shift]",
+      "effect = 1 - 1/(RR^(p0-pt))   [alcohol, sodium, SSB, and DEFAULT industrial-TFA path: RR per 1 percentage-point energy, e.g. RR_TFA_IHD_1PCT=1.10 ~ sqrt(1.21)]",
+      "RR (default): log-linear RR per unit reduction, no PAF required. PAF (optional, tfa_effect_method=PAF): effect = optional_PAF * implementation_gap",
       "immediate: effect tracks exposure path; delayed_exponential: full_effect * (1-(1-rate)^(years since start))",
       "cause-specific incidence x (1 - effect_t); multiple policies combine multiplicatively on the surviving fraction",
       "implementation_fraction(t) = min(max((t - policy_start_year + 1)/policy_cost_ramp_years, 0), 1)",
       "annual_cost = population(t) * PIN_fraction * implementation_fraction(t) * frequency * unit_cost",
       "shared-count-once costs counted once per intervention & scenario-year, never once per affected cause",
+      "child cost = package_total_cost_per_capita * cost_allocation_share (shares sum to 1 within a package)",
+      "parent package cost = sum of selected child costs; the parent_reference cost row (selected_for_base_case=0) is NOT charged",
+      "parent-package cases/deaths come from ONE joint scenario run with all children applied together; never sum standalone child outcomes",
       "discount_factor(t) = 1/(1+cost_discount_rate)^(t - analysis_start_year); costs discounted, deaths undiscounted",
-      "USD per death averted = cumulative discounted incremental cost / cumulative deaths averted"),
-    source = c(rep("NCD Countdown supplement (Countdown_Methods sheet) + public-health input workbook", 12)))
+      "USD per death (or case) averted = cumulative discounted incremental cost / cumulative averted; blank + 'no incremental health effect' when nothing averted"),
+    source = c(rep("NCD Countdown supplement (Countdown_Methods sheet) + public-health input workbook", 19)))
+  # TFA base-case RR references retained for provenance.
+  tfa_refs <- data.table(method_id = c("REF","REF"), concept = c("TFA source RR","TFA source RR"),
+    formula_or_rule = c("~RR 1.21 per 2 percentage-points energy (converted to ~1.10 per 1 pp in the workbook)",
+                        "supporting cohort evidence"),
+    source = c("https://www.ahajournals.org/doi/10.1161/CIRCULATIONAHA.118.038160",
+               "https://www.ahajournals.org/doi/10.1161/JAHA.115.002891"))
+  methods <- rbind(methods, tfa_refs)
   addWorksheet(wb, "Methods_and_Sources")
   writeData(wb, "Methods_and_Sources", methods, headerStyle = st_hdr)
   style_sheet("Methods_and_Sources", names(methods), nrow(methods), wrap_cols = c(3,4), filter = FALSE, max_w = 90)
@@ -2057,31 +2159,108 @@ source_public_health_cost_value <- function() {
 
   ## ===== Calculation_Map =================================================
   cmap <- data.table(
-    output_sheet = c("Selected_Interventions","Exposure_Targets","Effect_Parameters","Cost_Components",
-                     "Annual_Mortality","Annual_Cost","Budget_Impact","Cost_Effectiveness","QA_Checks",
-                     "Run_Metadata"),
-    formula_columns = c("P,Q,R,U,V","I,J,K","M","O(cost_ready)","I,J","N,O,P,Q,R,S,T,U,V,W,AA","C:H","C:I","C:D","B (subset)"),
-    depends_on = c("effect_model + exposures (H:J)","baseline/method/reduction (E:H)",
-                   "effect_model + exposures (G,H,K,L)","cost inputs (G:K)","R deaths/cases (E:H)",
-                   "Cost_Components inputs; Calculation_Assumptions; R population (L:M)","Annual_Cost",
-                   "Annual_Mortality; Budget_Impact; Calculation_Assumptions","calculation + diagnostic sheets",
-                   "Calculation_Assumptions"),
-    calculation = c("Full effect at target; exposure reductions; key uniqueness",
+    output_sheet = c("Policy_Levers","Selected_Interventions","Exposure_Targets","Effect_Parameters",
+                     "Cost_Components","Annual_Mortality","Annual_Cost","Budget_Impact","Cost_Effectiveness",
+                     "Child_Intervention_Summary","Parent_Package_Summary","QA_Checks","Run_Metadata"),
+    formula_columns = c("implementation_gap,implied_price_change,fiscal_tax_delta,policy_reduction",
+                        "full_effect,reductions,key_count,status","target,abs,rel","full_effect",
+                        "allocated_child_cost,cost_ready","deaths_averted,cases_averted",
+                        "impl_frac,PIN,annual+disc cost,shared QA","incremental+cumulative cost",
+                        "health,cost,ICER,dominance,reconciliation","modeled/baseline/averted,cost,ICER",
+                        "modeled/baseline/averted,cost,ICER","actual,status","B (subset)"),
+    depends_on = c("lever_method + fiscal/regulatory inputs","effect_model + exposures","baseline/method/reduction",
+                   "effect_model + exposures","cost inputs + allocation shares","R deaths/cases",
+                   "Cost_Components; Calculation_Assumptions; R population","Annual_Cost",
+                   "Annual_Mortality; Budget_Impact; Calculation_Assumptions",
+                   "Annual_Mortality; Budget_Impact (standalone scenarios)",
+                   "Annual_Mortality; Budget_Impact (JOINT package/combined runs)",
+                   "calculation + diagnostic sheets","Calculation_Assumptions"),
+    calculation = c("Regulatory gap, tax price change/delta, reproduced relative exposure reduction",
+                    "Full effect at target; exposure reductions; key uniqueness",
                     "Exposure target and absolute/relative reductions","Full effect at target",
-                    "Cost-readiness rule","Deaths and cases averted",
+                    "Child cost = package total x share; cost-readiness rule","Deaths and cases averted",
                     "Implementation fraction, PIN, annual/discounted cost, shared-cost QA",
                     "Annual and cumulative cost by scenario",
                     "Cumulative health, cost, cost/death, dominance, reconciliation",
+                    "Per child intervention: health, cost, cost per case/death averted, status",
+                    "Per parent package (joint run) + combined: health, cost, cost per case/death averted",
                     "Invariant recomputation and Excel-vs-R reconciliation","Metadata pulled from controls"))
   addWorksheet(wb, "Calculation_Map")
   writeData(wb, "Calculation_Map", cmap, headerStyle = st_hdr)
   style_sheet("Calculation_Map", names(cmap), nrow(cmap), wrap_cols = c(3,4), filter = FALSE, max_w = 60)
   setColWidths(wb, "Calculation_Map", cols = 1:4, widths = c(22, 30, 40, 52))
 
+  ## ===== Scenario_Hierarchy ==============================================
+  # Workbook hierarchy (parent packages <-> child/standalone interventions) with
+  # the current run's runnable / parent-package flags. Source (R-generated) view.
+  sh_out <- as.data.frame(phi$hierarchy)
+  addWorksheet(wb, "Scenario_Hierarchy")
+  writeData(wb, "Scenario_Hierarchy", sh_out, headerStyle = st_hdr)
+  style_sheet("Scenario_Hierarchy", names(sh_out), nrow(sh_out),
+              rsource_cols = seq_along(sh_out),
+              wrap_cols = which(names(sh_out) %in% c("parent_aggregation_rule","outcome_reporting_rule",
+                                                     "cost_reporting_rule","source_note")))
+
+  ## ===== Risk_Response ===================================================
+  rr_out <- as.data.frame(phi$risk_response)
+  addWorksheet(wb, "Risk_Response")
+  writeData(wb, "Risk_Response", rr_out, headerStyle = st_hdr)
+  style_sheet("Risk_Response", names(rr_out), nrow(rr_out), rsource_cols = seq_along(rr_out),
+              wrap_cols = which(names(rr_out) %in% c("response_name","derivation","source","notes")))
+
+  ## ===== Child_Intervention_Summary / Parent_Package_Summary =============
+  # Per-scenario health + cost + cost-effectiveness, formula-driven from
+  # Annual_Mortality and Budget_Impact (package rows come from the JOINT package
+  # run, never summed from standalone children -- criteria 10 & 19).
+  sc <- as.data.table(phi$scenario_catalogue); setnames(sc, "scenario_id", "scenario")
+  sc <- sc[scenario %in% comparators]
+  summ_cols <- c("scenario","scenario_label","scenario_level","scenario_role","parent_package_id",
+                 "parent_package_name","intervention_ids","component_order",
+                 "modeled_cases","baseline_cases","cases_averted","modeled_deaths","baseline_deaths",
+                 "deaths_averted","incremental_cost","disc_incremental_cost","cost_per_case_averted",
+                 "cost_per_death_averted","status")
+  Sca <- xlc(summ_cols, "cases_averted"); Sda <- xlc(summ_cols, "deaths_averted")
+  Sdic <- xlc(summ_cols, "disc_incremental_cost")
+  write_summary <- function(sheet, dt) {
+    d <- as.data.frame(dt[, .(scenario, scenario_label, scenario_level, scenario_role,
+                              parent_package_id, parent_package_name, intervention_ids, component_order)],
+                       stringsAsFactors = FALSE)
+    for (cn in summ_cols[9:16]) d[[cn]] <- NA_real_
+    d$cost_per_case_averted <- NA_real_; d$cost_per_death_averted <- NA_real_; d$status <- NA_character_
+    d <- d[, summ_cols]; n <- nrow(d); rr2 <- max(n + 1L, 2L)
+    addWorksheet(wb, sheet); writeData(wb, sheet, d, headerStyle = st_hdr)
+    if (n > 0) {
+      R <- 2:rr2
+      amf <- function(col) function(r) sprintf(
+        "SUMIFS('Annual_Mortality'!$%s$2:$%s$%d,'Annual_Mortality'!$A$2:$A$%d,A%d)", col, col, r_am, r_am, r)
+      bif <- function(col) function(r) sprintf(
+        "SUMIFS('Budget_Impact'!$%s$2:$%s$%d,'Budget_Impact'!$A$2:$A$%d,A%d)", col, col, r_bi, r_bi, r)
+      writeFormula(wb, sheet, startCol = 9,  startRow = 2, x = frows(amf("E"), R))   # modeled_cases
+      writeFormula(wb, sheet, startCol = 10, startRow = 2, x = frows(amf("G"), R))   # baseline_cases
+      writeFormula(wb, sheet, startCol = 11, startRow = 2, x = frows(amf("J"), R))   # cases_averted
+      writeFormula(wb, sheet, startCol = 12, startRow = 2, x = frows(amf("F"), R))   # modeled_deaths
+      writeFormula(wb, sheet, startCol = 13, startRow = 2, x = frows(amf("H"), R))   # baseline_deaths
+      writeFormula(wb, sheet, startCol = 14, startRow = 2, x = frows(amf("I"), R))   # deaths_averted
+      writeFormula(wb, sheet, startCol = 15, startRow = 2, x = frows(bif("E"), R))   # incremental_cost
+      writeFormula(wb, sheet, startCol = 16, startRow = 2, x = frows(bif("F"), R))   # disc_incremental_cost
+      writeFormula(wb, sheet, startCol = 17, startRow = 2, x = frows(function(r)
+        sprintf("IF(%s%d>0,%s%d/%s%d,\"\")", Sca, r, Sdic, r, Sca, r), R))           # cost per case averted
+      writeFormula(wb, sheet, startCol = 18, startRow = 2, x = frows(function(r)
+        sprintf("IF(%s%d>0,%s%d/%s%d,\"\")", Sda, r, Sdic, r, Sda, r), R))           # cost per death averted
+      writeFormula(wb, sheet, startCol = 19, startRow = 2, x = frows(function(r)
+        sprintf("IF(AND(%s%d<=0,%s%d<=0),\"no incremental health effect\",IF(AND(%s%d<0,OR(%s%d>0,%s%d>0)),\"Dominant (more health, lower cost)\",IF(%s%d>0,\"USD per death averted\",\"USD per case averted\")))",
+                Sca, r, Sda, r, Sdic, r, Sca, r, Sda, r, Sda, r), R))                # status
+    }
+    style_sheet(sheet, summ_cols, n, formula_cols = 9:19, wrap_cols = c(2, 7, 19))
+  }
+  write_summary("Child_Intervention_Summary", sc[scenario_level == "standalone"])
+  write_summary("Parent_Package_Summary",     sc[scenario_level %in% c("package", "combined")])
+
   ## ===== order, recalc, strip, save ======================================
-  desired_order <- c("README","Run_Metadata","Selected_Interventions","Blocked_Links","Policy_Levers",
-                     "Exposure_Targets","Effect_Parameters","Cost_Components","Annual_Mortality",
-                     "Annual_Cost","Budget_Impact","Cost_Effectiveness","Economic_Value","QA_Checks",
+  desired_order <- c("README","Run_Metadata","Scenario_Hierarchy","Selected_Interventions","Blocked_Links",
+                     "Policy_Levers","Exposure_Targets","Effect_Parameters","Risk_Response","Cost_Components",
+                     "Annual_Mortality","Annual_Cost","Budget_Impact","Cost_Effectiveness",
+                     "Child_Intervention_Summary","Parent_Package_Summary","Economic_Value","QA_Checks",
                      "Input_Diagnostic","Methods_and_Sources","Calculation_Assumptions","Calculation_Map")
   desired_order <- desired_order[desired_order %in% names(wb)]
   worksheetOrder(wb) <- match(desired_order, names(wb))
