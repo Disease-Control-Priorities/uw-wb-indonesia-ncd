@@ -22,11 +22,15 @@
 # CONTRACT / SCOPE
 #   * Consumes: fair_inputs & fair_scenarios (Model 04, in memory); the Model 06
 #     state/flow output (in-memory `results_list` if present, else the exact
-#     current on-disk contract output/out_model/model_output_*.rds); Model 08
-#     economic value (output/08_vsl_results.rds) when available & reconcilable.
-#   * Does NOT compute or report DALYs/YLL/YLD/disability weights/life-expectancy
-#     (deferred). Does NOT depend on Model 07.
-#   * Writes exactly one file (`cost_value_output_file`); no new .rds/.csv.
+#     current on-disk contract output/out_model/model_output_*.rds); Model 07
+#     health outcomes (output/dt_output_dalys.rds) and Model 08 economic value
+#     (output/08_vsl_results.rds + output/08_bca_parameters.rds). Models 07 and 08
+#     are REQUIRED inputs -- Model 09 fails with a consolidated diagnostic if they
+#     are missing or their scenario IDs do not reconcile with the current run.
+#   * Health outcomes (deaths averted, YLL/YLD/DALY averted, life-years gained)
+#     come from Model 07; the Reference-Case benefit-cost analysis (VSL/VSLY per
+#     the 2019 Robinson et al. Guidelines) is built from Model 08 as LIVE Excel
+#     formulas on the Health_Outcomes / Economic_Value / Benefit_Cost sheets.
 #   * FAIR effect, costing and discounting rules follow FairChoices_Methods and
 #     the input workbook (see Methods_and_Sources sheet).
 #===========================================================================
@@ -56,6 +60,419 @@ strip_dangling_drawings <- function(wb) {
                                           value = TRUE, invert = TRUE)
   }, error = function(e) message("  (drawing-strip skipped: ", conditionMessage(e), ")"))
   invisible(wb)
+}
+
+# ===========================================================================
+# build_bca_sheets_into()  --  shared formula-driven BCA sheet builder
+# ---------------------------------------------------------------------------
+# Adds three formula-driven decision sheets to an openxlsx workbook that already
+# holds a Calculation_Assumptions sheet (with the BCA parameter rows) and a
+# Budget_Impact sheet (scenario=A, year=B, incremental_cost=E). Used by BOTH the
+# clinical and public-health formula workbooks so the Reference-Case BCA logic
+# lives in exactly one place.
+#   Health_Outcomes : Model-07 scenario x year modeled/baseline health, with
+#                     averted quantities as Excel formulas (grey source cells).
+#   Economic_Value  : Model-08 scenario x year source (deaths averted, LY gained,
+#                     GNI pc IDN/US, population, LE at avg adult age) + formula
+#                     columns for the Reference-Case VSL (elasticity 1.5 transfer
+#                     with the 20x floor), the 100x/160x GNI sensitivities, VSLY,
+#                     undiscounted VSL/VSLY benefits, the BCA discount factor,
+#                     PV benefits, total/PV national GNI and benefit/GNI shares.
+#   Benefit_Cost    : per scenario x valuation case -- PV benefits, PV costs
+#                     (Budget_Impact incremental cost discounted on the SAME BCA
+#                     base year & rate, converted to the benefit currency basis
+#                     via cost_to_bca_currency_factor), PV net benefit, BCR,
+#                     benefit/GNI share, decision and a partial-BCA scope note.
+# All numbers reference Calculation_Assumptions cells (bca_cells) so a user can
+# edit an assumption and watch every derived cell recompute. Nothing derived is
+# pasted as an R value.
+# Returns the (unchanged) sheet names it created, for worksheet-order handling.
+# ===========================================================================
+build_bca_sheets_into <- function(wb, comparators, ho_src, ev_src, scen_meta,
+                                  bca_cells, r_bi, sty) {
+  L      <- function(i) openxlsx::int2col(i)
+  frows  <- function(fn, rows) vapply(rows, fn, character(1))
+  ca     <- function(id) bca_cells[[id]]              # Calculation_Assumptions cell ref
+  hdr    <- sty$st_hdr; fml <- sty$st_formula; rsrc <- sty$st_rsrc; wrapS <- sty$st_wrap
+  # write a per-row formula vector into `sheet` column `col`, starting at row 2
+  wf <- function(sheet, col, x) writeFormula(wb, sheet, x = x, startCol = col, startRow = 2L)
+
+  style_block <- function(sheet, ncol, ndata, formula_cols, rsource_cols,
+                          numfmt = list(), wrap_cols = integer(0), widths = NULL) {
+    addStyle(wb, sheet, hdr, rows = 1, cols = seq_len(ncol), gridExpand = TRUE)
+    if (ndata > 0) {
+      dr <- 2:(ndata + 1L)
+      for (j in formula_cols) addStyle(wb, sheet, fml,  rows = dr, cols = j, gridExpand = TRUE, stack = TRUE)
+      for (j in rsource_cols) addStyle(wb, sheet, rsrc, rows = dr, cols = j, gridExpand = TRUE, stack = TRUE)
+      for (nm in names(numfmt))
+        addStyle(wb, sheet, createStyle(numFmt = numfmt[[nm]]),
+                 rows = dr, cols = as.integer(nm), gridExpand = TRUE, stack = TRUE)
+      for (j in wrap_cols) addStyle(wb, sheet, wrapS, rows = dr, cols = j, gridExpand = TRUE, stack = TRUE)
+    }
+    freezePane(wb, sheet, firstActiveRow = 2, firstActiveCol = 1)
+    addFilter(wb, sheet, rows = 1, cols = seq_len(ncol))
+    if (is.null(widths)) widths <- pmin(pmax(14, 12), 40)
+    setColWidths(wb, sheet, cols = seq_len(ncol), widths = widths)
+    setRowHeights(wb, sheet, rows = 1, heights = 28)
+  }
+
+  MONEY <- "#,##0"; RATIO <- "0.00"; SHARE <- "0.0000%"; DISC <- "0.0000"; NUM <- "#,##0"
+
+  # ---- Health_Outcomes -----------------------------------------------------
+  ho <- as.data.frame(ho_src, stringsAsFactors = FALSE)
+  ho <- ho[order(ho$scenario, ho$year), , drop = FALSE]
+  ho_cols <- c("scenario","scenario_label","year",
+               "modeled_deaths","baseline_deaths","deaths_averted",
+               "modeled_cases","baseline_cases","cases_averted",
+               "yll","base_yll","yll_averted","yld","base_yld","yld_averted",
+               "daly","base_daly","dalys_averted","life_years_gained")
+  HO <- data.frame(scenario = ho$scenario, scenario_label = ho$scenario_label,
+                   year = ho$year,
+                   modeled_deaths = ho$modeled_deaths, baseline_deaths = ho$baseline_deaths,
+                   deaths_averted = NA_real_,
+                   modeled_cases = ho$modeled_cases, baseline_cases = ho$baseline_cases,
+                   cases_averted = NA_real_,
+                   yll = ho$yll, base_yll = ho$base_yll, yll_averted = NA_real_,
+                   yld = ho$yld, base_yld = ho$base_yld, yld_averted = NA_real_,
+                   daly = ho$daly, base_daly = ho$base_daly, dalys_averted = NA_real_,
+                   life_years_gained = NA_real_, stringsAsFactors = FALSE)
+  n_ho <- nrow(HO); addWorksheet(wb, "Health_Outcomes")
+  writeData(wb, "Health_Outcomes", HO, headerStyle = hdr)
+  if (n_ho > 0) {
+    R <- 2:(n_ho + 1L)
+    wf("Health_Outcomes", 6,  frows(function(r) sprintf("E%d-D%d", r, r), R))  # deaths_averted
+    wf("Health_Outcomes", 9,  frows(function(r) sprintf("H%d-G%d", r, r), R))  # cases_averted
+    wf("Health_Outcomes", 12, frows(function(r) sprintf("K%d-J%d", r, r), R))  # yll_averted
+    wf("Health_Outcomes", 15, frows(function(r) sprintf("N%d-M%d", r, r), R))  # yld_averted
+    wf("Health_Outcomes", 18, frows(function(r) sprintf("Q%d-P%d", r, r), R))  # dalys_averted
+    wf("Health_Outcomes", 19, frows(function(r) sprintf("L%d", r), R))         # life_years_gained = yll_averted
+  }
+  style_block("Health_Outcomes", length(ho_cols), n_ho,
+              formula_cols = c(6,9,12,15,18,19), rsource_cols = c(4,5,7,8,10,11,13,14,16,17),
+              numfmt = setNames(rep(list(NUM), 16), as.character(c(4:19))),
+              wrap_cols = 2,
+              widths = pmin(pmax(nchar(ho_cols) + 2, 12), 20))
+
+  # ---- Economic_Value ------------------------------------------------------
+  ev <- as.data.frame(ev_src, stringsAsFactors = FALSE)
+  ev <- ev[order(ev$scenario, ev$year), , drop = FALSE]
+  ev_cols <- c("scenario","scenario_label","year",
+               "deaths_averted","life_years_gained","gni_pc_idn","gni_pc_usa",
+               "population","le_avg_adult",
+               "vsl_transfer_prefloor","vsl_floor","vsl_preferred","vsl_over_gnipc",
+               "vsl_gni100","vsl_gni160","vsly_preferred",
+               "econ_value_vsl_undisc","econ_value_vsly_undisc",
+               "econ_value_vsl100_undisc","econ_value_vsl160_undisc",
+               "disc_factor","pv_vsl_pref","pv_vsly_pref","pv_vsl100","pv_vsl160",
+               "total_national_gni","pv_national_gni","annual_benefit_share_gni")
+  EV <- data.frame(scenario = ev$scenario, scenario_label = ev$scenario_label, year = ev$year,
+                   deaths_averted = ev$deaths_averted, life_years_gained = ev$life_years_gained,
+                   gni_pc_idn = ev$gni_pc_idn, gni_pc_usa = ev$gni_pc_usa,
+                   population = ev$population, le_avg_adult = ev$le_avg_adult,
+                   stringsAsFactors = FALSE)
+  for (cn in ev_cols[10:28]) EV[[cn]] <- NA_real_
+  n_ev <- nrow(EV); r_ev <- n_ev + 1L; addWorksheet(wb, "Economic_Value")
+  writeData(wb, "Economic_Value", EV, headerStyle = hdr)
+  if (n_ev > 0) {
+    R <- 2:r_ev
+    wf("Economic_Value", 10, frows(function(r)                       # J vsl transfer pre-floor
+      sprintf("%s*G%d*(F%d/G%d)^%s", ca("ratio"), r, r, r, ca("elast")), R))
+    wf("Economic_Value", 11, frows(function(r)                       # K vsl floor
+      sprintf("%s*F%d", ca("floor"), r), R))
+    wf("Economic_Value", 12, frows(function(r) sprintf("MAX(J%d,K%d)", r, r), R))       # L vsl_preferred
+    wf("Economic_Value", 13, frows(function(r) sprintf("IF(F%d=0,\"\",L%d/F%d)", r, r, r), R)) # M vsl/gnipc
+    wf("Economic_Value", 14, frows(function(r) sprintf("%s*F%d", ca("mult100"), r), R)) # N vsl_gni100
+    wf("Economic_Value", 15, frows(function(r) sprintf("%s*F%d", ca("mult160"), r), R)) # O vsl_gni160
+    wf("Economic_Value", 16, frows(function(r) sprintf("IF(I%d=0,\"\",L%d/I%d)", r, r, r), R)) # P vsly_preferred
+    wf("Economic_Value", 17, frows(function(r) sprintf("L%d*D%d", r, r), R))  # Q econ_value_vsl
+    wf("Economic_Value", 18, frows(function(r) sprintf("P%d*E%d", r, r), R))  # R econ_value_vsly
+    wf("Economic_Value", 19, frows(function(r) sprintf("N%d*D%d", r, r), R))  # S econ_value_vsl100
+    wf("Economic_Value", 20, frows(function(r) sprintf("O%d*D%d", r, r), R))  # T econ_value_vsl160
+    wf("Economic_Value", 21, frows(function(r)                                # U disc factor (BCA)
+      sprintf("1/(1+%s)^(C%d-%s)", ca("r_primary"), r, ca("base_year")), R))
+    wf("Economic_Value", 22, frows(function(r) sprintf("Q%d*U%d", r, r), R))  # V pv_vsl_pref
+    wf("Economic_Value", 23, frows(function(r) sprintf("R%d*U%d", r, r), R))  # W pv_vsly_pref
+    wf("Economic_Value", 24, frows(function(r) sprintf("S%d*U%d", r, r), R))  # X pv_vsl100
+    wf("Economic_Value", 25, frows(function(r) sprintf("T%d*U%d", r, r), R))  # Y pv_vsl160
+    wf("Economic_Value", 26, frows(function(r) sprintf("H%d*F%d", r, r), R))  # Z total_national_gni
+    wf("Economic_Value", 27, frows(function(r) sprintf("Z%d*U%d", r, r), R))  # AA pv_national_gni
+    wf("Economic_Value", 28, frows(function(r) sprintf("IF(Z%d=0,\"\",Q%d/Z%d)", r, r, r), R)) # AB benefit/GNI
+  }
+  style_block("Economic_Value", length(ev_cols), n_ev,
+              formula_cols = 10:28, rsource_cols = 4:9,
+              numfmt = c(setNames(rep(list(NUM),   6), as.character(4:9)),
+                         setNames(rep(list(MONEY), 6), as.character(10:15)),
+                         setNames(list(MONEY),        "16"),
+                         setNames(rep(list(MONEY), 4), as.character(17:20)),
+                         setNames(list(DISC),         "21"),
+                         setNames(rep(list(MONEY), 4), as.character(22:25)),
+                         setNames(rep(list(MONEY), 2), as.character(26:27)),
+                         setNames(list(SHARE),        "28")),
+              wrap_cols = 2,
+              widths = pmin(pmax(nchar(ev_cols) + 2, 12), 22))
+
+  # ---- Benefit_Cost --------------------------------------------------------
+  # One row per comparator x valuation case. PV benefits pull the matching PV
+  # column from Economic_Value; PV costs discount Budget_Impact incremental cost
+  # on the SAME BCA base year & rate and convert to the benefit currency basis.
+  cases <- data.frame(
+    valuation_method = c("VSL", "VSLY", "VSL", "VSL"),
+    valuation_case   = c("preferred (elasticity 1.5, 20x floor)",
+                         "preferred (VSLY from preferred VSL)",
+                         "sensitivity: 100x GNI per capita",
+                         "sensitivity: 160x GNI per capita"),
+    ev_pv_col        = c("V", "W", "X", "Y"), stringsAsFactors = FALSE)
+  meta <- as.data.frame(scen_meta, stringsAsFactors = FALSE)
+  BC <- do.call(rbind, lapply(seq_len(nrow(meta)), function(i)
+    data.frame(scenario = meta$scenario[i], scenario_label = meta$scenario_label[i],
+               intervention_family = meta$intervention_family[i],
+               scenario_level = meta$scenario_level[i],
+               valuation_method = cases$valuation_method,
+               valuation_case = cases$valuation_case,
+               ev_pv_col = cases$ev_pv_col, stringsAsFactors = FALSE)))
+  bc_cols <- c("scenario","scenario_label","intervention_family","scenario_level",
+               "valuation_method","valuation_case","pv_benefits","pv_costs",
+               "pv_net_benefit","benefit_cost_ratio","pv_national_gni",
+               "benefit_gni_share","decision","scope_note")
+  BCd <- data.frame(scenario = BC$scenario, scenario_label = BC$scenario_label,
+                    intervention_family = BC$intervention_family,
+                    scenario_level = BC$scenario_level,
+                    valuation_method = BC$valuation_method, valuation_case = BC$valuation_case,
+                    pv_benefits = NA_real_, pv_costs = NA_real_, pv_net_benefit = NA_real_,
+                    benefit_cost_ratio = NA_real_, pv_national_gni = NA_real_,
+                    benefit_gni_share = NA_real_, decision = NA_character_,
+                    scope_note = NA_character_, stringsAsFactors = FALSE)
+  n_bc <- nrow(BCd); addWorksheet(wb, "Benefit_Cost")
+  writeData(wb, "Benefit_Cost", BCd, headerStyle = hdr)
+  if (n_bc > 0) {
+    R <- 2:(n_bc + 1L)
+    pvcol <- BC$ev_pv_col
+    wf("Benefit_Cost", 7, frows(function(r)                          # G pv_benefits
+      sprintf("SUMIFS('Economic_Value'!$%s$2:$%s$%d,'Economic_Value'!$A$2:$A$%d,A%d)",
+              pvcol[r - 1L], pvcol[r - 1L], r_ev, r_ev, r), R))
+    wf("Benefit_Cost", 8, frows(function(r)                          # H pv_costs (same BCA base/rate; to benefit basis)
+      sprintf(paste0("SUMPRODUCT(('Budget_Impact'!$A$2:$A$%d=A%d)*'Budget_Impact'!$E$2:$E$%d*",
+                     "(1/(1+%s)^('Budget_Impact'!$B$2:$B$%d-%s)))*%s"),
+              r_bi, r, r_bi, ca("r_primary"), r_bi, ca("base_year"), ca("cost_factor")), R))
+    wf("Benefit_Cost", 9,  frows(function(r) sprintf("G%d-H%d", r, r), R))   # I pv_net_benefit
+    wf("Benefit_Cost", 10, frows(function(r) sprintf("IF(H%d>0,G%d/H%d,\"\")", r, r, r), R)) # J bcr
+    wf("Benefit_Cost", 11, frows(function(r)                          # K pv_national_gni
+      sprintf("SUMIFS('Economic_Value'!$AA$2:$AA$%d,'Economic_Value'!$A$2:$A$%d,A%d)", r_ev, r_ev, r), R))
+    wf("Benefit_Cost", 12, frows(function(r) sprintf("IF(K%d=0,\"\",G%d/K%d)", r, r, r), R)) # L benefit/GNI
+    wf("Benefit_Cost", 13, frows(function(r)                          # M decision
+      sprintf(paste0("IF(H%d<=0,\"cost-saving or ratio not meaningful (PV cost<=0)\",",
+                     "IF(J%d>=1,\"benefits exceed costs (BCR>=1)\",\"costs exceed benefits (BCR<1)\"))"),
+              r, r), R))
+    writeData(wb, "Benefit_Cost", startCol = 14, startRow = 2, colNames = FALSE,
+              x = rep(sprintf(paste0("Partial mortality-benefit BCA (%s). Benefits = averted-mortality ",
+                                     "VSL/VSLY in PPP int$; costs = implementation/health-system converted ",
+                                     "to PPP int$ (market USD x cost_to_bca_currency_factor). Omits morbidity, ",
+                                     "productivity and downstream cost offsets."),
+                              gsub("'", "", BCd$valuation_case[1])), n_bc))
+  }
+  # Note: column indices above map bc_cols; pv_net_benefit is col 9 in the written
+  # frame (position of "pv_net_benefit"), bcr col 10, etc. (see bc_cols order).
+  style_block("Benefit_Cost", length(bc_cols), n_bc,
+              formula_cols = c(7,8,9,10,11,12,13), rsource_cols = integer(0),
+              numfmt = c(setNames(rep(list(MONEY),3), as.character(7:9)),
+                         setNames(list(RATIO), "10"),
+                         setNames(list(MONEY), "11"),
+                         setNames(list(SHARE), "12")),
+              wrap_cols = c(2, 6, 13, 14),
+              widths = c(20, 26, 16, 14, 12, 34, 18, 18, 18, 14, 18, 14, 30, 60))
+  if (n_bc > 0) {
+    conditionalFormatting(wb, "Benefit_Cost", cols = 13, rows = 2:(n_bc + 1L),
+                          rule = "benefits exceed", type = "contains", style = sty$cf_pass)
+    conditionalFormatting(wb, "Benefit_Cost", cols = 13, rows = 2:(n_bc + 1L),
+                          rule = "costs exceed", type = "contains", style = sty$cf_rev)
+  }
+  invisible(c("Health_Outcomes", "Economic_Value", "Benefit_Cost"))
+}
+
+# ===========================================================================
+# build_cvd_40q30_sheets_into()  --  shared formula-driven CVD 40q30 builder
+# ---------------------------------------------------------------------------
+# Adds two formula-driven sheets to an openxlsx workbook, off the Model 07
+# contracts dt_cvd_40q30 (07_cvd_40q30.rds) and cvd_age (07_cvd_40q30_age.rds):
+#   CVD_40q30_Age : one row per location/scenario/htn/year/age (ages 30..69).
+#                   cvd_deaths and de-duplicated population are grey R-source
+#                   cells; m_x, q_x, l_x and l_{x+1} are LIVE Excel formulas
+#                   (the recursive period life table, l_30 = 1).
+#   CVD_40q30     : one row per location/scenario/htn/year. cvd_40q30 (life-table
+#                   lookup), baseline_cvd_40q30 (shared-baseline SUMIFS),
+#                   absolute_reduction_pp and percent_reduction are LIVE formulas;
+#                   an R-source anchor + a reconciliation-status formula close the
+#                   loop. cvd_40q30 is a PERCENT on a 0..100 scale (numeric
+#                   format 0.000, never Excel's fractional %).
+# `scen_ids` MUST include the baseline id so the baseline SUMIFS resolves.
+# Returns the created sheet names (for worksheet-order handling).
+# ===========================================================================
+build_cvd_40q30_sheets_into <- function(wb, scen_ids, dt40, dt_age, base_id, sty,
+                                        recon_tol = 1e-3) {
+  hdr <- sty$st_hdr; fml <- sty$st_formula; rsrc <- sty$st_rsrc; wrapS <- sty$st_wrap
+  frows <- function(fn, rows) vapply(rows, fn, character(1))
+  wf <- function(sheet, col, x) writeFormula(wb, sheet, x = x, startCol = col, startRow = 2L)
+
+  style_block <- function(sheet, ncol, ndata, formula_cols, rsource_cols,
+                          numfmt = list(), wrap_cols = integer(0), widths = NULL) {
+    addStyle(wb, sheet, hdr, rows = 1, cols = seq_len(ncol), gridExpand = TRUE)
+    if (ndata > 0) {
+      dr <- 2:(ndata + 1L)
+      for (j in formula_cols) addStyle(wb, sheet, fml,  rows = dr, cols = j, gridExpand = TRUE, stack = TRUE)
+      for (j in rsource_cols) addStyle(wb, sheet, rsrc, rows = dr, cols = j, gridExpand = TRUE, stack = TRUE)
+      for (nm in names(numfmt))
+        addStyle(wb, sheet, createStyle(numFmt = numfmt[[nm]]),
+                 rows = dr, cols = as.integer(nm), gridExpand = TRUE, stack = TRUE)
+      for (j in wrap_cols) addStyle(wb, sheet, wrapS, rows = dr, cols = j, gridExpand = TRUE, stack = TRUE)
+    }
+    freezePane(wb, sheet, firstActiveRow = 2, firstActiveCol = 1)
+    addFilter(wb, sheet, rows = 1, cols = seq_len(ncol))
+    if (!is.null(widths)) setColWidths(wb, sheet, cols = seq_len(ncol), widths = widths)
+    setRowHeights(wb, sheet, rows = 1, heights = 28)
+  }
+
+  HP <- "0.000000"; PCT <- "0.000"; PR <- "0.00"; NUM <- "#,##0"; DTHS <- "#,##0.00"
+
+  # ---- CVD_40q30_Age (age-level source rows + live life-table formulas) -----
+  ga <- as.data.table(dt_age)[scenario %in% scen_ids]
+  setorder(ga, location, scenario, htn_target_scenario, year, age)   # contiguous per key
+  age_cols <- c("location","scenario","scenario_label","intervention_family",
+                "htn_target_scenario","year","age","cvd_deaths","population",
+                "m_x","q_x","l_x","l_x_next")
+  AGE <- data.frame(location = ga$location, scenario = ga$scenario,
+                    scenario_label = ga$scenario_label,
+                    intervention_family = ga$intervention_family,
+                    htn_target_scenario = ga$htn_target_scenario,
+                    year = ga$year, age = ga$age,
+                    cvd_deaths = ga$cvd_deaths, population = ga$population,
+                    m_x = NA_real_, q_x = NA_real_, l_x = NA_real_, l_x_next = NA_real_,
+                    stringsAsFactors = FALSE)
+  n_age <- nrow(AGE); r_age <- n_age + 1L
+  addWorksheet(wb, "CVD_40q30_Age")
+  writeData(wb, "CVD_40q30_Age", AGE, headerStyle = hdr)
+  if (n_age > 0) {
+    R <- 2:r_age
+    # m_x = cvd_deaths / population (guarded); q_x = 1 - exp(-m_x)
+    wf("CVD_40q30_Age", 10, frows(function(r) sprintf("IF(I%d>0,H%d/I%d,0)", r, r, r), R))
+    wf("CVD_40q30_Age", 11, frows(function(r) sprintf("1-EXP(-J%d)", r), R))
+    # l_x: 1 at age 30 (first row of each key); else previous row's l_{x+1}
+    wf("CVD_40q30_Age", 12, frows(function(r) sprintf("IF(G%d=30,1,M%d)", r, r - 1L), R))
+    # l_{x+1} = l_x * (1 - q_x)
+    wf("CVD_40q30_Age", 13, frows(function(r) sprintf("L%d*(1-K%d)", r, r), R))
+  }
+  style_block("CVD_40q30_Age", length(age_cols), n_age,
+              formula_cols = 10:13, rsource_cols = c(8, 9),
+              numfmt = c(setNames(list("0"), "6"), setNames(list("0"), "7"),
+                         setNames(list(DTHS), "8"), setNames(list(NUM), "9"),
+                         setNames(rep(list(HP), 4), as.character(10:13))),
+              wrap_cols = 3,
+              widths = pmin(pmax(nchar(age_cols) + 2, 11), 22))
+
+  # ---- CVD_40q30 (period metric per location/scenario/htn/year) -------------
+  gs <- as.data.table(dt40)[scenario %in% scen_ids]
+  setorder(gs, location, scenario, htn_target_scenario, year)
+  s_cols <- c("location","scenario","scenario_label","intervention_family","scenario_role",
+              "parent_package_id","htn_target_scenario","year",
+              "cvd_40q30","baseline_cvd_40q30","absolute_reduction_pp","percent_reduction",
+              "cvd_40q30_r","recon_status")
+  SS <- data.frame(location = gs$location, scenario = gs$scenario,
+                   scenario_label = gs$scenario_label,
+                   intervention_family = gs$intervention_family,
+                   scenario_role = gs$scenario_role,
+                   parent_package_id = gs$parent_package_id,
+                   htn_target_scenario = gs$htn_target_scenario, year = gs$year,
+                   cvd_40q30 = NA_real_, baseline_cvd_40q30 = NA_real_,
+                   absolute_reduction_pp = NA_real_, percent_reduction = NA_real_,
+                   cvd_40q30_r = gs$cvd_40q30, recon_status = NA_character_,
+                   stringsAsFactors = FALSE)
+  n_s <- nrow(SS); r_s <- n_s + 1L
+  addWorksheet(wb, "CVD_40q30")
+  writeData(wb, "CVD_40q30", SS, headerStyle = hdr)
+  if (n_s > 0) {
+    R <- 2:r_s
+    # I cvd_40q30 = 100*(1 - l_70/l_30) via life-table lookup on CVD_40q30_Age.
+    # Age-sheet keys: location(A), scenario(B), htn(E), year(F), age(G);
+    # l_x_next = M (l_70 at age 69), l_x = L (l_30 at age 30). CVD_40q30-row keys:
+    # location(A), scenario(B), htn(G), year(H).
+    lookup <- function(col, age, r) sprintf(
+      paste0("SUMIFS('CVD_40q30_Age'!$%s$2:$%s$%d,",
+             "'CVD_40q30_Age'!$A$2:$A$%d,A%d,",
+             "'CVD_40q30_Age'!$B$2:$B$%d,B%d,",
+             "'CVD_40q30_Age'!$E$2:$E$%d,G%d,",
+             "'CVD_40q30_Age'!$F$2:$F$%d,H%d,",
+             "'CVD_40q30_Age'!$G$2:$G$%d,%d)"),
+      col, col, r_age, r_age, r, r_age, r, r_age, r, r_age, r, r_age, age)
+    wf("CVD_40q30", 9, frows(function(r)
+      sprintf("100*(1-(%s)/(%s))", lookup("M", 69L, r), lookup("L", 30L, r)), R))
+    # J baseline_cvd_40q30 = the baseline scenario's cvd_40q30 at same loc/htn/year.
+    wf("CVD_40q30", 10, frows(function(r) sprintf(
+      paste0("SUMIFS($I$2:$I$%d,$A$2:$A$%d,A%d,$G$2:$G$%d,G%d,$H$2:$H$%d,H%d,",
+             "$B$2:$B$%d,\"%s\")"),
+      r_s, r_s, r, r_s, r, r_s, r, r_s, base_id), R))
+    # K absolute_reduction_pp = baseline - scenario (percentage points)
+    wf("CVD_40q30", 11, frows(function(r) sprintf("J%d-I%d", r, r), R))
+    # L percent_reduction = 100*(baseline-scenario)/baseline; "" if baseline = 0
+    wf("CVD_40q30", 12, frows(function(r)
+      sprintf("IF(J%d=0,\"\",100*(J%d-I%d)/J%d)", r, r, r, r), R))
+    # N recon_status: Excel life-table value vs the R-source anchor within tolerance
+    wf("CVD_40q30", 14, frows(function(r)
+      sprintf("IF(ABS(I%d-M%d)<=%s,\"match\",\"mismatch\")", r, r, format(recon_tol, scientific = FALSE)), R))
+  }
+  style_block("CVD_40q30", length(s_cols), n_s,
+              formula_cols = c(9, 10, 11, 12, 14), rsource_cols = 13,
+              numfmt = c(setNames(list("0"), "8"),
+                         setNames(rep(list(PCT), 3), as.character(c(9, 10, 11))),
+                         setNames(list(PR), "12"), setNames(list(PCT), "13")),
+              wrap_cols = 3,
+              widths = pmin(pmax(nchar(s_cols) + 2, 12), 24))
+  if (n_s > 0) {
+    conditionalFormatting(wb, "CVD_40q30", cols = 14, rows = 2:r_s,
+                          rule = "match", type = "contains", style = sty$cf_pass)
+    conditionalFormatting(wb, "CVD_40q30", cols = 14, rows = 2:r_s,
+                          rule = "mismatch", type = "contains", style = sty$cf_fail)
+  }
+  invisible(c("CVD_40q30_Age", "CVD_40q30"))
+}
+
+# Reference-Case BCA rows for a Calculation_Assumptions sheet (shared by the
+# clinical and public-health formula workbooks). Returns the data.table to rbind
+# onto `ca` and the matching per-value number-format vector.
+bca_ca_block <- function(bca_params) {
+  meta <- data.table(
+    parameter_id = c("bca_base_year","bca_discount_rate_primary","bca_discount_rate_sensitivity_3pct",
+                     "bca_discount_rate_sensitivity_2x_gdp_pc_growth","vsl_us_gni_ratio",
+                     "vsl_income_elasticity_preferred","vsl_floor_gni_multiple",
+                     "vsl_sensitivity_gni_multiple_100","vsl_sensitivity_gni_multiple_160",
+                     "vsly_adult_min_age","vsly_adult_max_age","bca_currency_basis",
+                     "bca_price_year","cost_to_bca_currency_factor","bca_standing","bca_scope",
+                     "bca_discount_rate_sensitivity_2x_gdp_pc_growth_computed"),
+    unit = c("year","proportion/year","proportion/year","proportion/year","ratio (VSL/GNIpc)",
+             "elasticity","ratio (VSL/GNIpc)","ratio (VSL/GNIpc)","ratio (VSL/GNIpc)",
+             "age (years)","age (years)","text","year","int$ per market US$","text","text","proportion/year"),
+    fmt = c("0","0.000","0.000","0.000","0","0.0","0","0","0","0","0",NA,"0","0.00",NA,NA,"0.000"),
+    numeric = c(TRUE,TRUE,TRUE,TRUE,TRUE,TRUE,TRUE,TRUE,TRUE,TRUE,TRUE,FALSE,TRUE,TRUE,FALSE,FALSE,TRUE),
+    description = c("BCA base year (benefits and costs discounted to this year)",
+                    "Primary real discount rate for BOTH benefits and costs",
+                    "Standardized sensitivity discount rate (3%)",
+                    "Standardized sensitivity: 2x near-term real GDP-pc growth (workbook default)",
+                    "US reference VSL-to-GNI-per-capita ratio","Income elasticity of VSL (preferred)",
+                    "Floor: VSL not below this multiple of GNI per capita",
+                    "Sensitivity: VSL = 100x GNI per capita","Sensitivity: VSL = 160x GNI per capita",
+                    "Working-age lower bound (VSLY avg-adult-age)","Working-age upper bound (VSLY avg-adult-age)",
+                    "Common monetary basis for benefits and costs","Real price year for benefits and costs",
+                    "Market-USD cost -> PPP int$ multiplier","BCA standing / perspective",
+                    "BCA scope (partial mortality-benefit vs full societal)",
+                    "2x near-term real GDP-pc growth recomputed from SSP2 by Model 08"),
+    source = "Robinson et al. 2019 Reference Case Guidelines (via input workbook / Model 08)")
+  meta <- meta[parameter_id %in% bca_params$parameter_id]
+  val  <- setNames(as.character(bca_params$value), bca_params$parameter_id)
+  ca_bca <- data.table(
+    parameter_id = meta$parameter_id,
+    value = lapply(seq_len(nrow(meta)), function(i) {
+      v <- val[[meta$parameter_id[i]]]
+      if (isTRUE(meta$numeric[i])) as.numeric(v) else v }),
+    unit = meta$unit, role = "BCA control", description = meta$description, source = meta$source)
+  list(ca_bca = ca_bca, fmt = meta$fmt)
 }
 
 ## --- 0. Resolve execution metaparameters (single source of truth: Model 00) --
@@ -129,6 +546,50 @@ missc <- setdiff(req, names(mo_all))
 if (length(missc))
   stop("Model 09: Model 06 output missing required column(s): ",
        paste(missc, collapse = ", "))
+
+## --- 1b. REQUIRED upstream contracts: Model 07 (health) + Model 08 (value) --
+# Model 09 now depends on BOTH Model 07 (health outcomes / life expectancy) and
+# Model 08 (economic value). Fail once, with a consolidated, actionable message,
+# rather than silently omitting economic value.
+.m07_file <- file.path(wd_outp, "dt_output_dalys.rds")
+.m08_file <- file.path(wd_outp, "08_vsl_results.rds")
+.bca_file <- file.path(wd_outp, "08_bca_parameters.rds")
+.q40_file <- file.path(wd_outp, "07_cvd_40q30.rds")
+.q40age_file <- file.path(wd_outp, "07_cvd_40q30_age.rds")
+.missing_up <- character(0)
+if (!file.exists(.m07_file)) .missing_up <- c(.missing_up,
+  paste0("Model 07 output not found (", .m07_file, ") -- run 07_output_dalys.R"))
+if (!file.exists(.m08_file)) .missing_up <- c(.missing_up,
+  paste0("Model 08 output not found (", .m08_file, ") -- run 08_economic_value_calculation.R"))
+if (!file.exists(.bca_file)) .missing_up <- c(.missing_up,
+  paste0("Model 08 BCA parameters not found (", .bca_file, ") -- re-run Model 08"))
+if (!file.exists(.q40_file)) .missing_up <- c(.missing_up,
+  paste0("Model 07 CVD 40q30 output not found (", .q40_file, ") -- re-run 07_output_dalys.R"))
+if (!file.exists(.q40age_file)) .missing_up <- c(.missing_up,
+  paste0("Model 07 CVD 40q30 age audit not found (", .q40age_file, ") -- re-run 07_output_dalys.R"))
+if (length(.missing_up))
+  stop("Model 09 required upstream inputs are missing:\n  - ",
+       paste(.missing_up, collapse = "\n  - "), call. = FALSE)
+dt_h07     <- as.data.table(readRDS(.m07_file))
+ev08       <- as.data.table(readRDS(.m08_file))
+bca_params <- as.data.table(readRDS(.bca_file))
+dt_cvd_40q30 <- as.data.table(readRDS(.q40_file))
+cvd_age_40q30 <- as.data.table(readRDS(.q40age_file))
+# Reconcile scenario IDs across Models 06/07/08 (exact-ID match, not name-guessing).
+.scn06 <- unique(mo_all$scenario); .scn07 <- unique(dt_h07$scenario); .scn08 <- unique(ev08$scenario)
+.miss0708 <- setdiff(setdiff(.scn06, baseline_scenario_id), .scn07)
+if (length(.miss0708))
+  stop("Model 09: scenario(s) in Model 06 but absent from Model 07 output: ",
+       paste(.miss0708, collapse = ", "), "\n  Re-run Model 07 on the current run.", call. = FALSE)
+# CVD 40q30 must cover every current-run scenario (staleness guard).
+.scn40 <- unique(dt_cvd_40q30$scenario)
+.miss40 <- setdiff(.scn06, .scn40)
+if (length(.miss40))
+  stop("Model 09: scenario(s) in Model 06 but absent from the CVD 40q30 output (",
+       paste(.miss40, collapse = ", "), "). The 07_cvd_40q30.rds contract is stale; ",
+       "re-run 07_output_dalys.R on the current run.", call. = FALSE)
+# Resolved BCA parameters as a named character vector for downstream cell writing.
+BCAP <- setNames(as.character(bca_params$value), bca_params$parameter_id)
 
 # ==========================================================================
 # CLINICAL (FAIR Choices) cost/value workbooks -- written only when clinical
@@ -613,24 +1074,65 @@ add_sheet("Selected_Interventions", sel_out)
 if (nrow(blocked_out)) add_sheet("Blocked_Links", blocked_out)
 add_sheet("Cost_Components", cost_out)
 add_sheet("Annual_Mortality", mort)
+
+## Reference-Case BCA value tables (R values, synchronized with the formula
+## workbook's Health_Outcomes / Economic_Value / Benefit_Cost sheets). Health
+## outcomes come from Model 07; VSL/VSLY from Model 08; PV costs from Budget_Impact
+## converted to the benefit basis via cost_to_bca_currency_factor.
+.cf <- suppressWarnings(as.numeric(BCAP[["cost_to_bca_currency_factor"]])); if (is.na(.cf)) .cf <- 1
+.cmpR <- comparators
+ho_val <- dt_h07[scenario %in% .cmpR, .(
+  scenario_label = scenario_label[1L], deaths_averted = sum(deaths_averted),
+  cases_averted = sum(cases_averted), yll_averted = sum(yll_averted),
+  yld_averted = sum(yld_averted), dalys_averted = sum(dalys_averted),
+  life_years_gained = sum(life_years_gained)), by = .(scenario, year)]
+setcolorder(ho_val, c("scenario", "scenario_label", "year")); setorder(ho_val, scenario, year)
+ev_val <- ev08[scenario %in% .cmpR, .(
+  scenario, scenario_label, year, deaths_averted,
+  life_years_gained = life_years_gained_undisc,
+  gni_pc_idn = gni_pc_ppp, gni_pc_usa, population, le_avg_adult,
+  vsl_preferred, vsl_gni100, vsl_gni160, vsly_preferred,
+  econ_value_vsl_undisc  = economic_value_preferred,
+  econ_value_vsly_undisc = vsly_value_preferred,
+  disc_factor = disc_bca_primary,
+  pv_vsl_pref  = economic_value_preferred_disc,
+  pv_vsly_pref = vsly_value_preferred * disc_bca_primary,
+  total_national_gni)]
+setorder(ev_val, scenario, year)
+.pvb <- ev08[scenario %in% .cmpR, .(
+  VSL_preferred  = sum(economic_value_preferred_disc, na.rm = TRUE),
+  VSLY_preferred = sum(vsly_value_preferred * disc_bca_primary, na.rm = TRUE),
+  VSL_100xGNI    = sum(economic_value_gni100 * disc_bca_primary, na.rm = TRUE),
+  VSL_160xGNI    = sum(economic_value_gni160 * disc_bca_primary, na.rm = TRUE),
+  pv_national_gni = sum(total_national_gni * disc_bca_primary, na.rm = TRUE)), by = scenario]
+.pvc <- if (nrow(bi)) bi[scenario %in% .cmpR, .(pv_costs = sum(disc_incremental_cost) * .cf), by = scenario] else
+  data.table(scenario = .cmpR, pv_costs = 0)
+.lab <- unique(dt_h07[scenario %in% .cmpR, .(scenario, scenario_label, intervention_family)])
+bc_val <- rbindlist(lapply(c("VSL_preferred","VSLY_preferred","VSL_100xGNI","VSL_160xGNI"), function(cs) {
+  b <- merge(.pvb[, .(scenario, pv_benefits = get(cs), pv_national_gni)], .pvc, by = "scenario", all.x = TRUE)
+  b[is.na(pv_costs), pv_costs := 0]
+  b <- merge(.lab, b, by = "scenario")
+  b[, `:=`(valuation_method = if (grepl("VSLY", cs)) "VSLY" else "VSL", valuation_case = cs,
+           pv_net_benefit = pv_benefits - pv_costs,
+           benefit_cost_ratio = fifelse(pv_costs > 0, pv_benefits / pv_costs, NA_real_),
+           benefit_gni_share  = fifelse(pv_national_gni > 0, pv_benefits / pv_national_gni, NA_real_))]
+  b[, decision := fifelse(pv_costs <= 0, "cost-saving or ratio not meaningful (PV cost<=0)",
+                   fifelse(pv_benefits / pv_costs >= 1, "benefits exceed costs (BCR>=1)",
+                           "costs exceed benefits (BCR<1)"))]
+  b }))
+bc_val[, scope_note := paste0("Partial mortality-benefit BCA: benefits = averted-mortality VSL/VSLY (PPP int$); ",
+       "costs = implementation/health-system converted to PPP int$; omits morbidity, productivity, downstream offsets.")]
+setcolorder(bc_val, c("scenario","scenario_label","intervention_family","valuation_method","valuation_case",
+                      "pv_benefits","pv_costs","pv_net_benefit","benefit_cost_ratio","pv_national_gni",
+                      "benefit_gni_share","decision","scope_note"))
+setorder(bc_val, scenario, valuation_method, valuation_case)
+
+add_sheet("Health_Outcomes", ho_val)
 if (nrow(annual_cost)) add_sheet("Annual_Cost", annual_cost)
 if (nrow(bi))          add_sheet("Budget_Impact", bi)
 add_sheet("Cost_Effectiveness", cea)
-if (!is.null(econ_value)) {
-  addWorksheet(wb, "Economic_Value")
-  writeData(wb, "Economic_Value",
-            paste0("Reused from Model 08 (VSL/VSLY). ", econ_note),
-            startRow = 1)
-  addStyle(wb, "Economic_Value", st_wrap, rows = 1, cols = 1)
-  writeData(wb, "Economic_Value", as.data.frame(econ_value), startRow = 3, headerStyle = st_hdr)
-  freezePane(wb, "Economic_Value", firstActiveRow = 4)
-  setColWidths(wb, "Economic_Value", cols = 1:ncol(econ_value),
-               widths = pmin(pmax(nchar(names(econ_value)) + 2, 12), 30))
-} else {
-  addWorksheet(wb, "Economic_Value")
-  writeData(wb, "Economic_Value", data.frame(note = econ_note), headerStyle = st_hdr)
-  setColWidths(wb, "Economic_Value", cols = 1, widths = 110)
-}
+add_sheet("Economic_Value", ev_val)
+add_sheet("Benefit_Cost", bc_val)
 add_sheet("QA_Checks", qa_dt)
 if (nrow(diag_out)) add_sheet("Input_Diagnostic", diag_out)
 add_sheet("Methods_and_Sources", methods)
@@ -861,6 +1363,13 @@ ca <- data.table(
              "Model 09 export rule", rep("Model 09 current run", 3),
              rep("Model 09 current run (R CEA)", 4)))
 
+# --- Append the Reference-Case BCA parameters (Model 08 resolved set) as editable
+#     controls that anchor the VSL/VSLY/Benefit-Cost formulas below. -----------
+.bcab <- bca_ca_block(bca_params)
+n_ca_core <- nrow(ca)
+ca <- rbind(ca, .bcab$ca_bca)
+bca_fmt_vec <- .bcab$fmt
+
 addWorksheet(wb, "Calculation_Assumptions")
 writeData(wb, "Calculation_Assumptions",
           data.frame(parameter_id = "parameter_id", value = "value", unit = "unit",
@@ -872,28 +1381,45 @@ writeData(wb, "Calculation_Assumptions",
           startCol = 3, startRow = 2, colNames = FALSE)
 for (i in seq_len(nrow(ca)))
   writeData(wb, "Calculation_Assumptions", ca$value[[i]], startCol = 2, startRow = 1 + i, colNames = FALSE)
-# fills: editable inputs (B2:B13) yellow; R-source/reconciliation (B14:B20) grey
+# fills: editable inputs (B2:B13) + BCA controls yellow; R-source (B14:B20) grey
 addStyle(wb, "Calculation_Assumptions", st_hdr, rows = 1, cols = 1:6, gridExpand = TRUE)
 addStyle(wb, "Calculation_Assumptions", st_input, rows = 2:13, cols = 2, gridExpand = TRUE, stack = TRUE)
 addStyle(wb, "Calculation_Assumptions", st_rsrc,  rows = 14:20, cols = 2, gridExpand = TRUE, stack = TRUE)
-# per-value number formats
+addStyle(wb, "Calculation_Assumptions", st_input,
+         rows = (n_ca_core + 2L):(nrow(ca) + 1L), cols = 2, gridExpand = TRUE, stack = TRUE)  # BCA controls
+# per-value number formats (core 19 rows + appended BCA rows)
 ca_fmt <- c("0","0",NA,"0.0%","0",NA,NA,NA,"0","0.000","#,##0","0",
-            "#,##0.0","0","0","#,##0","#,##0","#,##0.00",NA)
+            "#,##0.0","0","0","#,##0","#,##0","#,##0.00",NA, bca_fmt_vec)
 for (i in seq_along(ca_fmt)) if (!is.na(ca_fmt[i]))
   addStyle(wb, "Calculation_Assumptions", createStyle(numFmt = ca_fmt[i]),
            rows = 1 + i, cols = 2, gridExpand = TRUE, stack = TRUE)
 addStyle(wb, "Calculation_Assumptions", st_wrap, rows = 2:(nrow(ca)+1), cols = 5, gridExpand = TRUE, stack = TRUE)
 freezePane(wb, "Calculation_Assumptions", firstActiveRow = 2)
 addFilter(wb, "Calculation_Assumptions", rows = 1, cols = 1:6)
-setColWidths(wb, "Calculation_Assumptions", cols = 1:6, widths = c(30, 16, 14, 24, 62, 40))
+setColWidths(wb, "Calculation_Assumptions", cols = 1:6, widths = c(38, 16, 16, 24, 62, 40))
 setRowHeights(wb, "Calculation_Assumptions", rows = 1, heights = 28)
+
+# BCA cell references (row = position in ca + 1 header) for the formula sheets.
+.carow <- function(pid) match(pid, ca$parameter_id) + 1L
+.bcell <- function(pid) sprintf("'Calculation_Assumptions'!$B$%d", .carow(pid))
+bca_cells_clin <- list(
+  ratio     = .bcell("vsl_us_gni_ratio"),
+  elast     = .bcell("vsl_income_elasticity_preferred"),
+  floor     = .bcell("vsl_floor_gni_multiple"),
+  mult100   = .bcell("vsl_sensitivity_gni_multiple_100"),
+  mult160   = .bcell("vsl_sensitivity_gni_multiple_160"),
+  r_primary = .bcell("bca_discount_rate_primary"),
+  base_year = .bcell("bca_base_year"),
+  price_year  = .bcell("bca_price_year"),
+  cost_factor = .bcell("cost_to_bca_currency_factor"),
+  scope     = .bcell("bca_scope"))
 
 # =========================================================================
 # 11.4 README (narrative + colour legend)
 # =========================================================================
 readme_f <- data.table(
   section = c("Purpose","How to read","Scenarios","Baseline pairing",
-              "Model aggregates","Costing","Shared costs","Budget impact",
+              "CVD 40q30","Model aggregates","Costing","Shared costs","Budget impact",
               "Cost-effectiveness","Economic value","QA & reconciliation",
               "Colour legend","Companion workbook","Deferred"),
   detail = c(
@@ -901,16 +1427,17 @@ readme_f <- data.table(
     "Grey cells are R-generated source values; light-blue cells are LIVE Excel formulas; pale-yellow cells on Calculation_Assumptions are editable controls. Change a yellow control and the blue results recompute. Calculation_Map lists every dependency.",
     "Baseline + one scenario per selected valid intervention + a combined 'all' scenario. Membership derives only from the workbook selections (Model 04).",
     "Deaths averted = baseline deaths - scenario deaths, matched at location x year x age x sex x cause (aggregated to year x cause here).",
+    "CVD_40q30 / CVD_40q30_Age give the period probability of dying from the six CVD causes (ihd, istroke, hstroke, hhd, rhd, cmd) between exact ages 30 and 70, per scenario/HTN-target/year. The life table (m_x, q_x, l_x, l_{x+1}) is live Excel formula off grey CVD deaths and de-duplicated population; cvd_40q30 = 100*(1-l_70/l_30) reconciles to the Model 07 value. cvd_40q30 and the absolute reduction are PERCENT on a 0-100 scale (format 0.000), NOT Excel's fractional %.",
     "Annual_Mortality carries the R health aggregates (cases, deaths, baseline); Annual_Cost carries the full-precision R population quantity before the PIN fraction. The 157k-row state trace stays in the companion R workbook.",
     "annual_cost = population_in_need x coverage(t) x frequency x unit_cost. PIN measure maps 'all'->eligible population, 'prevalence'->sick stock, 'incidence'->new cases.",
     "Components flagged 'shared-count-once' (cost_join_key ...__C_SHARED) are counted once at intervention level, never once per affected cause (see Annual_Cost shared_duplicate_count and QA).",
     "Budget impact reports UNDISCOUNTED baseline, scenario, incremental and cumulative incremental cost. Discounted costs are separate columns.",
     "USD per death averted = cumulative discounted incremental cost / cumulative (undiscounted) deaths averted over the horizon. Not a DALY-based ICER.",
-    "Value of statistical life (VSL/VSLY) is reused from Model 08 as R source values; only the cost link, supplementary benefit-cost ratio and net benefit are recalculated here.",
-    "QA_Checks recomputes each invariant in Excel and reconciles the Excel cost-effectiveness headline against the R engine values stored on Calculation_Assumptions. PASS/FAIL/REVIEW are conditionally formatted.",
+    "Reference-Case benefit-cost analysis (2019 Robinson et al. Guidelines): Health_Outcomes (Model 07 averted deaths/YLL/YLD/DALY & life-years gained), Economic_Value (Model 08 VSL/VSLY source with LIVE VSL-transfer, floor, VSLY, discount and PV-benefit formulas) and Benefit_Cost (PV benefits, PV costs converted to the benefit basis, net benefit and BCR). Preferred VSL = MAX(160xGNIpc_US x (GNIpc_IDN/GNIpc_US)^1.5, 20xGNIpc_IDN); 100x/160x GNI sensitivities. PARTIAL mortality-benefit BCA -- not a full societal BCA, and distinct from Cost_Effectiveness (USD per death averted).",
+    "QA_Checks recomputes each invariant in Excel and reconciles the Excel cost-effectiveness headline against the R engine values stored on Calculation_Assumptions; BCA checks cover the VSL floor, reference-case parameters, price-year basis and Benefit_Cost scenario coverage. PASS/FAIL/REVIEW are conditionally formatted.",
     "Header dark-blue; formula-derived light-blue; R source/helper grey; editable controls pale-yellow; PASS green; FAIL/REVIEW red/orange.",
     "The full R-value workbook (indonesia_model_cost_value.xlsx) keeps the detailed Model_State_Trace and Background_Mortality tables for independent review.",
-    "DALYs, YLL, YLD, disability weights and life-expectancy outcomes are deferred to later work and are NOT in this workbook."))
+    "Health outcomes (deaths averted, YLL/YLD/DALY averted, life-years gained) now come from Model 07 (Health_Outcomes); life-expectancy and disability-weight sources are documented via Model 07."))
 addWorksheet(wb, "README")
 writeData(wb, "README", "Indonesia NCD FAIR Choices - cost & value workbook (formula edition)", startRow = 1)
 addStyle(wb, "README", st_title, rows = 1, cols = 1)
@@ -1141,57 +1668,44 @@ conditionalFormatting(wb, "Cost_Effectiveness", cols = 9, rows = 2:r_ce, rule = 
 conditionalFormatting(wb, "Cost_Effectiveness", cols = 8, rows = 2:r_ce, rule = "Dominated",  type = "contains", style = cf_rev)
 
 # =========================================================================
-# 11.13 Economic_Value  (R VSL/VSLY source B:L; M:Q = formulas) -------------
+# 11.13 Health_Outcomes + Economic_Value + Benefit_Cost (Reference-Case BCA) --
 # =========================================================================
-addWorksheet(wb, "Economic_Value")
-if (!is.null(econ_value)) {
-  ev <- as.data.frame(econ_value)
-  ev_names <- names(ev)
-  val_cols <- ev_names[grepl("^economic_value_|^vsly_value_", ev_names)]
-  n_val <- length(val_cols)
-  col_ic  <- 2L + n_val                      # incremental_cost column index (after model08_deaths_averted)
-  # locate the central VSL benefit column (elasticity 1.2) used for BCR / net benefit
-  cen <- if ("economic_value_e1_2" %in% val_cols) "economic_value_e1_2" else val_cols[1]
-  cen_idx <- match(cen, ev_names)            # column index of cen (economic_value_e1_2) in the written frame
-  # blank the five formula columns before writing
-  ev$incremental_cost <- NA_real_; ev$disc_incremental_cost <- NA_real_
-  ev$deaths_averted <- NA_real_; ev$benefit_cost_ratio_supp <- NA_real_
-  ev$net_benefit_supp_usd <- NA_real_
-  writeData(wb, "Economic_Value",
-            paste0("Supplementary benefit-cost view (NOT cost-effectiveness). ", econ_note),
-            startRow = 1)
-  addStyle(wb, "Economic_Value", st_wrap, rows = 1, cols = 1)
-  writeData(wb, "Economic_Value", ev, startRow = 3, headerStyle = st_hdr)
-  nrev <- nrow(ev); r0 <- 4L; rN <- 3L + nrev
-  Lic <- int2col(col_ic + 1L); Ldc <- int2col(col_ic + 2L); Lda <- int2col(col_ic + 3L)
-  Lcen <- int2col(cen_idx)
-  Rrows <- r0:rN
-  writeFormula(wb, "Economic_Value", startCol = col_ic + 1L, startRow = r0,
-               x = frows(function(r) idx_ce("E", r), Rrows))                    # incremental_cost
-  writeFormula(wb, "Economic_Value", startCol = col_ic + 2L, startRow = r0,
-               x = frows(function(r) idx_ce("F", r), Rrows))                    # disc_incremental_cost
-  writeFormula(wb, "Economic_Value", startCol = col_ic + 3L, startRow = r0,
-               x = frows(function(r) idx_ce("C", r), Rrows))                    # deaths_averted
-  writeFormula(wb, "Economic_Value", startCol = col_ic + 4L, startRow = r0,
-               x = frows(function(r) sprintf("IF(%s%d=0,\"\",%s%d/%s%d)", Lic, r, Lcen, r, Lic, r), Rrows))  # BCR
-  writeFormula(wb, "Economic_Value", startCol = col_ic + 5L, startRow = r0,
-               x = frows(function(r) sprintf("%s%d-%s%d", Lcen, r, Lic, r), Rrows))                          # net benefit
-  # styling: header row 3, grey R-source B:col_ic, formula col_ic+1 : col_ic+5
-  ncE <- ncol(ev)
-  addStyle(wb, "Economic_Value", st_hdr, rows = 3, cols = 1:ncE, gridExpand = TRUE)
-  addStyle(wb, "Economic_Value", st_rsrc, rows = r0:rN, cols = 2:col_ic, gridExpand = TRUE, stack = TRUE)
-  addStyle(wb, "Economic_Value", st_formula, rows = r0:rN, cols = (col_ic + 1L):(col_ic + 5L), gridExpand = TRUE, stack = TRUE)
-  for (j in seq_len(ncE)) {
-    f <- fmt_of2(names(ev)[j]); if (!is.na(f))
-      addStyle(wb, "Economic_Value", createStyle(numFmt = f), rows = r0:rN, cols = j, gridExpand = TRUE, stack = TRUE)
-  }
-  freezePane(wb, "Economic_Value", firstActiveRow = 4)
-  addFilter(wb, "Economic_Value", rows = 3, cols = 1:ncE)
-  setColWidths(wb, "Economic_Value", cols = 1:ncE, widths = pmin(pmax(nchar(names(ev)) + 2, 12), 30))
-} else {
-  writeData(wb, "Economic_Value", data.frame(note = econ_note), headerStyle = st_hdr)
-  setColWidths(wb, "Economic_Value", cols = 1, widths = 110)
-}
+# Built by the shared formula-driven builder off Model 07 (health) and Model 08
+# (value), restricted to the clinical comparator scenarios. Every derived cell is
+# a live Excel formula anchored to the BCA controls on Calculation_Assumptions.
+.cmp <- comparators
+ho_src_clin <- dt_h07[scenario %in% .cmp, .(
+  scenario_label = scenario_label[1L],
+  modeled_deaths = sum(deaths),   baseline_deaths = sum(base_deaths),
+  modeled_cases  = sum(newcases), baseline_cases  = sum(base_newcases),
+  yll = sum(yll), base_yll = sum(base_yll),
+  yld = sum(yld), base_yld = sum(base_yld),
+  daly = sum(daly), base_daly = sum(base_daly)),
+  by = .(scenario, year)]
+ev_src_clin <- ev08[scenario %in% .cmp, .(
+  scenario_label    = scenario_label[1L],
+  deaths_averted    = sum(deaths_averted),
+  life_years_gained = sum(life_years_gained_undisc),
+  gni_pc_idn = gni_pc_ppp[1L], gni_pc_usa = gni_pc_usa[1L],
+  population = population[1L],  le_avg_adult = le_avg_adult[1L]),
+  by = .(scenario, year)]
+scen_meta_clin <- unique(dt_h07[scenario %in% .cmp, .(
+  scenario, scenario_label, intervention_family,
+  scenario_level = fifelse(scenario %in% c("all", "all_public_health"), "combined",
+                    fifelse(is.na(scenario_role), "standalone", scenario_role)))])
+sty_clin <- list(st_hdr = st_hdr, st_formula = st_formula, st_rsrc = st_rsrc,
+                 st_input = st_input, st_wrap = st_wrap,
+                 cf_pass = cf_pass, cf_fail = cf_fail, cf_rev = cf_rev)
+build_bca_sheets_into(wb, .cmp, ho_src_clin, ev_src_clin, scen_meta_clin,
+                      bca_cells_clin, r_bi, sty_clin)
+
+# =========================================================================
+# 11.13b CVD_40q30_Age + CVD_40q30 (formula-driven period CVD 40q30) --------
+# =========================================================================
+# Baseline + the clinical comparators. The baseline id must be included so the
+# on-sheet baseline SUMIFS resolves.
+build_cvd_40q30_sheets_into(wb, c(base_id, comparators), dt_cvd_40q30, cvd_age_40q30,
+                            base_id, sty_clin)
 
 # =========================================================================
 # 11.14 Input_Diagnostic  (R values; severity conditionally formatted)
@@ -1278,6 +1792,39 @@ qa_status <- c(
   "IF(ABS(C12-'Calculation_Assumptions'!$B$17)<=ABS('Calculation_Assumptions'!$B$17)*0.000001+0.5,\"PASS\",\"FAIL\")",
   "IF(ABS(C13-'Calculation_Assumptions'!$B$18)<=ABS('Calculation_Assumptions'!$B$18)*0.000001+1,\"PASS\",\"FAIL\")",
   "IF(ABS(C14-'Calculation_Assumptions'!$B$19)<=ABS('Calculation_Assumptions'!$B$19)*0.000001+1,\"PASS\",\"FAIL\")")
+# --- Reference-Case BCA QA (rows 15-18): VSL floor, unchanged reference-case
+#     parameters, benefit/cost price-year basis, Benefit_Cost scenario coverage.
+.rev_c <- nrow(ev_src_clin) + 1L; .rho_c <- nrow(ho_src_clin) + 1L
+.rbc_c <- nrow(scen_meta_clin) * 4L + 1L
+qa_check  <- c(qa_check,
+  "VSL floor applied (preferred VSL >= 20x GNI floor)",
+  "Reference-case VSL parameters (elasticity 1.5, US ratio 160, 20x floor)",
+  "Benefit and cost on the same price year (BCA basis)",
+  "Benefit_Cost scenarios all present in Health_Outcomes")
+qa_expect <- c(qa_expect, "0", "as_specified", "match", "0")
+qa_note   <- c(qa_note,
+  "No Economic_Value row has preferred VSL below the 20x GNI-per-capita floor",
+  "Reference case = elasticity 1.5 transfer, 160x US ratio, 20x GNI floor (Robinson et al. 2019)",
+  "bca_price_year equals the cost price year, so benefits and costs share a real price basis",
+  "Every scenario x valuation-case row in Benefit_Cost has a matching Health_Outcomes scenario")
+qa_actual <- c(qa_actual,
+  sprintf("SUMPRODUCT(('Economic_Value'!$L$2:$L$%d<'Economic_Value'!$K$2:$K$%d)*1)", .rev_c, .rev_c),
+  sprintf("IF(AND(%s=1.5,%s=160,%s=20),\"as_specified\",\"edited\")",
+          bca_cells_clin$elast, bca_cells_clin$ratio, bca_cells_clin$floor),
+  sprintf("IF(%s=%s,\"match\",\"mismatch\")", bca_cells_clin$price_year, .bcell("cost_price_year")),
+  sprintf("SUMPRODUCT((COUNTIF('Health_Outcomes'!$A$2:$A$%d,'Benefit_Cost'!$A$2:$A$%d)=0)*1)", .rho_c, .rbc_c))
+qa_status <- c(qa_status,
+  "IF(C15=0,\"PASS\",\"FAIL\")",
+  "IF(C16=\"as_specified\",\"PASS\",\"REVIEW\")",
+  "IF(C17=\"match\",\"PASS\",\"REVIEW\")",
+  "IF(C18=0,\"PASS\",\"FAIL\")")
+# --- CVD 40q30 reconciliation (row 19): Excel life-table vs the R anchor -------
+.rq40_c <- nrow(dt_cvd_40q30[scenario %in% c(base_id, comparators)]) + 1L
+qa_check  <- c(qa_check,  "CVD 40q30 Excel vs R (all rows match)")
+qa_expect <- c(qa_expect, "0")
+qa_note   <- c(qa_note,   "CVD_40q30 recon_status has no 'mismatch' (life-table formula reconciles to Model 07)")
+qa_actual <- c(qa_actual, sprintf("COUNTIF('CVD_40q30'!$N$2:$N$%d,\"mismatch\")", .rq40_c))
+qa_status <- c(qa_status, "IF(C19=0,\"PASS\",\"FAIL\")")
 qa_df <- data.frame(check = qa_check, expected = qa_expect,
                     actual = NA, status = NA_character_, note = qa_note, stringsAsFactors = FALSE)
 addWorksheet(wb, "QA_Checks")
@@ -1295,13 +1842,22 @@ conditionalFormatting(wb, "QA_Checks", cols = 4, rows = 2:r_qa, rule = "REVIEW",
 # 11.16 Methods_and_Sources + Calculation_Map
 # =========================================================================
 methods_f <- rbind(as.data.frame(methods), data.frame(
-  method_id = c("M12","M13","M14"),
-  concept = c("Excel formula lineage","PIN audit quantities","Economic value boundary"),
+  method_id = c("M12","M13","M14","M15","M16","M17","M18"),
+  concept = c("Excel formula lineage","PIN audit quantities",
+              "Reference-Case VSL transfer","Constant VSLY",
+              "BCA discounting & monetary basis","Benefit-cost ratio & net benefit",
+              "CVD 40q30 (period life table)"),
   formula_or_rule = c(
     "Formula-derived cells are light blue and depend on visible grey R source/helper cells; Calculation_Map lists the dependency chain.",
     "r_quantity_scenario/baseline (Annual_Cost AF:AG) retain the full-precision R population quantity used before the PIN fraction.",
-    "Model 08 monetary value columns are R source values; only the cost link, supplementary BCR and net benefit are recalculated here."),
-  source = c("This workbook","Model 09 and this workbook","Model 08 / Model 09"),
+    "Preferred VSL = MAX(vsl_us_gni_ratio*GNIpc_US*(GNIpc_IDN/GNIpc_US)^income_elasticity, vsl_floor_gni_multiple*GNIpc_IDN); standardized sensitivities VSL = 100x and 160x GNIpc (Economic_Value J:P,N,O).",
+    "VSLY = preferred VSL / undiscounted remaining LE at the average age of the working-age (vsly_adult_min_age..max_age) population; applied to Model 07 age-specific life-years gained (not an algebraic identity with VSL).",
+    "Benefits and costs are discounted to bca_base_year at bca_discount_rate_primary; VSL benefits are PPP international dollars; market-USD costs are converted to that basis via cost_to_bca_currency_factor (never assumed 1).",
+    "BCR = PV benefits / PV costs and net benefit = PV benefits - PV costs, on ONE base year, rate, price year and currency basis (Benefit_Cost). This is a PARTIAL mortality-benefit BCA, not cost-effectiveness (USD per death averted).",
+    "Period CVD 40q30 over the six CVD causes (ihd, istroke, hstroke, hhd, rhd, cmd), exact ages 30-69: sexes combined before the rate, m_x=(D_F+D_M)/(N_F+N_M), q_x=1-EXP(-m_x), l_30=1, l_{x+1}=l_x(1-q_x), 40q30=100*(1-l_70/l_30). CVD_40q30_Age carries the live life-table formulas; CVD_40q30 has the metric, shared-baseline pairing, absolute (pp) and relative (%) reduction, all reconciled to the Model 07 R value. cvd_40q30 is a PERCENT on a 0-100 scale (format 0.000, not Excel %). Population is de-duplicated across causes (never summed over the six causes)."),
+  source = c("This workbook","Model 09 and this workbook",
+             rep("Robinson et al. 2019 Reference Case Guidelines / Model 08", 4),
+             "Model 07 (07_cvd_40q30.rds) / Model 09"),
   stringsAsFactors = FALSE))
 addWorksheet(wb, "Methods_and_Sources")
 writeData(wb, "Methods_and_Sources", methods_f, headerStyle = st_hdr)
@@ -1311,29 +1867,36 @@ setColWidths(wb, "Methods_and_Sources", cols = 1:4, widths = c(10, 26, 88, 58))
 
 cmap <- data.table(
   output_sheet = c("Selected_Interventions","Cost_Components","Annual_Mortality",
-                   "Annual_Cost","Annual_Cost","Budget_Impact","Cost_Effectiveness",
-                   "Economic_Value","QA_Checks","Run_Metadata","Companion R workbook"),
-  formula_columns = c("P, U:V","S:V, X","H, J","J:AE, AH","AF:AG","C:H","C:I","M:Q",
-                      "C:D","B8:B16 (subset)","none"),
+                   "Health_Outcomes","CVD_40q30_Age","CVD_40q30","Annual_Cost","Annual_Cost","Budget_Impact","Cost_Effectiveness",
+                   "Economic_Value","Benefit_Cost","QA_Checks","Run_Metadata","Companion R workbook"),
+  formula_columns = c("P, U:V","S:V, X","H, J","F,I,L,O,R,S","J:M","I,J,K,L,N","J:AE, AH","AF:AG","C:H","C:I",
+                      "J:AB","G:M","C:D","B8:B16 (subset)","none"),
   depends_on = c("selected health links (J:M)","Selected_Interventions",
-                 "R aggregates E:G, I","Cost_Components; Calculation_Assumptions; R quantity AF:AG",
+                 "R aggregates E:G, I","Model 07 modeled/baseline health (grey D:E,G:H,J:K,M:N,P:Q)",
+                 "CVD deaths + de-duplicated population (grey H:I)","CVD_40q30_Age life table; baseline SUMIFS; R anchor (M)",
+                 "Cost_Components; Calculation_Assumptions; R quantity AF:AG",
                  "full-precision Model 06 output","Annual_Cost",
                  "Annual_Mortality; Budget_Impact; Calculation_Assumptions",
-                 "Cost_Effectiveness; Model 08 values B:L","calculation + diagnostic sheets",
+                 "Model 08 source (grey D:I); Calculation_Assumptions BCA controls",
+                 "Economic_Value PV benefits; Budget_Impact costs; Calculation_Assumptions",
+                 "calculation + diagnostic sheets",
                  "Calculation_Assumptions","Model 06 / Model 09"),
   calculation = c("Adjusted effect at target; key uniqueness/status",
                   "Coverage link (INDEX/MATCH) and cost-readiness rule",
                   "Deaths averted and cases averted",
+                  "Deaths/cases/YLL/YLD/DALY averted and life-years gained (baseline - intervention)",
+                  "m_x=deaths/pop, q_x=1-EXP(-m_x), recursive l_x, l_{x+1} (period life table, ages 30-69)",
+                  "CVD 40q30 = 100*(1-l_70/l_30); baseline-paired absolute (pp) & relative (%) reduction; R reconciliation",
                   "Coverage path, PIN, annual + discounted cost, shared-cost QA",
                   "Scenario/baseline quantity before the PIN fraction",
                   "Annual and cumulative cost by scenario",
                   "Cumulative health, cost, cost/death, dominance, reconciliation",
-                  "Cost link, supplementary benefit-cost ratio and net benefit",
+                  "Reference-Case VSL (elast 1.5 + 20x floor) & 100x/160x, VSLY, undisc & PV benefits, GNI shares",
+                  "PV benefits, PV costs (to PPP int$), net benefit, BCR, benefit/GNI, decision (partial BCA)",
                   "Invariant recomputation and Excel-vs-R reconciliation status",
                   "Metadata pulled from the assumptions controls",
                   "Detailed Model_State_Trace and Background_Mortality"),
-  source_role = c(rep("Workbook formula", 4), "R value exposed for audit",
-                  rep("Workbook formula", 4), "Workbook formula", "R source data"))
+  source_role = c(rep("Workbook formula", 13), "Workbook formula", "R source data"))
 addWorksheet(wb, "Calculation_Map")
 writeData(wb, "Calculation_Map", cmap, headerStyle = st_hdr)
 style_sheet("Calculation_Map", names(cmap), nrow(cmap), wrap_cols = c(3, 4), filter = FALSE, max_w = 56)
@@ -1343,8 +1906,9 @@ setColWidths(wb, "Calculation_Map", cols = 1:5, widths = c(22, 18, 34, 52, 26))
 # 11.17 worksheet order, recalc-on-open, save
 # =========================================================================
 desired_order <- c("README","Run_Metadata","Selected_Interventions","Blocked_Links",
-                   "Cost_Components","Annual_Mortality","Annual_Cost","Budget_Impact",
-                   "Cost_Effectiveness","Economic_Value","QA_Checks","Input_Diagnostic",
+                   "Cost_Components","Annual_Mortality","Health_Outcomes",
+                   "CVD_40q30","CVD_40q30_Age","Annual_Cost","Budget_Impact",
+                   "Cost_Effectiveness","Economic_Value","Benefit_Cost","QA_Checks","Input_Diagnostic",
                    "Methods_and_Sources","Calculation_Assumptions","Calculation_Map")
 desired_order <- desired_order[desired_order %in% names(wb)]   # drop any conditionally-absent sheet
 worksheetOrder(wb) <- match(desired_order, names(wb))
@@ -1498,7 +2062,18 @@ source_public_health_cost_value <- function() {
   negc   <- mo[, sum(well < -tol | sick < -tol | newcases < -tol | dead < -tol | pop < -tol)]
   maxres <- mo[, max(abs(pop - (well + sick + all.mx)))]
   ndist  <- mo[, .(n = uniqueN(round(all.mx, 6))), by = .(scenario, year, age, sex)][, max(n)]
-  n_bad_trans <- phi$valid_links[model_transition != "incidence", .N]
+  # Public-health effects now map to TWO allowed transitions: well->sick
+  # (incidence) and sick->dead (case_fatality). "Bad" = anything OUTSIDE that
+  # allowed pair (was: != incidence, which is now a legitimate mapping).
+  n_bad_trans <- phi$valid_links[!(model_transition %in% c("incidence", "case_fatality")), .N]
+  # Cross-pathway guard: the workbook transition_from/transition_to must agree
+  # with the derived model_transition on every valid link (a well->sick effect
+  # must never be recorded as case_fatality, or vice-versa).
+  n_xpath <- phi$valid_links[
+    (model_transition == "incidence"     & !(transition_from == "well" & transition_to == "sick")) |
+    (model_transition == "case_fatality" & !(transition_from %in% c("sick","sick_severe","sick_hf") &
+                                              grepl("^dead", transition_to))), .N]
+  n_cf_links <- phi$valid_links[model_transition == "case_fatality", .N]
   anchor_scn <- if ("all_public_health" %in% cea$scenario) "all_public_health" else
     if (nrow(cea)) cea$scenario[1] else NA_character_
   ar <- cea[scenario == anchor_scn]
@@ -1508,8 +2083,11 @@ source_public_health_cost_value <- function() {
 
   ## ---- display tables -----------------------------------------------------
   vl <- copy(phi$valid_links)
+  # Carry the mapped + raw transition so Model 09 reports BOTH pathways
+  # (incidence and case_fatality) and retains the original workbook fields.
   sel_out <- vl[, .(intervention_id, intervention_cause_key, intervention_name,
                     risk_id, cause_id, cause_code, effect_model,
+                    model_transition, transition_from, transition_to,
                     baseline_exposure, target_exposure, response_value, paf_value,
                     lag_model, lag_parameter, exposure_start_year, exposure_target_year,
                     full_effect_at_target = NA_real_, exposure_reduction_abs = NA_real_,
@@ -1528,11 +2106,15 @@ source_public_health_cost_value <- function() {
                                relative_reduction = NA_real_, start_year, target_year,
                                scale_up_shape, review_status = exposure_review)]
 
+  # model_transition stays in column N (COUNTIFS QA anchor below); the raw
+  # workbook transition_from/transition_to are appended AFTER so the original
+  # transition fields are retained without shifting the anchored column letter.
   eff_out <- phi$links[, .(intervention_cause_key, intervention_id, cause_id, cause_code,
                            effect_model, response_parameter, response_value, paf_value,
                            lag_model, lag_parameter, baseline_exposure, target_exposure,
                            full_effect_at_target = NA_real_, model_transition,
-                           valid = as.integer(valid), review_status = effect_review)]
+                           valid = as.integer(valid), review_status = effect_review,
+                           transition_from, transition_to)]
   setorder(eff_out, intervention_id, cause_code)
 
   # Policy levers with the new fiscal/regulatory/hierarchy fields; the derived
@@ -1664,6 +2246,11 @@ source_public_health_cost_value <- function() {
     source = c(rep(basename(phi$inputs_path), 12), "Model 09",
                "Workbook QA rule","Workbook QA rule", rep("Model 09 current run",3),
                rep("Model 09 current run (R CEA)",4)))
+  # Append the Reference-Case BCA controls (shared block) for the PH BCA sheets.
+  .bcab <- bca_ca_block(bca_params)
+  n_ca_core <- nrow(ca)
+  ca <- rbind(ca, .bcab$ca_bca)
+  bca_fmt_vec <- .bcab$fmt
   addWorksheet(wb, "Calculation_Assumptions")
   writeData(wb, "Calculation_Assumptions",
             data.frame(parameter_id="parameter_id", value="value", unit="unit",
@@ -1677,8 +2264,10 @@ source_public_health_cost_value <- function() {
   addStyle(wb, "Calculation_Assumptions", st_hdr, rows = 1, cols = 1:6, gridExpand = TRUE)
   addStyle(wb, "Calculation_Assumptions", st_input, rows = 2:16, cols = 2, gridExpand = TRUE, stack = TRUE)
   addStyle(wb, "Calculation_Assumptions", st_rsrc,  rows = 17:23, cols = 2, gridExpand = TRUE, stack = TRUE)
+  addStyle(wb, "Calculation_Assumptions", st_input,
+           rows = (n_ca_core + 2L):(nrow(ca) + 1L), cols = 2, gridExpand = TRUE, stack = TRUE)  # BCA controls
   ca_fmt <- c("0","0",NA,"0","0","0.0","0.0%","0","0",NA,NA,NA,"0.000","0.000","#,##0",
-              "#,##0","#,##0.0","0","#,##0","#,##0","#,##0.00",NA)
+              "#,##0","#,##0.0","0","#,##0","#,##0","#,##0.00",NA, bca_fmt_vec)
   for (i in seq_along(ca_fmt)) if (!is.na(ca_fmt[i]))
     addStyle(wb, "Calculation_Assumptions", createStyle(numFmt = ca_fmt[i]), rows = 1 + i, cols = 2, stack = TRUE)
   addStyle(wb, "Calculation_Assumptions", st_wrap, rows = 2:(nrow(ca)+1), cols = 5, gridExpand = TRUE, stack = TRUE)
@@ -1696,10 +2285,24 @@ source_public_health_cost_value <- function() {
   cA_bgd   <- "'Calculation_Assumptions'!$B$19"; cA_rda <- "'Calculation_Assumptions'!$B$20"
   cA_rdic  <- "'Calculation_Assumptions'!$B$21"; cA_rcpd <- "'Calculation_Assumptions'!$B$22"
   cA_anch  <- "'Calculation_Assumptions'!$B$23"
+  # BCA control cell refs (rows derived from position in ca) for the BCA sheets.
+  .carow <- function(pid) match(pid, ca$parameter_id) + 1L
+  .bcell <- function(pid) sprintf("'Calculation_Assumptions'!$B$%d", .carow(pid))
+  bca_cells_ph <- list(
+    ratio     = .bcell("vsl_us_gni_ratio"),
+    elast     = .bcell("vsl_income_elasticity_preferred"),
+    floor     = .bcell("vsl_floor_gni_multiple"),
+    mult100   = .bcell("vsl_sensitivity_gni_multiple_100"),
+    mult160   = .bcell("vsl_sensitivity_gni_multiple_160"),
+    r_primary = .bcell("bca_discount_rate_primary"),
+    base_year = .bcell("bca_base_year"),
+    price_year  = .bcell("bca_price_year"),
+    cost_factor = .bcell("cost_to_bca_currency_factor"),
+    scope     = .bcell("bca_scope"))
 
   ## ===== README ==========================================================
   readme <- data.table(section = c(
-    "Purpose","How to read","Scenarios","Baseline pairing","Effect model","Exposure path",
+    "Purpose","How to read","Scenarios","Baseline pairing","CVD 40q30","Effect model","Exposure path",
     "Lag","Costing","Shared costs","Budget impact","Cost-effectiveness","Economic value",
     "QA & reconciliation","Colour legend","Deferred"),
     detail = c(
@@ -1707,6 +2310,7 @@ source_public_health_cost_value <- function() {
     "Grey cells are R-generated source values; light-blue cells are LIVE Excel formulas; pale-yellow cells on Calculation_Assumptions are editable controls. Change a yellow control and the blue results recompute. Calculation_Map lists the dependency chain.",
     "Baseline + one standalone scenario per runnable intervention + one JOINT scenario per parent package (tobacco, salt) + a combined 'all_public_health' scenario. Membership and the tobacco/salt package structure derive from the workbook Scenario_Hierarchy (Model 04). Parent-package cases/deaths come from a single joint run, never summed from standalone children; package cost = sum of selected child costs. See Scenario_Hierarchy, Child_Intervention_Summary and Parent_Package_Summary.",
     "Deaths averted = baseline deaths - scenario deaths, matched at year x cause (both-sex totals).",
+    "CVD_40q30 / CVD_40q30_Age give the period probability of dying from the six CVD causes (ihd, istroke, hstroke, hhd, rhd, cmd) between exact ages 30 and 70, per scenario/HTN-target/year. The life table (m_x, q_x, l_x, l_{x+1}) is live Excel formula off grey CVD deaths and de-duplicated population; cvd_40q30 = 100*(1-l_70/l_30) reconciles to Model 07. cvd_40q30 and the absolute reduction are PERCENT on a 0-100 scale (format 0.000), NOT Excel's fractional %.",
     "Incidence effect = exposure-based: prevalence-shift RR (tobacco), log-linear RR per unit reduction (alcohol/sodium/SSB and the DEFAULT industrial-TFA path, RR per 1 percentage-point energy). The optional TFA PAF path (PAF x implementation gap) is used only when Assumptions.tfa_effect_method='PAF'. Fiscal levers use baseline->target tax change x price elasticity; regulatory levers use the none/partial/full implementation gap. NO clinical coverage-adjustment formula is used.",
     "Achieved exposure pt(t) ramps linearly baseline->target over start_year..target_year, floored; exposure reductions are shown as formulas on Exposure_Targets.",
     "immediate_after_full_implementation: effect tracks the exposure path. delayed_exponential_remaining_effect (tobacco): full target effect accrues as 1-(1-rate)^(years since start).",
@@ -1714,10 +2318,10 @@ source_public_health_cost_value <- function() {
     "Shared policy costs (cost_scope 'shared-count-once', ...__C_SHARED) are counted once per intervention/scenario/year, never once per affected cause.",
     "Budget impact reports UNDISCOUNTED baseline, scenario, incremental and cumulative incremental cost; discounted incremental cost is a separate column.",
     "USD per death averted = cumulative discounted incremental cost / cumulative (undiscounted) deaths averted. Not a DALY-based ICER; DALYs are deferred.",
-    "Value of statistical life (Model 08) covers the clinical CVD scenarios only and does not reconcile with public-health scenarios; see the Economic_Value note.",
-    "QA_Checks recomputes each invariant in Excel and reconciles the Excel cost-effectiveness headline against the R engine values on Calculation_Assumptions. PASS/REVIEW/FAIL are conditionally formatted.",
+    "Reference-Case benefit-cost analysis (2019 Robinson et al. Guidelines) on Health_Outcomes (Model 07), Economic_Value (Model 08 VSL/VSLY) and Benefit_Cost. Preferred VSL = MAX(160xGNIpc_US x (GNIpc_IDN/GNIpc_US)^1.5, 20xGNIpc_IDN); standardized 100x/160x GNI sensitivities. Benefits are PPP int$; costs are converted to that basis (cost_to_bca_currency_factor). PARTIAL mortality-benefit BCA -- not a full societal BCA.",
+    "QA_Checks recomputes each invariant in Excel and reconciles the Excel cost-effectiveness headline against the R engine values on Calculation_Assumptions; BCA checks cover the VSL floor, reference-case parameters, price-year basis and Benefit_Cost scenario coverage. PASS/REVIEW/FAIL are conditionally formatted.",
     "Header dark-blue; formula-derived light-blue; R source/helper grey; editable controls pale-yellow; PASS green; REVIEW amber; FAIL red.",
-    "DALYs/YLL/YLD/disability weights are deferred; the principal cost-effectiveness result is USD per death averted."))
+    "Health outcomes (deaths averted, YLL/YLD/DALY averted, life-years gained) come from Model 07 (Health_Outcomes). USD per death averted (Cost_Effectiveness) and the benefit-cost analysis (Benefit_Cost) are the principal decision results."))
   addWorksheet(wb, "README")
   writeData(wb, "README", "Indonesia NCD - public-health cost & value workbook (formula edition)", startRow = 1)
   addStyle(wb, "README", st_title, rows = 1, cols = 1)
@@ -1760,21 +2364,36 @@ source_public_health_cost_value <- function() {
   n_si <- nrow(sel_out); r_si <- n_si + 1L
   addWorksheet(wb, "Selected_Interventions")
   writeData(wb, "Selected_Interventions", as.data.frame(sel_out), headerStyle = st_hdr)
-  # P full_effect (col16) model-specific; Q abs (17)=H-I; R rel (18)=(H-I)/H; U key_count(21); V status(22)
+  # Formula targets/inputs derived BY NAME (xlc) so the inserted transition columns
+  # (model_transition/transition_from/transition_to) can never misalign them:
+  # full_effect (model-specific), exposure_reduction_abs = baseline - target,
+  # exposure_reduction_rel = (baseline - target)/baseline, key_count, formula_status.
+  Kb <- xlc(names(sel_out), "baseline_exposure"); Lt <- xlc(names(sel_out), "target_exposure")
+  Gr <- xlc(names(sel_out), "response_value");    Hp <- xlc(names(sel_out), "paf_value")
+  c_fe  <- match("full_effect_at_target",  names(sel_out))
+  c_abs <- match("exposure_reduction_abs", names(sel_out))
+  c_rel <- match("exposure_reduction_rel", names(sel_out))
+  c_kc  <- match("key_count",              names(sel_out))
+  c_fs  <- match("formula_status",         names(sel_out))
+  KCl   <- int2col(c_kc)
   fe_formula <- function(r) {
     m <- sel_out$effect_model[r - 1L]
     if (identical(m, "direct_smoking_prevalence_shift_rr"))
-      sprintf("1-(1+I%d*(J%d-1))/(1+H%d*(J%d-1))", r, r, r, r)
+      sprintf("1-(1+%s%d*(%s%d-1))/(1+%s%d*(%s%d-1))", Lt, r, Gr, r, Kb, r, Gr, r)
     else if (identical(m, "direct_loglinear_rr_per_unit_reduction"))
-      sprintf("1-1/(J%d^(H%d-I%d))", r, r, r)
-    else sprintf("IFERROR(K%d*J%d,0)", r, r)
+      sprintf("1-1/(%s%d^(%s%d-%s%d))", Gr, r, Kb, r, Lt, r)
+    else sprintf("IFERROR(%s%d*%s%d,0)", Hp, r, Gr, r)
   }
-  writeFormula(wb, "Selected_Interventions", startCol = 16, startRow = 2, x = frows(fe_formula, 2:r_si))
-  writeFormula(wb, "Selected_Interventions", startCol = 17, startRow = 2, x = frows(function(r) sprintf("H%d-I%d", r, r), 2:r_si))
-  writeFormula(wb, "Selected_Interventions", startCol = 18, startRow = 2, x = frows(function(r) sprintf("IF(H%d=0,0,(H%d-I%d)/H%d)", r, r, r, r), 2:r_si))
-  writeFormula(wb, "Selected_Interventions", startCol = 21, startRow = 2, x = frows(function(r) sprintf("COUNTIF($B$2:$B$%d,B%d)", r_si, r), 2:r_si))
-  writeFormula(wb, "Selected_Interventions", startCol = 22, startRow = 2, x = frows(function(r) sprintf("IF(U%d=1,\"OK\",\"DUPLICATE KEY\")", r), 2:r_si))
-  style_sheet("Selected_Interventions", names(sel_out), n_si, formula_cols = c(16,17,18,21,22))
+  writeFormula(wb, "Selected_Interventions", startCol = c_fe, startRow = 2, x = frows(fe_formula, 2:r_si))
+  writeFormula(wb, "Selected_Interventions", startCol = c_abs, startRow = 2,
+               x = frows(function(r) sprintf("%s%d-%s%d", Kb, r, Lt, r), 2:r_si))
+  writeFormula(wb, "Selected_Interventions", startCol = c_rel, startRow = 2,
+               x = frows(function(r) sprintf("IF(%s%d=0,0,(%s%d-%s%d)/%s%d)", Kb, r, Kb, r, Lt, r, Kb, r), 2:r_si))
+  writeFormula(wb, "Selected_Interventions", startCol = c_kc, startRow = 2,
+               x = frows(function(r) sprintf("COUNTIF($B$2:$B$%d,B%d)", r_si, r), 2:r_si))
+  writeFormula(wb, "Selected_Interventions", startCol = c_fs, startRow = 2,
+               x = frows(function(r) sprintf("IF(%s%d=1,\"OK\",\"DUPLICATE KEY\")", KCl, r), 2:r_si))
+  style_sheet("Selected_Interventions", names(sel_out), n_si, formula_cols = c(c_fe, c_abs, c_rel, c_kc, c_fs))
 
   ## ===== Blocked_Links ===================================================
   addWorksheet(wb, "Blocked_Links")
@@ -1993,23 +2612,56 @@ source_public_health_cost_value <- function() {
   conditionalFormatting(wb, "Cost_Effectiveness", cols = 9, rows = 2:r_ce, rule = "mismatch",   type = "contains", style = cf_fail)
   conditionalFormatting(wb, "Cost_Effectiveness", cols = 8, rows = 2:r_ce, rule = "Dominated",  type = "contains", style = cf_rev)
 
-  ## ===== Economic_Value (note) ==========================================
-  addWorksheet(wb, "Economic_Value")
-  ev_note <- data.table(note = c(
-    "Economic value (value of statistical life, VSL/VSLY) is produced by Model 08 for the clinical CVD scenarios only.",
-    "Model 08 does not currently run the public-health scenario ids (I_PH_* / all_public_health), so its monetary-value",
-    "results cannot be reconciled against this run's public-health scenarios and are intentionally NOT reproduced here.",
-    "The principal public-health result in this workbook is USD per death averted (Cost_Effectiveness).",
-    "To populate a public-health economic-value view, re-run Model 08 on the public-health scenarios and extend this sheet."))
-  writeData(wb, "Economic_Value", ev_note, headerStyle = st_hdr)
-  addStyle(wb, "Economic_Value", st_wrap, rows = 2:(nrow(ev_note)+1), cols = 1, gridExpand = TRUE, stack = TRUE)
-  setColWidths(wb, "Economic_Value", cols = 1, widths = 120)
-  freezePane(wb, "Economic_Value", firstActiveRow = 2)
+  ## ===== Health_Outcomes + Economic_Value + Benefit_Cost (Reference-Case BCA) =
+  # Model 08 now runs ALL scenarios (incl. public-health I_PH_* / all_public_health),
+  # so the Reference-Case VSL/VSLY benefit-cost view IS reproduced here for the PH
+  # comparators, using the same shared formula-driven builder as the clinical book.
+  ph_cmp <- comparators
+  ho_src_ph <- dt_h07[scenario %in% ph_cmp, .(
+    scenario_label = scenario_label[1L],
+    modeled_deaths = sum(deaths),   baseline_deaths = sum(base_deaths),
+    modeled_cases  = sum(newcases), baseline_cases  = sum(base_newcases),
+    yll = sum(yll), base_yll = sum(base_yll),
+    yld = sum(yld), base_yld = sum(base_yld),
+    daly = sum(daly), base_daly = sum(base_daly)),
+    by = .(scenario, year)]
+  ev_src_ph <- ev08[scenario %in% ph_cmp, .(
+    scenario_label    = scenario_label[1L],
+    deaths_averted    = sum(deaths_averted),
+    life_years_gained = sum(life_years_gained_undisc),
+    gni_pc_idn = gni_pc_ppp[1L], gni_pc_usa = gni_pc_usa[1L],
+    population = population[1L],  le_avg_adult = le_avg_adult[1L]),
+    by = .(scenario, year)]
+  scen_meta_ph <- unique(dt_h07[scenario %in% ph_cmp, .(
+    scenario, scenario_label, intervention_family,
+    scenario_level = fifelse(scenario == "all_public_health", "combined",
+                      fifelse(is.na(scenario_role), "standalone", scenario_role)))])
+  sty_ph <- list(st_hdr = st_hdr, st_formula = st_formula, st_rsrc = st_rsrc,
+                 st_input = st_input, st_wrap = st_wrap,
+                 cf_pass = cf_pass, cf_fail = cf_fail, cf_rev = cf_rev)
+  if (nrow(ev_src_ph) > 0L) {
+    build_bca_sheets_into(wb, ph_cmp, ho_src_ph, ev_src_ph, scen_meta_ph,
+                          bca_cells_ph, r_bi, sty_ph)
+  } else {
+    addWorksheet(wb, "Economic_Value")
+    writeData(wb, "Economic_Value",
+              data.frame(note = "No public-health comparators with Model 08 economic value in this run."),
+              headerStyle = st_hdr)
+    setColWidths(wb, "Economic_Value", cols = 1, widths = 110)
+  }
+
+  ## ===== CVD_40q30_Age + CVD_40q30 (formula-driven period CVD 40q30) =======
+  # Baseline + the public-health comparators (baseline required for the on-sheet
+  # baseline SUMIFS). Uses the shared Model 07 CVD 40q30 contracts, which Model 09
+  # REQUIRES (it stops early if 07_cvd_40q30*.rds are missing), so the call is
+  # unconditional -- matching the clinical and combined builders.
+  build_cvd_40q30_sheets_into(wb, c(base_id, comparators), dt_cvd_40q30, cvd_age_40q30,
+                              base_id, sty_ph)
 
   ## ===== QA_Checks =======================================================
   qa_check <- c("Selected intervention-cause key uniqueness","Workbook FAIL-level issues",
                 "Workbook REVIEW-level issues","Every scenario paired to baseline",
-                "Public-health transitions are well -> sick incidence","No impossible negative states",
+                "Public-health transitions within allowed set (well->sick, sick->dead)","No impossible negative states",
                 "Stock/flow identity pop = well + sick + all-cause deaths",
                 "Background mortality constant across cause","Cost reconciliation (components -> budget impact)",
                 "Shared cost counted once per stratum/year","Annual reconciles to cumulative (budget impact)",
@@ -2021,7 +2673,10 @@ source_public_health_cost_value <- function() {
                "Blocked links excluded (see Blocked_Links / Input_Diagnostic)",
                "Flagged but usable (e.g. cost not Indonesia-adjusted; provisional PAF)",
                "Deaths averted = baseline - scenario at matched year/cause",
-               "All modeled public-health effects map to incidence (no case fatality)",
+               sprintf(paste0("PH effects map to well->sick incidence OR sick->dead case fatality; ",
+                              "%d case-fatality link(s) in this run; 0 outside the allowed set / no ",
+                              "cross-pathway application. Exploratory SSB->T2DM mortality stays disabled ",
+                              "unless run_ssb_diabetes_mortality=TRUE."), n_cf_links),
                "well/sick/new_cases/deaths/population >= 0",
                "Per cause row; small residual from 95+ pooling / rounding",
                "all.mx taken once per stratum (population not duplicated across causes)",
@@ -2033,11 +2688,13 @@ source_public_health_cost_value <- function() {
                "Excel CEA discounted incremental cost reconciles to the R engine value",
                "Excel CEA USD per death averted reconciles to the R engine value")
   qa_actual <- c(
-    sprintf("COUNTIF('Selected_Interventions'!$U$2:$U$%d,\">1\")", r_si),
+    sprintf("COUNTIF('Selected_Interventions'!$%s$2:$%s$%d,\">1\")", KCl, KCl, r_si),  # key_count col (by name)
     sprintf("COUNTIF('Input_Diagnostic'!$E$2:$E$%d,\"FAIL\")", max(nrow(diag_out)+1L,2L)),
     sprintf("COUNTIF('Input_Diagnostic'!$E$2:$E$%d,\"REVIEW\")", max(nrow(diag_out)+1L,2L)),
     sprintf("COUNTBLANK('Annual_Mortality'!$H$2:$H$%d)", r_am),
-    sprintf("COUNTIF('Effect_Parameters'!$N$2:$N$%d,\"<>incidence\")", r_ef),
+    # Count effect rows whose model_transition (col N) is OUTSIDE the allowed set
+    # {incidence, case_fatality}. Both are now legitimate PH pathways.
+    sprintf("COUNTIFS('Effect_Parameters'!$N$2:$N$%d,\"<>incidence\",'Effect_Parameters'!$N$2:$N$%d,\"<>case_fatality\")", r_ef, r_ef),
     cA_neg, cA_resid, cA_bgd,
     sprintf("ABS(SUM('Budget_Impact'!$D$2:$D$%d)-SUM('Annual_Cost'!$R$2:$R$%d))+ABS(SUM('Budget_Impact'!$C$2:$C$%d)-SUM('Annual_Cost'!$Q$2:$Q$%d))",
             r_bi, r_ac, r_bi, r_ac),
@@ -2089,6 +2746,42 @@ source_public_health_cost_value <- function() {
     "IF(C17=3,\"PASS\",\"FAIL\")","IF(C18=4,\"PASS\",\"FAIL\")",
     sprintf("IF(C19<=%s,\"PASS\",\"FAIL\")", cA_tol),
     "IF(C20>0,\"PASS\",\"FAIL\")")
+  # --- Reference-Case BCA QA (rows 21-24): only when PH economic-value sheets exist.
+  if (nrow(ev_src_ph) > 0L) {
+    .rev_c <- nrow(ev_src_ph) + 1L; .rho_c <- nrow(ho_src_ph) + 1L
+    .rbc_c <- nrow(scen_meta_ph) * 4L + 1L
+    qa_check  <- c(qa_check,
+      "VSL floor applied (preferred VSL >= 20x GNI floor)",
+      "Reference-case VSL parameters (elasticity 1.5, US ratio 160, 20x floor)",
+      "Benefit and cost on the same price year (BCA basis)",
+      "Benefit_Cost scenarios all present in Health_Outcomes")
+    qa_expect <- c(qa_expect, "0", "as_specified", "match", "0")
+    qa_note   <- c(qa_note,
+      "No Economic_Value row has preferred VSL below the 20x GNI-per-capita floor",
+      "Reference case = elasticity 1.5 transfer, 160x US ratio, 20x GNI floor (Robinson et al. 2019)",
+      "bca_price_year equals the reporting price year, so benefits and costs share a real price basis",
+      "Every scenario x valuation-case row in Benefit_Cost has a matching Health_Outcomes scenario")
+    qa_actual <- c(qa_actual,
+      sprintf("SUMPRODUCT(('Economic_Value'!$L$2:$L$%d<'Economic_Value'!$K$2:$K$%d)*1)", .rev_c, .rev_c),
+      sprintf("IF(AND(%s=1.5,%s=160,%s=20),\"as_specified\",\"edited\")",
+              bca_cells_ph$elast, bca_cells_ph$ratio, bca_cells_ph$floor),
+      sprintf("IF(%s=%s,\"match\",\"mismatch\")", bca_cells_ph$price_year, .bcell("reporting_price_year")),
+      sprintf("SUMPRODUCT((COUNTIF('Health_Outcomes'!$A$2:$A$%d,'Benefit_Cost'!$A$2:$A$%d)=0)*1)", .rho_c, .rbc_c))
+    qa_status <- c(qa_status,
+      "IF(C21=0,\"PASS\",\"FAIL\")",
+      "IF(C22=\"as_specified\",\"PASS\",\"REVIEW\")",
+      "IF(C23=\"match\",\"PASS\",\"REVIEW\")",
+      "IF(C24=0,\"PASS\",\"FAIL\")")
+  }
+  # --- CVD 40q30 reconciliation (Excel life-table vs the Model 07 R anchor) ----
+  # (CVD_40q30 is always built above, so this check is always added.)
+  .cvd_row <- length(qa_check) + 2L
+  .rq40_ph <- nrow(dt_cvd_40q30[scenario %in% c(base_id, comparators)]) + 1L
+  qa_check  <- c(qa_check,  "CVD 40q30 Excel vs R (all rows match)")
+  qa_expect <- c(qa_expect, "0")
+  qa_note   <- c(qa_note,   "CVD_40q30 recon_status has no 'mismatch' (life-table formula reconciles to Model 07)")
+  qa_actual <- c(qa_actual, sprintf("COUNTIF('CVD_40q30'!$N$2:$N$%d,\"mismatch\")", .rq40_ph))
+  qa_status <- c(qa_status, sprintf("IF(C%d=0,\"PASS\",\"FAIL\")", .cvd_row))
   qa_df <- data.frame(check = qa_check, expected = qa_expect, actual = NA,
                       status = NA_character_, note = qa_note, stringsAsFactors = FALSE)
   addWorksheet(wb, "QA_Checks")
@@ -2145,13 +2838,31 @@ source_public_health_cost_value <- function() {
       "discount_factor(t) = 1/(1+cost_discount_rate)^(t - analysis_start_year); costs discounted, deaths undiscounted",
       "USD per death (or case) averted = cumulative discounted incremental cost / cumulative averted; blank + 'no incremental health effect' when nothing averted"),
     source = c(rep("NCD Countdown supplement (Countdown_Methods sheet) + public-health input workbook", 19)))
+  # Reference-Case benefit-cost analysis methods (Health_Outcomes / Economic_Value / Benefit_Cost).
+  bca_methods <- data.table(
+    method_id = c("M20","M21","M22","M23"),
+    concept = c("Reference-Case VSL transfer","Constant VSLY",
+                "BCA discounting & monetary basis","Benefit-cost ratio & net benefit"),
+    formula_or_rule = c(
+      "Preferred VSL = MAX(vsl_us_gni_ratio*GNIpc_US*(GNIpc_IDN/GNIpc_US)^income_elasticity, vsl_floor_gni_multiple*GNIpc_IDN); standardized sensitivities VSL = 100x and 160x GNIpc.",
+      "VSLY = preferred VSL / undiscounted remaining LE at the average working-age (vsly_adult_min_age..max_age) age; applied to Model 07 age-specific life-years gained.",
+      "Benefits and costs discounted to bca_base_year at bca_discount_rate_primary; VSL benefits are PPP int$; market-USD costs converted via cost_to_bca_currency_factor (never assumed 1).",
+      "BCR = PV benefits / PV costs; net benefit = PV benefits - PV costs, on one base year/rate/price year/basis. PARTIAL mortality-benefit BCA, not cost-effectiveness."),
+    source = rep("Robinson et al. 2019 Reference Case Guidelines for BCA in Global Health & Development / Model 08", 4))
   # TFA base-case RR references retained for provenance.
   tfa_refs <- data.table(method_id = c("REF","REF"), concept = c("TFA source RR","TFA source RR"),
     formula_or_rule = c("~RR 1.21 per 2 percentage-points energy (converted to ~1.10 per 1 pp in the workbook)",
                         "supporting cohort evidence"),
     source = c("https://www.ahajournals.org/doi/10.1161/CIRCULATIONAHA.118.038160",
                "https://www.ahajournals.org/doi/10.1161/JAHA.115.002891"))
-  methods <- rbind(methods, tfa_refs)
+  cvd_method <- data.table(method_id = "M24", concept = "CVD 40q30 (period life table)",
+    formula_or_rule = paste0("Period CVD 40q30 over the six CVD causes (ihd, istroke, hstroke, hhd, rhd, cmd), ",
+      "exact ages 30-69: sexes combined before the rate, m_x=(D_F+D_M)/(N_F+N_M), q_x=1-EXP(-m_x), l_30=1, ",
+      "l_{x+1}=l_x(1-q_x), 40q30=100*(1-l_70/l_30). CVD_40q30_Age carries the live life-table formulas; ",
+      "CVD_40q30 gives the metric, shared-baseline pairing, absolute (pp) and relative (%) reduction, reconciled ",
+      "to Model 07. cvd_40q30 is a PERCENT on 0-100 (format 0.000, not Excel %); population de-duplicated across causes."),
+    source = "Model 07 (07_cvd_40q30.rds) / Model 09")
+  methods <- rbind(methods, bca_methods, tfa_refs, cvd_method)
   addWorksheet(wb, "Methods_and_Sources")
   writeData(wb, "Methods_and_Sources", methods, headerStyle = st_hdr)
   style_sheet("Methods_and_Sources", names(methods), nrow(methods), wrap_cols = c(3,4), filter = FALSE, max_w = 90)
@@ -2160,18 +2871,24 @@ source_public_health_cost_value <- function() {
   ## ===== Calculation_Map =================================================
   cmap <- data.table(
     output_sheet = c("Policy_Levers","Selected_Interventions","Exposure_Targets","Effect_Parameters",
-                     "Cost_Components","Annual_Mortality","Annual_Cost","Budget_Impact","Cost_Effectiveness",
+                     "Cost_Components","Annual_Mortality","Health_Outcomes","Annual_Cost","Budget_Impact",
+                     "Cost_Effectiveness","Economic_Value","Benefit_Cost",
                      "Child_Intervention_Summary","Parent_Package_Summary","QA_Checks","Run_Metadata"),
     formula_columns = c("implementation_gap,implied_price_change,fiscal_tax_delta,policy_reduction",
                         "full_effect,reductions,key_count,status","target,abs,rel","full_effect",
                         "allocated_child_cost,cost_ready","deaths_averted,cases_averted",
+                        "F,I,L,O,R,S (averted health)",
                         "impl_frac,PIN,annual+disc cost,shared QA","incremental+cumulative cost",
-                        "health,cost,ICER,dominance,reconciliation","modeled/baseline/averted,cost,ICER",
+                        "health,cost,ICER,dominance,reconciliation","J:AB (VSL/VSLY/PV benefits)",
+                        "G:M (PV benefits/costs, net, BCR)","modeled/baseline/averted,cost,ICER",
                         "modeled/baseline/averted,cost,ICER","actual,status","B (subset)"),
     depends_on = c("lever_method + fiscal/regulatory inputs","effect_model + exposures","baseline/method/reduction",
                    "effect_model + exposures","cost inputs + allocation shares","R deaths/cases",
+                   "Model 07 modeled/baseline health",
                    "Cost_Components; Calculation_Assumptions; R population","Annual_Cost",
                    "Annual_Mortality; Budget_Impact; Calculation_Assumptions",
+                   "Model 08 source; Calculation_Assumptions BCA controls",
+                   "Economic_Value PV benefits; Budget_Impact costs; Calculation_Assumptions",
                    "Annual_Mortality; Budget_Impact (standalone scenarios)",
                    "Annual_Mortality; Budget_Impact (JOINT package/combined runs)",
                    "calculation + diagnostic sheets","Calculation_Assumptions"),
@@ -2179,12 +2896,22 @@ source_public_health_cost_value <- function() {
                     "Full effect at target; exposure reductions; key uniqueness",
                     "Exposure target and absolute/relative reductions","Full effect at target",
                     "Child cost = package total x share; cost-readiness rule","Deaths and cases averted",
+                    "Deaths/cases/YLL/YLD/DALY averted and life-years gained (baseline - intervention)",
                     "Implementation fraction, PIN, annual/discounted cost, shared-cost QA",
                     "Annual and cumulative cost by scenario",
                     "Cumulative health, cost, cost/death, dominance, reconciliation",
+                    "Reference-Case VSL (elast 1.5 + 20x floor) & 100x/160x, VSLY, undisc & PV benefits, GNI shares",
+                    "PV benefits, PV costs (to PPP int$), net benefit, BCR, benefit/GNI, decision (partial BCA)",
                     "Per child intervention: health, cost, cost per case/death averted, status",
                     "Per parent package (joint run) + combined: health, cost, cost per case/death averted",
                     "Invariant recomputation and Excel-vs-R reconciliation","Metadata pulled from controls"))
+  cmap <- rbind(cmap, data.table(
+    output_sheet = c("CVD_40q30_Age","CVD_40q30"),
+    formula_columns = c("J:M (m_x,q_x,l_x,l_x+1)","I,J,K,L,N"),
+    depends_on = c("CVD deaths + de-duplicated population (grey H:I)",
+                   "CVD_40q30_Age life table; baseline SUMIFS; R anchor (M)"),
+    calculation = c("Period life table: m_x=deaths/pop, q_x=1-EXP(-m_x), recursive l_x/l_{x+1} (ages 30-69)",
+                    "CVD 40q30 = 100*(1-l_70/l_30); baseline-paired absolute (pp) & relative (%) reduction; R reconciliation")))
   addWorksheet(wb, "Calculation_Map")
   writeData(wb, "Calculation_Map", cmap, headerStyle = st_hdr)
   style_sheet("Calculation_Map", names(cmap), nrow(cmap), wrap_cols = c(3,4), filter = FALSE, max_w = 60)
@@ -2259,8 +2986,8 @@ source_public_health_cost_value <- function() {
   ## ===== order, recalc, strip, save ======================================
   desired_order <- c("README","Run_Metadata","Scenario_Hierarchy","Selected_Interventions","Blocked_Links",
                      "Policy_Levers","Exposure_Targets","Effect_Parameters","Risk_Response","Cost_Components",
-                     "Annual_Mortality","Annual_Cost","Budget_Impact","Cost_Effectiveness",
-                     "Child_Intervention_Summary","Parent_Package_Summary","Economic_Value","QA_Checks",
+                     "Annual_Mortality","Health_Outcomes","CVD_40q30","CVD_40q30_Age","Annual_Cost","Budget_Impact","Cost_Effectiveness",
+                     "Child_Intervention_Summary","Parent_Package_Summary","Economic_Value","Benefit_Cost","QA_Checks",
                      "Input_Diagnostic","Methods_and_Sources","Calculation_Assumptions","Calculation_Map")
   desired_order <- desired_order[desired_order %in% names(wb)]
   worksheetOrder(wb) <- match(desired_order, names(wb))
@@ -2270,6 +2997,739 @@ source_public_health_cost_value <- function() {
   saveWorkbook(wb, out_file, overwrite = TRUE)
   message("  Wrote public-health formula workbook: ", out_file)
   message(sprintf("  Public-health scenarios: %s", paste(comparators, collapse = ", ")))
+  invisible(out_file)
+}
+
+# =====================================================================
+# source_combined_cost_value()  --  Model 09 Section 13 builder
+# Builds output/indonesia_model_cost_value_clinical_public_health_formulae.xlsx
+# from the current-run BOTH-families catalogues and the shared Model 06 output.
+# Scenarios: baseline (once) + all clinical comparators + all public-health
+# comparators + the genuine joint `all_clinical_public_health` scenario. The joint
+# scenario is costed from ITS OWN Model 06 state/flow results (clinical components
+# via the clinical costing rule; public-health components via the PH rule; family
+# provenance retained; collision-safe keys). Not a values-only copy of the two
+# existing workbooks -- fully formatted and formula-driven.
+# =====================================================================
+source_combined_cost_value <- function() {
+  stopifnot(exists("fair_inputs"), !is.null(fair_inputs),
+            exists("public_health_inputs"), !is.null(public_health_inputs),
+            exists("fair_scenarios"), !is.null(fair_scenarios),
+            exists("public_health_scenarios"), !is.null(public_health_scenarios),
+            exists("combined_scenarios"), !is.null(combined_scenarios),
+            exists("mo_all"), exists("dt_h07"), exists("ev08"), exists("bca_params"),
+            exists("dt_cvd_40q30"), exists("cvd_age_40q30"))
+  `%||%` <- function(a, b) if (is.null(a) || length(a) == 0) b else a
+  out_file <- if (exists("combined_cost_value_formulae_file"))
+    combined_cost_value_formulae_file else
+    paste0(wd_outp, "indonesia_model_cost_value_clinical_public_health_formulae.xlsx")
+  message("  Building combined clinical + public-health formula workbook: ", out_file)
+
+  A  <- fair_inputs$assumptions
+  PA <- public_health_inputs$assumptions
+  yr_start <- as.integer(A$analysis_start_year); yr_end <- as.integer(A$analysis_end_year)
+  if (as.integer(PA$analysis_start_year) != yr_start ||
+      as.integer(PA$analysis_end_year)   != yr_end)
+    message("  NOTE (combined): clinical and public-health analysis horizons differ; ",
+            "using the clinical horizon ", yr_start, "-", yr_end, ".")
+  analysis_yrs <- yr_start:yr_end
+  disc_rate    <- A$cost_discount_rate
+  policy_start <- as.integer(PA$policy_start_year)
+  ramp_years   <- max(PA$policy_cost_ramp_years, 1)
+  base_impl    <- 0
+  base_id      <- fair_inputs$baseline_scenario_id %||% "baseline"
+  joint_id     <- "all_clinical_public_health"
+
+  produced_ids <- unique(mo_all$scenario)
+  if (!(joint_id %in% produced_ids))
+    stop("combined workbook: the joint scenario '", joint_id, "' is not present in the ",
+         "Model 06 output. Re-run Model 06 with both intervention families enabled.",
+         call. = FALSE)
+  clin_comparators <- setdiff(intersect(names(fair_scenarios), produced_ids), base_id)
+  ph_comparators   <- setdiff(intersect(names(public_health_scenarios), produced_ids), base_id)
+  comparators      <- c(clin_comparators, ph_comparators, joint_id)
+  combined_ids     <- c(base_id, comparators)
+
+  # Labels from all three catalogues (never relabelled).
+  scen_lab <- c(vapply(fair_scenarios,           function(s) s$scenario_label %||% s$scenario_id, character(1)),
+                vapply(public_health_scenarios,  function(s) s$scenario_label %||% s$scenario_id, character(1)),
+                vapply(combined_scenarios,       function(s) s$scenario_label %||% s$scenario_id, character(1)))
+  scen_lab <- scen_lab[!duplicated(names(scen_lab))]
+
+  mo <- as.data.table(mo_all)[scenario %in% combined_ids & year %in% analysis_yrs]
+  if (!nrow(mo)) stop("combined workbook: no rows for the combined scenario set.", call. = FALSE)
+
+  ## ---- annual mortality (both-sex; baseline vs scenario) ------------------
+  mort <- mo[, .(cases = sum(newcases), cause_deaths = sum(dead)), by = .(scenario, year, cause)]
+  base_mort <- mo[scenario == base_id, .(base_deaths = sum(dead), base_cases = sum(newcases)),
+                  by = .(year, cause)]
+  mort <- merge(mort, base_mort, by = c("year", "cause"), all.x = TRUE)
+  mort[, scenario_label := scen_lab[scenario]]
+  mort <- mort[scenario %in% comparators]
+  setcolorder(mort, c("scenario", "scenario_label", "year", "cause",
+                      "cases", "cause_deaths", "base_cases", "base_deaths"))
+  setorder(mort, scenario, year, cause)
+
+  ## ---- costing helpers (clinical qty + PH pop, both off the JOINT run) -----
+  popu <- unique(mo[, .(scenario, year, age, sex, pop)])
+  qty_by_year <- function(scn, cr) {                     # clinical population-in-need
+    a0 <- cr$c_age_start; a1 <- cr$c_age_stop; sx <- cr$c_sex
+    if (cr$population_in_need_measure == "all") {
+      d <- popu[scenario == scn & age >= a0 & age <= a1]
+      if (!identical(sx, "Both")) d <- d[sex == sx]
+      agg <- d[, .(q = sum(pop)), by = year]
+    } else {
+      vcol <- if (cr$population_in_need_measure == "prevalence") "sick" else "newcases"
+      d <- mo[scenario == scn & cause == cr$cause_code & age >= a0 & age <= a1]
+      if (!identical(sx, "Both")) d <- d[sex == sx]
+      agg <- d[, .(q = sum(get(vcol))), by = year]
+    }
+    m <- merge(data.table(year = analysis_yrs), agg, by = "year", all.x = TRUE)
+    m[is.na(q), q := 0]; m$q
+  }
+  pop_for <- function(scn, a0, a1, sx) {                 # PH de-duplicated population
+    d <- unique(mo[scenario == scn & age >= a0 & age <= a1, .(year, age, sex, pop)])
+    if (!identical(sx, "Both")) d <- d[sex == sx]
+    m <- merge(data.table(year = analysis_yrs), d[, .(pop = sum(pop)), by = year],
+               by = "year", all.x = TRUE)
+    m[is.na(pop), pop := 0]; m$pop
+  }
+  cov_path <- function(cb, ct, sy, ty, yrs) {
+    span <- max(ty - sy + 1, 1); frac <- pmin(pmax((yrs - sy + 1) / span, 0), 1)
+    cc <- cb + (ct - cb) * frac; cc[yrs < sy] <- cb; cc[yrs > ty] <- ct; pmin(pmax(cc, 0), 1)
+  }
+  cimpl <- pmin(pmax((analysis_yrs - policy_start + 1) / ramp_years, 0), 1)
+
+  clin_costs <- copy(fair_inputs$costs)
+  clin_costs[, cost_ready := !is.na(unit_cost_usd) & unit_cost_usd >= 0 &
+               !is.na(cov_baseline) & !is.na(population_in_need_fraction) &
+               population_in_need_measure %in% c("all", "prevalence", "incidence")]
+  ph_costs <- copy(public_health_inputs$costs)   # cost_ready already computed in Model 04
+
+  cost_rows <- list()
+  add_clin <- function(scn, ids) {
+    comps <- clin_costs[intervention_id %in% ids & cost_ready == TRUE]
+    for (i in seq_len(nrow(comps))) {
+      cr <- comps[i]
+      q_s <- qty_by_year(scn, cr); q_b <- qty_by_year(base_id, cr)
+      cov_s <- cov_path(cr$cov_baseline, cr$cov_target, cr$cov_start_year, cr$cov_target_year, analysis_yrs)
+      cov_b <- rep(cr$cov_baseline, length(analysis_yrs))
+      cost_rows[[length(cost_rows) + 1L]] <<- data.table(
+        scenario = scn, family = "clinical", year = analysis_yrs,
+        intervention_id = cr$intervention_id, cost_record_id = as.character(cr$cost_record_id),
+        cost_key = paste0("clinical|", cr$cost_record_id),
+        cost_component = as.character(cr$cost_component %||% cr$cost_component_key),
+        cause_code = as.character(cr$cause_code %||% NA_character_),
+        cost_scope = as.character(cr$cost_scope), pin_measure = cr$population_in_need_measure,
+        pin_fraction = cr$population_in_need_fraction, frequency_per_year = cr$frequency_per_year,
+        unit_cost_usd = cr$unit_cost_usd, q_scenario = q_s, q_baseline = q_b,
+        covimpl_scenario = cov_s, covimpl_baseline = cov_b,
+        indonesia_adjusted_flag = cr$indonesia_adjusted_flag, price_year = cr$price_year,
+        review_status = as.character(cr$cost_review))
+    }
+  }
+  add_ph <- function(scn, ids) {
+    comps <- ph_costs[intervention_id %in% ids & cost_ready == TRUE]
+    for (i in seq_len(nrow(comps))) {
+      cr <- comps[i]
+      p_s <- pop_for(scn, cr$c_age_start, cr$c_age_stop, cr$c_sex)
+      p_b <- pop_for(base_id, cr$c_age_start, cr$c_age_stop, cr$c_sex)
+      cost_rows[[length(cost_rows) + 1L]] <<- data.table(
+        scenario = scn, family = "public_health", year = analysis_yrs,
+        intervention_id = cr$intervention_id, cost_record_id = as.character(cr$cost_record_id),
+        cost_key = paste0("public_health|", cr$cost_record_id),
+        cost_component = as.character(cr$cost_component %||% cr$cost_component_key),
+        cause_code = NA_character_, cost_scope = as.character(cr$cost_scope),
+        pin_measure = "all", pin_fraction = cr$population_in_need_fraction,
+        frequency_per_year = cr$frequency_per_year, unit_cost_usd = cr$unit_cost_usd,
+        q_scenario = p_s, q_baseline = p_b,
+        covimpl_scenario = cimpl, covimpl_baseline = rep(base_impl, length(analysis_yrs)),
+        indonesia_adjusted_flag = cr$indonesia_adjusted_flag, price_year = cr$price_year,
+        review_status = as.character(cr$cost_review))
+    }
+  }
+  for (scn in clin_comparators) add_clin(scn, fair_scenarios[[scn]]$intervention_ids)
+  for (scn in ph_comparators)   add_ph(scn,  public_health_scenarios[[scn]]$intervention_ids)
+  # JOINT scenario: clinical components (its clinical rule) + PH components (its PH
+  # rule), each computed against the joint scenario's OWN Model 06 population.
+  add_clin(joint_id, combined_scenarios[[joint_id]]$clinical_intervention_ids)
+  add_ph(joint_id,   combined_scenarios[[joint_id]]$public_health_intervention_ids)
+  annual_cost <- if (length(cost_rows)) rbindlist(cost_rows, fill = TRUE) else data.table()
+  if (nrow(annual_cost)) {
+    annual_cost[, discount_factor := 1 / (1 + disc_rate)^(year - yr_start)]
+    annual_cost[, pin_scenario := q_scenario * pin_fraction]
+    annual_cost[, pin_baseline := q_baseline * pin_fraction]
+    annual_cost[, annual_cost_scenario := pin_scenario * covimpl_scenario * frequency_per_year * unit_cost_usd]
+    annual_cost[, annual_cost_baseline := pin_baseline * covimpl_baseline * frequency_per_year * unit_cost_usd]
+    annual_cost[, annual_cost_incremental := annual_cost_scenario - annual_cost_baseline]
+    annual_cost[, disc_cost_incremental := annual_cost_incremental * discount_factor]
+  }
+
+  ## ---- budget impact + cost-effectiveness (R anchors) ---------------------
+  if (nrow(annual_cost)) {
+    bi <- annual_cost[, .(baseline_cost = sum(annual_cost_baseline),
+                          scenario_cost = sum(annual_cost_scenario),
+                          incremental_cost = sum(annual_cost_incremental),
+                          disc_incremental_cost = sum(disc_cost_incremental)),
+                      by = .(scenario, year)]
+    setorder(bi, scenario, year)
+    bi[, cumulative_incremental_cost := cumsum(incremental_cost), by = scenario]
+    bi[, cumulative_disc_incremental_cost := cumsum(disc_incremental_cost), by = scenario]
+  } else bi <- data.table()
+
+  da <- mort[, .(deaths_averted = sum(base_deaths - cause_deaths, na.rm = TRUE),
+                 cases_averted  = sum(base_cases  - cases, na.rm = TRUE)), by = scenario]
+  ic <- if (nrow(bi)) bi[, .(incremental_cost = sum(incremental_cost),
+                             disc_incremental_cost = sum(disc_incremental_cost)), by = scenario] else
+    data.table(scenario = comparators, incremental_cost = 0, disc_incremental_cost = 0)
+  cea <- merge(da, ic, by = "scenario", all.x = TRUE)
+  cea[is.na(incremental_cost), incremental_cost := 0]
+  cea[is.na(disc_incremental_cost), disc_incremental_cost := 0]
+  cea[, scenario_label := scen_lab[scenario]]
+  cea[, cost_per_death_averted := NA_real_]
+  cea[deaths_averted > 0, cost_per_death_averted := disc_incremental_cost / deaths_averted]
+  setcolorder(cea, c("scenario", "scenario_label", "deaths_averted", "cases_averted",
+                     "incremental_cost", "disc_incremental_cost", "cost_per_death_averted"))
+  setorder(cea, -deaths_averted)
+
+  # anchor scenario for Excel-vs-R reconciliation
+  anchor_scn <- joint_id
+  ar <- cea[scenario == anchor_scn]
+  r_da  <- if (nrow(ar)) ar$deaths_averted[1] else NA_real_
+  r_dic <- if (nrow(ar)) ar$disc_incremental_cost[1] else NA_real_
+  r_cpd <- if (nrow(ar)) ar$cost_per_death_averted[1] else NA_real_
+  tol <- 1e-6
+  negc   <- mo[, sum(well < -tol | sick < -tol | newcases < -tol | dead < -tol | pop < -tol)]
+  maxres <- mo[, max(abs(pop - (well + sick + all.mx)))]
+  ndist  <- mo[, .(n = uniqueN(round(all.mx, 6))), by = .(scenario, year, age, sex)][, max(n)]
+
+  ## ---- scenario catalogue (family + level + provenance) -------------------
+  catrow <- function(scn) {
+    if (scn == joint_id) { e <- combined_scenarios[[joint_id]]
+      return(data.table(scenario = scn, scenario_label = e$scenario_label,
+        intervention_family = "clinical_public_health", scenario_level = "combined",
+        scenario_role = "combined", parent_package_id = NA_character_,
+        intervention_ids = paste(e$intervention_ids, collapse = "; "),
+        n_interventions = length(e$intervention_ids))) }
+    if (scn %in% names(fair_scenarios)) { e <- fair_scenarios[[scn]]
+      return(data.table(scenario = scn, scenario_label = e$scenario_label,
+        intervention_family = "clinical",
+        scenario_level = if (scn == "all") "combined" else "standalone",
+        scenario_role = NA_character_, parent_package_id = NA_character_,
+        intervention_ids = paste(e$intervention_ids, collapse = "; "),
+        n_interventions = length(e$intervention_ids))) }
+    e <- public_health_scenarios[[scn]]
+    data.table(scenario = scn, scenario_label = e$scenario_label,
+      intervention_family = "public_health",
+      scenario_level = e$scenario_level %||% "standalone",
+      scenario_role = e$scenario_role %||% NA_character_,
+      parent_package_id = e$parent_package_id %||% NA_character_,
+      intervention_ids = paste(e$intervention_ids, collapse = "; "),
+      n_interventions = length(e$intervention_ids))
+  }
+  scat <- rbindlist(lapply(comparators, catrow), fill = TRUE)
+
+  ## ---- BCA sources (Model 07 health, Model 08 value) ----------------------
+  ho_src_comb <- dt_h07[scenario %in% comparators, .(
+    scenario_label = scenario_label[1L],
+    modeled_deaths = sum(deaths),   baseline_deaths = sum(base_deaths),
+    modeled_cases  = sum(newcases), baseline_cases  = sum(base_newcases),
+    yll = sum(yll), base_yll = sum(base_yll), yld = sum(yld), base_yld = sum(base_yld),
+    daly = sum(daly), base_daly = sum(base_daly)), by = .(scenario, year)]
+  ev_src_comb <- ev08[scenario %in% comparators, .(
+    scenario_label    = scenario_label[1L],
+    deaths_averted    = sum(deaths_averted),
+    life_years_gained = sum(life_years_gained_undisc),
+    gni_pc_idn = gni_pc_ppp[1L], gni_pc_usa = gni_pc_usa[1L],
+    population = population[1L],  le_avg_adult = le_avg_adult[1L]), by = .(scenario, year)]
+  ev_missing <- setdiff(comparators, unique(ev_src_comb$scenario))
+  if (length(ev_missing))
+    message("  NOTE (combined): no Model 08 economic value for scenario(s): ",
+            paste(ev_missing, collapse = ", "),
+            " -- they appear in health/CVD sheets but not Economic_Value/Benefit_Cost.")
+  scen_meta_comb <- unique(dt_h07[scenario %in% comparators, .(
+    scenario, scenario_label, intervention_family,
+    scenario_level = fifelse(scenario %in% c("all", "all_public_health", joint_id), "combined",
+                      fifelse(is.na(scenario_role), "standalone", scenario_role)))])
+
+  # ------------------------------------------------------------------------
+  # WRITE WORKBOOK
+  # ------------------------------------------------------------------------
+  int2col <- openxlsx::int2col
+  frows <- function(fn, rows) vapply(rows, fn, character(1))
+  C_HDR <- "#1F4E78"; C_FORMULA <- "#DDEBF7"; C_RSRC <- "#F2F2F2"; C_INPUT <- "#FFF2CC"
+  st_hdr   <- createStyle(fontColour = "#FFFFFF", fgFill = C_HDR, textDecoration = "bold",
+                          halign = "center", valign = "center", wrapText = TRUE,
+                          border = "TopBottomLeftRight", borderColour = "#8EA9C1")
+  st_formula <- createStyle(fgFill = C_FORMULA); st_rsrc <- createStyle(fgFill = C_RSRC)
+  st_input   <- createStyle(fgFill = C_INPUT);   st_wrap <- createStyle(valign = "top", wrapText = TRUE)
+  st_joint   <- createStyle(fgFill = "#FCE4D6", textDecoration = "bold")   # highlight joint row
+  cf_pass <- createStyle(bgFill = "#C6EFCE", fontColour = "#006100")
+  cf_fail <- createStyle(bgFill = "#FFC7CE", fontColour = "#9C0006")
+  cf_rev  <- createStyle(bgFill = "#FFEB9C", fontColour = "#9C6500")
+  fmt_of2 <- function(col) {
+    cl <- tolower(col)
+    if (grepl("frequency", cl)) return("0.00")
+    if (grepl("discount_factor|covimpl|impl_frac|_ratio$", cl)) return("0.000")
+    if (grepl("^year$|_year$|price_year|start_year|target_year|analysis_", cl)) return("0")
+    if (grepl("_fraction$|^fraction$|pin_fraction", cl)) return("0.0%")
+    if (grepl("unit_cost", cl)) return("#,##0.0000")
+    if (grepl("40q30|reduction_pp|_pct$", cl)) return("0.000")
+    if (grepl("percent_reduction", cl)) return("0.00")
+    if (grepl("per_death|per_daly|per_case", cl)) return("#,##0")
+    if (grepl("benefit_cost_ratio", cl)) return("0.00")
+    if (grepl("cost|value|budget|pin_|_cost$|benefit|net_", cl)) return("#,##0")
+    if (grepl("death|case|population|averted|pop_|q_scenario|q_baseline|_count$|residual|distinct|negative|life_years", cl)) return("#,##0")
+    NA_character_
+  }
+  wb <- createWorkbook()
+  modifyBaseFont(wb, fontName = "Carlito", fontSize = 11)
+  style_sheet <- function(sheet, nm, nrow_data, formula_cols = integer(0),
+                          rsource_cols = integer(0), input_cols = integer(0),
+                          header_row = 1L, wrap_cols = integer(0), filter = TRUE,
+                          min_w = 11, max_w = 46) {
+    ncol <- length(nm)
+    addStyle(wb, sheet, st_hdr, rows = header_row, cols = seq_len(ncol), gridExpand = TRUE)
+    if (nrow_data > 0) {
+      dr <- (header_row + 1L):(header_row + nrow_data)
+      for (j in formula_cols) addStyle(wb, sheet, st_formula, rows = dr, cols = j, gridExpand = TRUE, stack = TRUE)
+      for (j in rsource_cols) addStyle(wb, sheet, st_rsrc,    rows = dr, cols = j, gridExpand = TRUE, stack = TRUE)
+      for (j in input_cols)   addStyle(wb, sheet, st_input,   rows = dr, cols = j, gridExpand = TRUE, stack = TRUE)
+      for (j in seq_len(ncol)) { f <- fmt_of2(nm[j])
+        if (!is.na(f)) addStyle(wb, sheet, createStyle(numFmt = f), rows = dr, cols = j, gridExpand = TRUE, stack = TRUE) }
+      for (j in wrap_cols) addStyle(wb, sheet, st_wrap, rows = dr, cols = j, gridExpand = TRUE, stack = TRUE)
+    }
+    freezePane(wb, sheet, firstActiveRow = header_row + 1L, firstActiveCol = 1L)
+    if (filter) addFilter(wb, sheet, rows = header_row, cols = seq_len(ncol))
+    setColWidths(wb, sheet, cols = seq_len(ncol), widths = pmin(pmax(nchar(nm) + 2L, min_w), max_w))
+    setRowHeights(wb, sheet, rows = header_row, heights = 28)
+  }
+  sty_comb <- list(st_hdr = st_hdr, st_formula = st_formula, st_rsrc = st_rsrc,
+                   st_input = st_input, st_wrap = st_wrap,
+                   cf_pass = cf_pass, cf_fail = cf_fail, cf_rev = cf_rev)
+
+  ## ===== Calculation_Assumptions ==========================================
+  ca <- data.table(
+    parameter_id = c("analysis_start_year","analysis_end_year","baseline_scenario_id",
+                     "cost_discount_rate","cost_price_year","policy_start_year",
+                     "policy_cost_ramp_years","baseline_implementation_fraction","currency",
+                     "formula_tolerance","stock_flow_residual_limit",
+                     "r_negative_state_count","r_stock_flow_max_residual","r_background_distinct_count",
+                     "r_deaths_averted_anchor","r_disc_incremental_cost_anchor",
+                     "r_cost_per_death_anchor","qa_anchor_scenario"),
+    value = list(yr_start, yr_end, base_id, disc_rate, as.integer(A$cost_price_year),
+                 policy_start, ramp_years, base_impl, A$currency, 0.001, 1000,
+                 as.integer(negc), round(as.numeric(maxres), 2), as.integer(ndist),
+                 as.numeric(r_da), as.numeric(r_dic), as.numeric(r_cpd), anchor_scn),
+    unit = c("year","year","scenario id","proportion/year","USD year","year","years",
+             "proportion","currency","USD/count","persons","count","persons","count",
+             "deaths","USD","USD/death","scenario id"),
+    role = c(rep("formula control", 9), "QA control","QA control", rep("R QA source",3),
+             rep("R reconciliation source",4)),
+    description = c("First model and discount year","Last model year","No-new-intervention comparator",
+                   "Annual discount rate applied to costs","Reporting price year",
+                   "First public-health policy implementation year","Years to full policy cost",
+                   "Baseline (counterfactual) policy implementation fraction","Reporting currency",
+                   "Absolute reconciliation tolerance","Persons tolerance for the stock/flow check",
+                   "Impossible negative state count (R)","Max stock/flow residual (R)",
+                   "Max distinct all-cause mx across cause (R)",
+                   "R deaths averted for the anchor (joint) scenario",
+                   "R discounted incremental cost for the anchor (joint) scenario",
+                   "R USD per death averted for the anchor (joint) scenario",
+                   "Scenario used for Excel-vs-R reconciliation (the joint scenario)"),
+    source = c("Model 04 / Model 09","Model 04 / Model 09","Model 04",
+               "indonesia_model_inputs.xlsx","indonesia_model_inputs.xlsx",
+               basename(public_health_inputs$inputs_path), basename(public_health_inputs$inputs_path),
+               "Model 09","indonesia_model_inputs.xlsx","Workbook QA rule","Workbook QA rule",
+               rep("Model 09 current run",3), rep("Model 09 current run (R CEA)",4)))
+  .bcab <- bca_ca_block(bca_params)
+  n_ca_core <- nrow(ca)
+  ca <- rbind(ca, .bcab$ca_bca)
+  bca_fmt_vec <- .bcab$fmt
+  addWorksheet(wb, "Calculation_Assumptions")
+  writeData(wb, "Calculation_Assumptions",
+            data.frame(parameter_id="parameter_id", value="value", unit="unit",
+                       role="role", description="description", source="source"),
+            colNames = FALSE, startRow = 1)
+  writeData(wb, "Calculation_Assumptions", ca$parameter_id, startCol = 1, startRow = 2, colNames = FALSE)
+  writeData(wb, "Calculation_Assumptions", as.data.frame(ca[, .(unit, role, description, source)]),
+            startCol = 3, startRow = 2, colNames = FALSE)
+  for (i in seq_len(nrow(ca)))
+    writeData(wb, "Calculation_Assumptions", ca$value[[i]], startCol = 2, startRow = 1 + i, colNames = FALSE)
+  addStyle(wb, "Calculation_Assumptions", st_hdr, rows = 1, cols = 1:6, gridExpand = TRUE)
+  addStyle(wb, "Calculation_Assumptions", st_input, rows = 2:(1 + 11L), cols = 2, gridExpand = TRUE, stack = TRUE)
+  addStyle(wb, "Calculation_Assumptions", st_rsrc,  rows = (2 + 11L):(1 + n_ca_core), cols = 2, gridExpand = TRUE, stack = TRUE)
+  addStyle(wb, "Calculation_Assumptions", st_input,
+           rows = (n_ca_core + 2L):(nrow(ca) + 1L), cols = 2, gridExpand = TRUE, stack = TRUE)
+  addStyle(wb, "Calculation_Assumptions", st_wrap, rows = 2:(nrow(ca) + 1), cols = 5, gridExpand = TRUE, stack = TRUE)
+  freezePane(wb, "Calculation_Assumptions", firstActiveRow = 2)
+  addFilter(wb, "Calculation_Assumptions", rows = 1, cols = 1:6)
+  setColWidths(wb, "Calculation_Assumptions", cols = 1:6, widths = c(34, 18, 14, 22, 60, 40))
+  setRowHeights(wb, "Calculation_Assumptions", rows = 1, heights = 28)
+  .carow <- function(pid) match(pid, ca$parameter_id) + 1L
+  .bcell <- function(pid) sprintf("'Calculation_Assumptions'!$B$%d", .carow(pid))
+  cA_start <- .bcell("analysis_start_year"); cA_end <- .bcell("analysis_end_year")
+  cA_disc  <- .bcell("cost_discount_rate");  cA_tol <- .bcell("formula_tolerance")
+  cA_rda   <- .bcell("r_deaths_averted_anchor"); cA_rdic <- .bcell("r_disc_incremental_cost_anchor")
+  cA_rcpd  <- .bcell("r_cost_per_death_anchor")
+  bca_cells_comb <- list(
+    ratio = .bcell("vsl_us_gni_ratio"), elast = .bcell("vsl_income_elasticity_preferred"),
+    floor = .bcell("vsl_floor_gni_multiple"), mult100 = .bcell("vsl_sensitivity_gni_multiple_100"),
+    mult160 = .bcell("vsl_sensitivity_gni_multiple_160"), r_primary = .bcell("bca_discount_rate_primary"),
+    base_year = .bcell("bca_base_year"), price_year = .bcell("bca_price_year"),
+    cost_factor = .bcell("cost_to_bca_currency_factor"), scope = .bcell("bca_scope"))
+
+  ## ===== README ==========================================================
+  readme <- data.table(section = c(
+    "Purpose","Scope","How to read","Scenarios","The joint scenario","Costing the joint scenario",
+    "CVD 40q30","Benefit-cost","Colour legend"),
+    detail = c(
+    "Combined clinical (FAIR Choices) + public-health (fiscal/regulatory) costing, budget impact, cost-effectiveness, CVD 40q30 and Reference-Case benefit-cost analysis in one workbook.",
+    "Baseline (once) + every clinical scenario + every public-health scenario + the genuine joint 'all_clinical_public_health' scenario. intervention_family tags each scenario baseline / clinical / public_health / clinical_public_health.",
+    "Grey cells are R source values; light-blue cells are LIVE Excel formulas; pale-yellow cells on Calculation_Assumptions are editable controls. The joint scenario is highlighted (orange) on Summary. Calculation_Map lists the dependency chain.",
+    "See Summary and Scenario_Catalog. Family-specific input/audit sheets are prefixed CL_ (clinical) and PH_ (public-health) where the two source schemas differ.",
+    "'all_clinical_public_health' is produced by a SINGLE Model 06 projection that applies the clinical (fair_wb) and public-health (ph_wb) engines once each to the same baseline-rate copy -- it is NEVER the arithmetic sum of the separate 'all' and 'all_public_health' outputs.",
+    "Joint cost = clinical components (clinical costing rule) + public-health components (per-capita policy rule), BOTH computed against the joint scenario's own Model 06 population/state. family provenance is retained on every Annual_Cost row and keys are collision-safe (family|cost_record_id).",
+    "CVD_40q30 / CVD_40q30_Age give the period probability of dying from the six CVD causes between exact ages 30 and 70 (percent on a 0-100 scale). The life table (m_x, q_x, l_x, l_{x+1}) is live Excel formula; cvd_40q30 reconciles to the Model 07 R value.",
+    "Reference-Case VSL/VSLY benefit-cost (Robinson et al. 2019) on Health_Outcomes / Economic_Value / Benefit_Cost; PARTIAL mortality-benefit BCA.",
+    "header dark-blue; formula light-blue; R-source grey; editable-input pale-yellow; QA green/red/orange."))
+  addWorksheet(wb, "README")
+  writeData(wb, "README", readme, headerStyle = st_hdr)
+  style_sheet("README", names(readme), nrow(readme), wrap_cols = 2, filter = FALSE, max_w = 120)
+  setColWidths(wb, "README", cols = 1:2, widths = c(24, 120))
+
+  ## ===== Run_Metadata =====================================================
+  meta_dt <- data.table(
+    field = c("workbook","generated_by","clinical_workbook","public_health_workbook",
+              "baseline_scenario","joint_scenario","n_clinical_scenarios","n_public_health_scenarios",
+              "analysis_years","location"),
+    value = c(basename(out_file), "Model 09 (09_cost_value.R)",
+              basename(fair_inputs$inputs_path), basename(public_health_inputs$inputs_path),
+              base_id, joint_id, as.character(length(clin_comparators)),
+              as.character(length(ph_comparators)), paste0(yr_start, "-", yr_end),
+              paste(unique(mo$location), collapse = ", ")))
+  addWorksheet(wb, "Run_Metadata")
+  writeData(wb, "Run_Metadata", meta_dt, headerStyle = st_hdr)
+  style_sheet("Run_Metadata", names(meta_dt), nrow(meta_dt), rsource_cols = 2, wrap_cols = 2, filter = FALSE, max_w = 70)
+
+  ## ===== Scenario_Catalog =================================================
+  addWorksheet(wb, "Scenario_Catalog")
+  writeData(wb, "Scenario_Catalog", as.data.frame(scat), headerStyle = st_hdr)
+  style_sheet("Scenario_Catalog", names(scat), nrow(scat), rsource_cols = seq_along(scat), wrap_cols = c(2, 7))
+  .jrow_sc <- which(scat$scenario == joint_id)
+  if (length(.jrow_sc)) addStyle(wb, "Scenario_Catalog", st_joint, rows = .jrow_sc + 1L,
+                                 cols = seq_along(scat), gridExpand = TRUE, stack = TRUE)
+
+  ## ===== family-specific audit sheets (CL_ / PH_) =========================
+  cl_sel <- fair_inputs$valid_links[, .(intervention_id, intervention_cause_key, cause_code,
+                                        model_transition, effect_value, affected_fraction,
+                                        baseline_coverage, target_coverage, start_year, target_year)]
+  addWorksheet(wb, "CL_Selected_Interventions")
+  writeData(wb, "CL_Selected_Interventions", as.data.frame(cl_sel), headerStyle = st_hdr)
+  style_sheet("CL_Selected_Interventions", names(cl_sel), nrow(cl_sel), rsource_cols = seq_along(cl_sel))
+  cl_cc <- clin_costs[, .(cost_record_id, intervention_id, cause_code, cost_component, cost_scope,
+                          population_in_need_measure, population_in_need_fraction, frequency_per_year,
+                          unit_cost_usd, cov_baseline, cov_target, cost_ready)]
+  addWorksheet(wb, "CL_Cost_Components")
+  writeData(wb, "CL_Cost_Components", as.data.frame(cl_cc), headerStyle = st_hdr)
+  style_sheet("CL_Cost_Components", names(cl_cc), nrow(cl_cc), rsource_cols = seq_along(cl_cc))
+
+  ph_sel <- public_health_inputs$valid_links[, .(intervention_id, intervention_cause_key, cause_code,
+                                                 model_transition, transition_from, transition_to,
+                                                 effect_model, baseline_exposure, target_exposure,
+                                                 response_value, start_year = exposure_start_year,
+                                                 target_year = exposure_target_year)]
+  addWorksheet(wb, "PH_Selected_Interventions")
+  writeData(wb, "PH_Selected_Interventions", as.data.frame(ph_sel), headerStyle = st_hdr)
+  style_sheet("PH_Selected_Interventions", names(ph_sel), nrow(ph_sel), rsource_cols = seq_along(ph_sel))
+  ph_cc <- ph_costs[, .(cost_record_id, intervention_id, parent_package_id, cost_component, cost_scope,
+                        population_in_need_fraction, frequency_per_year, unit_cost_usd,
+                        c_age_start, c_age_stop, c_sex, cost_ready)]
+  addWorksheet(wb, "PH_Cost_Components")
+  writeData(wb, "PH_Cost_Components", as.data.frame(ph_cc), headerStyle = st_hdr)
+  style_sheet("PH_Cost_Components", names(ph_cc), nrow(ph_cc), rsource_cols = seq_along(ph_cc))
+  ph_hier <- as.data.frame(public_health_inputs$hierarchy)
+  addWorksheet(wb, "PH_Scenario_Hierarchy")
+  writeData(wb, "PH_Scenario_Hierarchy", ph_hier, headerStyle = st_hdr)
+  style_sheet("PH_Scenario_Hierarchy", names(ph_hier), nrow(ph_hier), rsource_cols = seq_along(ph_hier),
+              wrap_cols = which(names(ph_hier) %in% c("parent_aggregation_rule","outcome_reporting_rule",
+                                                      "cost_reporting_rule","source_note")))
+
+  ## ===== Annual_Mortality =================================================
+  am <- copy(mort); am[, `:=`(deaths_averted = NA_real_, cases_averted = NA_real_)]
+  n_am <- nrow(am); r_am <- max(n_am + 1L, 2L)
+  addWorksheet(wb, "Annual_Mortality")
+  writeData(wb, "Annual_Mortality", as.data.frame(am), headerStyle = st_hdr)
+  # A scn B label C year D cause E cases F cause_deaths G base_cases H base_deaths I averted J cases_averted
+  if (n_am > 0) {
+    writeFormula(wb, "Annual_Mortality", startCol = 9, startRow = 2, x = frows(function(r) sprintf("H%d-F%d", r, r), 2:r_am))
+    writeFormula(wb, "Annual_Mortality", startCol = 10, startRow = 2, x = frows(function(r) sprintf("G%d-E%d", r, r), 2:r_am))
+  }
+  style_sheet("Annual_Mortality", names(am), n_am, formula_cols = c(9, 10), rsource_cols = c(5, 6, 7, 8))
+
+  ## ===== Annual_Cost (family provenance; joint costed from its own run) ====
+  ac_cols <- c("scenario","family","year","intervention_id","cost_record_id","cost_key",
+               "cost_component","cause_code","cost_scope","pin_measure","pin_fraction",
+               "frequency_per_year","unit_cost_usd","q_scenario","q_baseline",
+               "covimpl_scenario","covimpl_baseline","discount_factor","pin_scenario","pin_baseline",
+               "annual_cost_baseline","annual_cost_scenario","annual_cost_incremental",
+               "disc_cost_incremental","indonesia_adjusted_flag","price_year","review_status",
+               "shared_duplicate_count")
+  n_ac <- nrow(annual_cost); r_ac <- max(n_ac + 1L, 2L)
+  if (n_ac > 0) {
+    ac <- as.data.frame(annual_cost[, .(scenario, family, year, intervention_id, cost_record_id,
+                                        cost_key, cost_component, cause_code, cost_scope, pin_measure,
+                                        pin_fraction, frequency_per_year, unit_cost_usd,
+                                        q_scenario, q_baseline, covimpl_scenario, covimpl_baseline)],
+                        stringsAsFactors = FALSE)
+    for (cn in ac_cols[18:24]) ac[[cn]] <- NA_real_
+    ac$indonesia_adjusted_flag <- annual_cost$indonesia_adjusted_flag
+    ac$price_year <- annual_cost$price_year
+    ac$review_status <- annual_cost$review_status
+    ac$shared_duplicate_count <- NA_real_
+    ac <- ac[, ac_cols]
+  } else ac <- as.data.frame(setNames(replicate(length(ac_cols), logical(0), simplify = FALSE), ac_cols))
+  addWorksheet(wb, "Annual_Cost")
+  writeData(wb, "Annual_Cost", ac, headerStyle = st_hdr)
+  if (n_ac > 0) {
+    R <- 2:r_ac; wf <- function(col, fn) writeFormula(wb, "Annual_Cost", startCol = col, startRow = 2, x = frows(fn, R))
+    wf(18, function(r) sprintf("1/(1+%s)^(C%d-%s)", cA_disc, r, cA_start))     # discount_factor
+    wf(19, function(r) sprintf("N%d*K%d", r, r))                              # pin_scenario
+    wf(20, function(r) sprintf("O%d*K%d", r, r))                              # pin_baseline
+    wf(21, function(r) sprintf("T%d*Q%d*L%d*M%d", r, r, r, r))                # annual_cost_baseline
+    wf(22, function(r) sprintf("S%d*P%d*L%d*M%d", r, r, r, r))                # annual_cost_scenario
+    wf(23, function(r) sprintf("V%d-U%d", r, r))                              # annual_cost_incremental
+    wf(24, function(r) sprintf("W%d*R%d", r, r))                              # disc_cost_incremental
+    wf(28, function(r) sprintf("IF(I%d=\"shared-count-once\",COUNTIFS($A$2:$A$%d,A%d,$C$2:$C$%d,C%d,$E$2:$E$%d,E%d,$B$2:$B$%d,B%d),1)",
+                               r, r_ac, r, r_ac, r, r_ac, r, r_ac, r))        # shared_duplicate_count
+  }
+  style_sheet("Annual_Cost", ac_cols, n_ac, formula_cols = c(18:24, 28), rsource_cols = 11:17)
+
+  ## ===== Budget_Impact ====================================================
+  bud_cols <- c("scenario","year","baseline_cost","scenario_cost","incremental_cost",
+                "disc_incremental_cost","cumulative_incremental_cost","cumulative_disc_incremental_cost")
+  n_bi <- nrow(bi); r_bi <- max(n_bi + 1L, 2L)
+  if (n_bi > 0) { bud <- data.frame(scenario = bi$scenario, year = bi$year, stringsAsFactors = FALSE)
+    for (cn in bud_cols[3:8]) bud[[cn]] <- NA_real_
+  } else bud <- as.data.frame(setNames(replicate(8, logical(0), simplify = FALSE), bud_cols))
+  addWorksheet(wb, "Budget_Impact")
+  writeData(wb, "Budget_Impact", bud, headerStyle = st_hdr)
+  if (n_bi > 0) {
+    R <- 2:r_bi
+    sac <- function(tgt, r) sprintf("SUMIFS('Annual_Cost'!$%s$2:$%s$%d,'Annual_Cost'!$A$2:$A$%d,A%d,'Annual_Cost'!$C$2:$C$%d,B%d)",
+                                    tgt, tgt, r_ac, r_ac, r, r_ac, r)
+    writeFormula(wb, "Budget_Impact", startCol = 3, startRow = 2, x = frows(function(r) sac("U", r), R))
+    writeFormula(wb, "Budget_Impact", startCol = 4, startRow = 2, x = frows(function(r) sac("V", r), R))
+    writeFormula(wb, "Budget_Impact", startCol = 5, startRow = 2, x = frows(function(r) sac("W", r), R))
+    writeFormula(wb, "Budget_Impact", startCol = 6, startRow = 2, x = frows(function(r) sac("X", r), R))
+    writeFormula(wb, "Budget_Impact", startCol = 7, startRow = 2, x = frows(function(r) sprintf("SUMIFS($E$2:E%d,$A$2:A%d,A%d)", r, r, r), R))
+    writeFormula(wb, "Budget_Impact", startCol = 8, startRow = 2, x = frows(function(r) sprintf("SUMIFS($F$2:F%d,$A$2:A%d,A%d)", r, r, r), R))
+  }
+  style_sheet("Budget_Impact", bud_cols, n_bi, formula_cols = 3:8)
+
+  ## ===== Cost_Effectiveness ===============================================
+  ce_cols <- c("scenario","scenario_label","deaths_averted","cases_averted","incremental_cost",
+               "disc_incremental_cost","cost_per_death_averted","dominance","reconciliation_status")
+  n_ce <- nrow(cea); r_ce <- max(n_ce + 1L, 2L)
+  ce <- data.frame(scenario = cea$scenario, scenario_label = cea$scenario_label, stringsAsFactors = FALSE)
+  for (cn in ce_cols[3:7]) ce[[cn]] <- NA_real_
+  ce$dominance <- NA_character_; ce$reconciliation_status <- NA_character_
+  addWorksheet(wb, "Cost_Effectiveness")
+  writeData(wb, "Cost_Effectiveness", ce, headerStyle = st_hdr)
+  if (n_ce > 0) {
+    R <- 2:r_ce
+    writeFormula(wb, "Cost_Effectiveness", startCol = 3, startRow = 2, x = frows(function(r)
+      sprintf("SUMIFS('Annual_Mortality'!$I$2:$I$%d,'Annual_Mortality'!$A$2:$A$%d,A%d)", r_am, r_am, r), R))
+    writeFormula(wb, "Cost_Effectiveness", startCol = 4, startRow = 2, x = frows(function(r)
+      sprintf("SUMIFS('Annual_Mortality'!$J$2:$J$%d,'Annual_Mortality'!$A$2:$A$%d,A%d)", r_am, r_am, r), R))
+    writeFormula(wb, "Cost_Effectiveness", startCol = 5, startRow = 2, x = frows(function(r)
+      sprintf("SUMIFS('Budget_Impact'!$E$2:$E$%d,'Budget_Impact'!$A$2:$A$%d,A%d)", r_bi, r_bi, r), R))
+    writeFormula(wb, "Cost_Effectiveness", startCol = 6, startRow = 2, x = frows(function(r)
+      sprintf("SUMIFS('Budget_Impact'!$F$2:$F$%d,'Budget_Impact'!$A$2:$A$%d,A%d)", r_bi, r_bi, r), R))
+    writeFormula(wb, "Cost_Effectiveness", startCol = 7, startRow = 2, x = frows(function(r)
+      sprintf("IF(C%d>0,F%d/C%d,\"\")", r, r, r), R))
+    writeFormula(wb, "Cost_Effectiveness", startCol = 8, startRow = 2, x = frows(function(r)
+      sprintf("IF(AND(C%d>0,F%d<0),\"Dominant (more health, lower cost)\",IF(AND(C%d<=0,F%d>0),\"Dominated (less/no health, higher cost)\",IF(AND(C%d<=0,F%d<=0),\"No deaths averted; ratio not defined\",\"USD per death averted\")))",
+              r, r, r, r, r, r), R))
+    writeFormula(wb, "Cost_Effectiveness", startCol = 9, startRow = 2, x = frows(function(r)
+      sprintf("IF(AND(ABS(F%d-SUMIFS('Budget_Impact'!$F$2:$F$%d,'Budget_Impact'!$A$2:$A$%d,A%d))<=%s,ABS(C%d-SUMIFS('Annual_Mortality'!$I$2:$I$%d,'Annual_Mortality'!$A$2:$A$%d,A%d))<=%s),\"consistent\",\"mismatch\")",
+              r, r_bi, r_bi, r, cA_tol, r, r_am, r_am, r, cA_tol), R))
+  }
+  style_sheet("Cost_Effectiveness", ce_cols, n_ce, formula_cols = 3:9, wrap_cols = c(2, 8))
+  conditionalFormatting(wb, "Cost_Effectiveness", cols = 9, rows = 2:r_ce, rule = "consistent", type = "contains", style = cf_pass)
+  conditionalFormatting(wb, "Cost_Effectiveness", cols = 9, rows = 2:r_ce, rule = "mismatch",   type = "contains", style = cf_fail)
+
+  ## ===== Health_Outcomes + Economic_Value + Benefit_Cost (BCA) ============
+  n_ho <- nrow(ho_src_comb); r_ho <- max(n_ho + 1L, 2L)
+  n_bc <- nrow(scen_meta_comb) * 4L; r_bc <- max(n_bc + 1L, 2L)
+  if (nrow(ev_src_comb) > 0L) {
+    build_bca_sheets_into(wb, comparators, ho_src_comb, ev_src_comb, scen_meta_comb,
+                          bca_cells_comb, r_bi, sty_comb)
+  } else {
+    addWorksheet(wb, "Economic_Value")
+    writeData(wb, "Economic_Value",
+              data.frame(note = "No Model 08 economic value for the combined comparators in this run."),
+              headerStyle = st_hdr)
+    setColWidths(wb, "Economic_Value", cols = 1, widths = 110)
+  }
+
+  ## ===== CVD_40q30_Age + CVD_40q30 ========================================
+  build_cvd_40q30_sheets_into(wb, combined_ids, dt_cvd_40q30, cvd_age_40q30, base_id, sty_comb)
+  r_q40s <- nrow(dt_cvd_40q30[scenario %in% combined_ids]) + 1L   # CVD_40q30 sheet rows
+
+  ## ===== Summary (first sheet; formula-driven; joint highlighted) =========
+  sum_cols <- c("scenario","scenario_label","intervention_family","scenario_level","n_interventions",
+                "analysis_start_year","analysis_end_year","cases_averted","deaths_averted",
+                "ylls_averted","ylds_averted","dalys_averted","life_years_gained",
+                "cvd_40q30_start_pct","cvd_40q30_end_pct","cvd_40q30_abs_reduction_pp_end",
+                "cvd_40q30_pct_reduction_end","incremental_cost","disc_incremental_cost",
+                "cost_per_death_averted","cost_per_daly_averted","pv_benefits","pv_costs",
+                "pv_net_benefit","benefit_cost_ratio")
+  SM <- data.frame(scenario = scat$scenario, scenario_label = scat$scenario_label,
+                   intervention_family = scat$intervention_family, scenario_level = scat$scenario_level,
+                   n_interventions = scat$n_interventions, stringsAsFactors = FALSE)
+  for (cn in sum_cols[6:25]) SM[[cn]] <- if (cn == "benefit_cost_ratio") NA_real_ else NA_real_
+  SM <- SM[, sum_cols]
+  n_sm <- nrow(SM); r_sm <- max(n_sm + 1L, 2L)
+  addWorksheet(wb, "Summary")
+  writeData(wb, "Summary", SM, headerStyle = st_hdr)
+  if (n_sm > 0) {
+    R <- 2:r_sm
+    wfS <- function(col, fn) writeFormula(wb, "Summary", startCol = col, startRow = 2, x = frows(fn, R))
+    # analysis years (pulled from the Calculation_Assumptions controls)
+    wfS(6, function(r) cA_start); wfS(7, function(r) cA_end)
+    # Health_Outcomes aggregates by scenario (A=scenario; cols 9/6/12/15/18/19)
+    hos <- function(col, r) sprintf("SUMIFS('Health_Outcomes'!$%s$2:$%s$%d,'Health_Outcomes'!$A$2:$A$%d,A%d)", col, col, r_ho, r_ho, r)
+    wfS(8,  function(r) hos("I", r))   # cases_averted (HO col 9)
+    wfS(9,  function(r) hos("F", r))   # deaths_averted (HO col 6)
+    wfS(10, function(r) hos("L", r))   # ylls_averted (HO col 12)
+    wfS(11, function(r) hos("O", r))   # ylds_averted (HO col 15)
+    wfS(12, function(r) hos("R", r))   # dalys_averted (HO col 18)
+    wfS(13, function(r) hos("S", r))   # life_years_gained (HO col 19)
+    # CVD_40q30 lookups (B=scenario, H=year, I=cvd_40q30, K=abs_red, L=pct_red)
+    q40 <- function(col, yrcell, r) sprintf("SUMIFS('CVD_40q30'!$%s$2:$%s$%d,'CVD_40q30'!$B$2:$B$%d,A%d,'CVD_40q30'!$H$2:$H$%d,%s%d)",
+                                            col, col, r_q40s, r_q40s, r, r_q40s, yrcell, r)
+    wfS(14, function(r) q40("I", "F", r))   # start-year 40q30
+    wfS(15, function(r) q40("I", "G", r))   # end-year 40q30
+    wfS(16, function(r) q40("K", "G", r))   # end-year absolute reduction (pp)
+    wfS(17, function(r) q40("L", "G", r))   # end-year relative reduction (%)
+    # costs (Budget_Impact E incremental, F disc incremental) summed over years
+    wfS(18, function(r) sprintf("SUMIFS('Budget_Impact'!$E$2:$E$%d,'Budget_Impact'!$A$2:$A$%d,A%d)", r_bi, r_bi, r))
+    wfS(19, function(r) sprintf("SUMIFS('Budget_Impact'!$F$2:$F$%d,'Budget_Impact'!$A$2:$A$%d,A%d)", r_bi, r_bi, r))
+    wfS(20, function(r) sprintf("IF(I%d>0,S%d/I%d,\"\")", r, r, r))     # cost per death averted
+    wfS(21, function(r) sprintf("IF(L%d>0,S%d/L%d,\"\")", r, r, r))     # cost per DALY averted
+    # Benefit_Cost preferred VSL row (F=valuation_case, G/H/I pv values)
+    pref <- "preferred (elasticity 1.5, 20x floor)"
+    bcs <- function(col, r) sprintf("SUMIFS('Benefit_Cost'!$%s$2:$%s$%d,'Benefit_Cost'!$A$2:$A$%d,A%d,'Benefit_Cost'!$F$2:$F$%d,\"%s\")",
+                                    col, col, r_bc, r_bc, r, r_bc, pref)
+    wfS(22, function(r) bcs("G", r))     # pv_benefits
+    wfS(23, function(r) bcs("H", r))     # pv_costs
+    wfS(24, function(r) sprintf("V%d-W%d", r, r))                       # pv_net_benefit
+    wfS(25, function(r) sprintf("IF(W%d>0,V%d/W%d,\"\")", r, r, r))     # benefit_cost_ratio
+  }
+  style_sheet("Summary", sum_cols, n_sm, formula_cols = 6:25, rsource_cols = 5, wrap_cols = 2, max_w = 22)
+  .jrow_sm <- which(SM$scenario == joint_id)
+  if (length(.jrow_sm)) addStyle(wb, "Summary", st_joint, rows = .jrow_sm + 1L,
+                                 cols = seq_along(sum_cols), gridExpand = TRUE, stack = TRUE)
+
+  ## ===== QA_Checks ========================================================
+  paired <- all(comparators %in% unique(mort$scenario))
+  qa_df <- data.frame(
+    check = c("Every comparator paired to baseline (R)","No impossible negative states (R)",
+              "Joint scenario present and costed","Cost reconciliation (components -> budget impact)",
+              "CEA reconciliation (detail -> summary)","CVD 40q30 Excel vs R (all rows match)",
+              "Excel vs R: joint deaths averted","Excel vs R: joint discounted incremental cost",
+              "Baseline excluded from comparators (counted once)"),
+    expected = c("TRUE","0","TRUE","<= tol","consistent","0","match R","match R","0"),
+    actual = NA, status = NA_character_,
+    note = c("Deaths averted = baseline - scenario at matched year/cause",
+             "well/sick/new_cases/deaths/population >= 0",
+             "The joint 'all_clinical_public_health' scenario is in Annual_Cost and Budget_Impact",
+             "Excel component rows sum to Excel budget-impact totals",
+             "Every Cost_Effectiveness row's internal reconciliation is consistent",
+             "CVD_40q30 recon_status has no 'mismatch'",
+             "Joint scenario Excel CEA deaths averted reconciles to the R engine value",
+             "Joint scenario Excel discounted incremental cost reconciles to the R engine value",
+             "The shared baseline is the comparator, never itself a comparator row"),
+    stringsAsFactors = FALSE)
+  addWorksheet(wb, "QA_Checks")
+  writeData(wb, "QA_Checks", qa_df, headerStyle = st_hdr)
+  n_qa <- nrow(qa_df); r_qa <- n_qa + 1L
+  qa_actual <- c(
+    ifelse(paired, "TRUE", "FALSE"), as.character(negc), "TRUE",
+    sprintf("ABS(SUM('Budget_Impact'!$C$2:$C$%d)-SUM('Annual_Cost'!$U$2:$U$%d))+ABS(SUM('Budget_Impact'!$D$2:$D$%d)-SUM('Annual_Cost'!$V$2:$V$%d))",
+            r_bi, r_ac, r_bi, r_ac),
+    sprintf("IF(COUNTIF('Cost_Effectiveness'!$I$2:$I$%d,\"mismatch\")=0,\"consistent\",\"mismatch\")", r_ce),
+    sprintf("COUNTIF('CVD_40q30'!$N$2:$N$%d,\"mismatch\")", r_q40s),
+    sprintf("INDEX('Cost_Effectiveness'!$C$2:$C$%d,MATCH(\"%s\",'Cost_Effectiveness'!$A$2:$A$%d,0))", r_ce, joint_id, r_ce),
+    sprintf("INDEX('Cost_Effectiveness'!$F$2:$F$%d,MATCH(\"%s\",'Cost_Effectiveness'!$A$2:$A$%d,0))", r_ce, joint_id, r_ce),
+    sprintf("COUNTIF('Summary'!$A$2:$A$%d,\"%s\")", r_sm, base_id))
+  qa_status <- c(
+    "IF(C2=TRUE,\"PASS\",\"FAIL\")","IF(C3=0,\"PASS\",\"FAIL\")","IF(C4=TRUE,\"PASS\",\"FAIL\")",
+    sprintf("IF(C5<=%s,\"PASS\",\"FAIL\")", cA_tol),
+    "IF(C6=\"consistent\",\"PASS\",\"FAIL\")","IF(C7=0,\"PASS\",\"FAIL\")",
+    sprintf("IF(ABS(C8-%s)<=ABS(%s)*0.000001+0.5,\"PASS\",\"FAIL\")", cA_rda, cA_rda),
+    sprintf("IF(ABS(C9-%s)<=ABS(%s)*0.000001+1,\"PASS\",\"FAIL\")", cA_rdic, cA_rdic),
+    "IF(C10=0,\"PASS\",\"FAIL\")")
+  writeFormula(wb, "QA_Checks", startCol = 3, startRow = 2, x = qa_actual)
+  writeFormula(wb, "QA_Checks", startCol = 4, startRow = 2, x = qa_status)
+  style_sheet("QA_Checks", names(qa_df), n_qa, formula_cols = c(3, 4), wrap_cols = 5)
+  conditionalFormatting(wb, "QA_Checks", cols = 4, rows = 2:r_qa, rule = "PASS", type = "contains", style = cf_pass)
+  conditionalFormatting(wb, "QA_Checks", cols = 4, rows = 2:r_qa, rule = "FAIL", type = "contains", style = cf_fail)
+
+  ## ===== Methods_and_Sources + Calculation_Map ============================
+  methods <- data.table(
+    method_id = c("M01","M02","M03","M04","M05","M06","M07"),
+    concept = c("Joint scenario","Joint costing","CVD 40q30","Family provenance",
+                "Benefit-cost","Reconciliation","Scale"),
+    detail = c(
+      "'all_clinical_public_health' = ONE Model 06 projection applying fair_wb + ph_wb once each to the same baseline-rate copy (not an arithmetic sum of 'all' + 'all_public_health').",
+      "Joint annual + discounted incremental cost = sum of clinical components (clinical rule) + public-health components (per-capita policy rule), BOTH computed against the joint scenario's own Model 06 population; keys are collision-safe (family|cost_record_id).",
+      "Period 40q30 over the six CVD causes, exact ages 30-69: m_x=(D_F+D_M)/(N_F+N_M), q_x=1-exp(-m_x), l_30=1, l_{x+1}=l_x(1-q_x), 40q30=100*(1-l_70/l_30). Live life-table formulas on CVD_40q30_Age; reconciled to Model 07.",
+      "intervention_family tags every scenario baseline / clinical / public_health / clinical_public_health; every Annual_Cost row carries its family.",
+      "Reference-Case VSL/VSLY (Robinson et al. 2019): preferred VSL = MAX(160*GNIpc_US*(GNIpc_IDN/GNIpc_US)^1.5, 20*GNIpc_IDN); PARTIAL mortality-benefit BCA.",
+      "Excel formulas reconcile against R engine anchors stored on Calculation_Assumptions (deaths averted, discounted incremental cost, cost per death) and CVD_40q30 recon_status.",
+      "cvd_40q30 is a PERCENT on a 0-100 scale (number format 0.000, never Excel's fractional %); absolute_reduction_pp is percentage points."),
+    source = c(rep("Model 04 / Model 06 / Model 09", 2), "Model 07 / Model 09",
+               "Model 06 / Model 09", "Robinson et al. 2019 / Model 08",
+               "Model 09", "Model 07 / Model 09"))
+  addWorksheet(wb, "Methods_and_Sources")
+  writeData(wb, "Methods_and_Sources", methods, headerStyle = st_hdr)
+  style_sheet("Methods_and_Sources", names(methods), nrow(methods), wrap_cols = c(3, 4), filter = FALSE, max_w = 96)
+  setColWidths(wb, "Methods_and_Sources", cols = 1:4, widths = c(10, 22, 96, 40))
+
+  cmap <- data.table(
+    output_sheet = c("Summary","Annual_Mortality","Annual_Cost","Budget_Impact","Cost_Effectiveness",
+                     "Health_Outcomes","Economic_Value","Benefit_Cost","CVD_40q30_Age","CVD_40q30"),
+    formula_columns = c("F:Y","I,J","R:X,AB","C:H","C:I","F,I,L,O,R,S","J:AB","G:M","J:M","I,J,K,L,N"),
+    depends_on = c("Health_Outcomes, CVD_40q30, Budget_Impact, Benefit_Cost",
+                   "R aggregates E:H","Cost_Components (R source N:Q); Calculation_Assumptions",
+                   "Annual_Cost","Annual_Mortality; Budget_Impact",
+                   "Model 07 modeled/baseline health (grey)","Model 08 source (grey); Calculation_Assumptions BCA",
+                   "Economic_Value PV benefits; Budget_Impact costs","cvd_deaths/population (grey R source)",
+                   "CVD_40q30_Age life table; baseline SUMIFS; R anchor"),
+    source_role = rep("Workbook formula", 10))
+  addWorksheet(wb, "Calculation_Map")
+  writeData(wb, "Calculation_Map", cmap, headerStyle = st_hdr)
+  style_sheet("Calculation_Map", names(cmap), nrow(cmap), wrap_cols = c(3, 4), filter = FALSE, max_w = 60)
+  setColWidths(wb, "Calculation_Map", cols = 1:4, widths = c(20, 22, 52, 20))
+
+  ## ===== order, recalc, strip, save =======================================
+  desired_order <- c("Summary","README","Run_Metadata","Scenario_Catalog",
+                     "CL_Selected_Interventions","CL_Cost_Components",
+                     "PH_Selected_Interventions","PH_Cost_Components","PH_Scenario_Hierarchy",
+                     "Annual_Mortality","Health_Outcomes","CVD_40q30","CVD_40q30_Age",
+                     "Annual_Cost","Budget_Impact","Cost_Effectiveness","Economic_Value","Benefit_Cost",
+                     "QA_Checks","Methods_and_Sources","Calculation_Assumptions","Calculation_Map")
+  desired_order <- desired_order[desired_order %in% names(wb)]
+  worksheetOrder(wb) <- match(desired_order, names(wb))
+  wb$workbook$calcPr <- '<calcPr calcId="191029" fullCalcOnLoad="1"/>'
+  if (exists("strip_dangling_drawings")) strip_dangling_drawings(wb)
+  if (!dir.exists(dirname(out_file))) dir.create(dirname(out_file), recursive = TRUE)
+  saveWorkbook(wb, out_file, overwrite = TRUE)
+  message("  Wrote combined clinical + public-health formula workbook: ", out_file)
+  message(sprintf("  Combined scenarios (%d): %s", length(comparators),
+                  paste(comparators, collapse = ", ")))
   invisible(out_file)
 }
 
@@ -2289,6 +3749,20 @@ if (isTRUE(run_public_health_interventions)) {
   ph_ok <- tryCatch({ source_public_health_cost_value(); TRUE },
                     error = function(e) { message("  Public-health workbook FAILED: ",
                                                   conditionMessage(e)); FALSE })
+}
+
+#===========================================================================
+# 13. COMBINED clinical + public-health cost/value formula workbook ----
+#---------------------------------------------------------------------------
+# Written ONLY when BOTH intervention families are enabled and the genuine joint
+# scenario was produced by Model 06. Writes exactly one file:
+#   output/indonesia_model_cost_value_clinical_public_health_formulae.xlsx
+#===========================================================================
+if (isTRUE(run_clinical_interventions) && isTRUE(run_public_health_interventions) &&
+    exists("combined_scenarios") && !is.null(combined_scenarios)) {
+  combined_ok <- tryCatch({ source_combined_cost_value(); TRUE },
+                          error = function(e) { message("  Combined workbook FAILED: ",
+                                                        conditionMessage(e)); FALSE })
 }
 
 message("=== Model 09 complete ===")

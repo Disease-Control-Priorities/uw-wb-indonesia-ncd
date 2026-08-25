@@ -351,7 +351,7 @@ the comparison table; (5) any remaining evidence or modeling limitations
 (e.g. dm2 baseline CF handling in Model 05) flagged for the analyst to confirm.
 
 ### Work method
-Read all five scripts and the new workbook first; confirm the current
+Read all 00-09 scripts and the new workbook first; confirm the current
 `translate_transition` / `reproduce_full_effect` / `ph_wb` behaviour (and resolve
 any duplicate loader definitions) before editing. Make minimal, well-commented,
 targeted diffs; after each file, state what changed and why in one or two lines.

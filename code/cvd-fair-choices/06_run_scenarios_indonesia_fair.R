@@ -1808,31 +1808,146 @@ calculate_fair_workbook_impact <- function(intervention_rates, Country, effect_r
 }
 
 #...........................................................
+# PUBLIC-HEALTH WORKBOOK-driven transition helpers (M12/M16/M17) ----
+#...........................................................
+# Small, testable functions kept separate from the apply loop so magnitude
+# (full-effect RR), timing (Jha / exponential lag) and transition application
+# (rate-ratio -> annual probability) are each isolated and unit-testable.
+
+# M17: convert a RATE ratio to an annual transition PROBABILITY. In this model IR
+# (well->sick) and CF (sick->dead) are ANNUAL PROBABILITIES (Model 05 rebalances
+# so BG.mx+covid.mx+IR<=1 and ...+CF<=1; Model 06 uses newcases=well*IR and
+# deaths=sick*CF), so a rate ratio rr acts through the continuous-rate scale:
+#   p1 = 1 - (1 - p0)^rr    (NEVER p0*rr or p0*(1-effect)).
+rate_ratio_to_probability <- function(p0, rr) {
+  if (any(!is.finite(p0)) || any(p0 < -1e-9 | p0 > 1 + 1e-9))
+    stop("rate_ratio_to_probability: p0 must be a probability in [0,1].", call. = FALSE)
+  if (any(!is.finite(rr)) || any(rr < 0))
+    stop("rate_ratio_to_probability: rr must be finite and >= 0.", call. = FALSE)
+  p0 <- pmin(pmax(p0, 0), 1)
+  1 - (1 - p0)^rr
+}
+
+# Normalized-exponential SENSITIVITY timing (B7): fraction of full effect accrued
+# for a quitting cohort that has been quit `years_since_cessation` years,
+# normalized to 1 at full_effect_year (default 10). Monotone, in [0,1].
+tobacco_lag_fraction <- function(years_since_cessation, lag_rate = 0.0616, full_effect_year = 10L) {
+  if (!is.finite(lag_rate) || lag_rate <= 0 || lag_rate > 1)
+    stop("tobacco_lag_fraction: lag_rate must be in (0,1].", call. = FALSE)
+  if (!is.finite(full_effect_year) || full_effect_year <= 0)
+    stop("tobacco_lag_fraction: full_effect_year must be > 0.", call. = FALSE)
+  years       <- pmax(years_since_cessation, 0)
+  denominator <- 1 - (1 - lag_rate)^full_effect_year
+  fraction    <- (1 - (1 - lag_rate)^years) / denominator
+  pmin(pmax(fraction, 0), 1)
+}
+
+# Age -> Jha band index lookup using the config's band definitions.
+.tobacco_band_index <- function(age, bands) {
+  idx <- rep(NA_integer_, length(age))
+  for (b in seq_len(nrow(bands)))
+    idx[age >= bands$age_lo[b] & age <= bands$age_hi[b]] <- b
+  idx
+}
+
+# Build the effective tobacco rate ratio RR_effective by (sex, single-year age,
+# year) for ONE effect row, combining the full-effect RR with the cohort-weighted
+# timing scalar (M12) and, for mortality, the M16 residual-risk model. Returns a
+# data.table(sex, age, year, rr_eff). Separates magnitude from timing:
+#   RR_effective = 1 - lambda_bar * (1 - RR_full).
+calculate_tobacco_transition_effects <- function(expo_by_year, yrs, r, cfg) {
+  sm    <- cfg$scalar_matrix
+  bands <- unique(sm[, .(sex, age_lo, age_hi)])
+  p0    <- r$baseline_exposure
+
+  # Annual intervention-attributable quitting cohorts q_u = max(p_{u-1}-p_u, 0)
+  # (B6). The year BEFORE the first modeled year is assumed at baseline p0.
+  # `ee` is the achieved exposure p_t by year (aligned with yy).
+  ord     <- order(yrs)
+  yy      <- yrs[ord]; ee <- expo_by_year[ord]
+  prev    <- c(p0, ee[-length(ee)])
+  q_u     <- pmax(prev - ee, 0)
+  names(q_u) <- yy
+
+  base_timing <- identical(cfg$timing_mode, "jha_piecewise_shared_scalar")
+
+  out <- vector("list", nrow(bands))
+  for (b in seq_len(nrow(bands))) {
+    bs  <- bands$sex[b]; alo <- bands$age_lo[b]; ahi <- bands$age_hi[b]
+    lam_lt3  <- sm[sex == bs & age_lo == alo & duration == "LT3",  lambda][1]
+    lam_y39  <- sm[sex == bs & age_lo == alo & duration == "Y3_9", lambda][1]
+    lam_ge10 <- sm[sex == bs & age_lo == alo & duration == "GE10", lambda][1]
+
+    # Full-effect RR for this (sex, band), evaluated at the CURRENT-YEAR exposure
+    # p_t (vector `ee`), per M08 (incidence) / M16 (case fatality). Using p_t (not
+    # the final target) is required so that, combined with lambda_bar normalized by
+    # quitting-so-far, RR_effective exactly reproduces the mechanistic incidence /
+    # mortality multiplier during the exposure ramp (verified identity).
+    if (identical(r$model_transition, "incidence")) {
+      RRc <- r$response_value                                   # cause-specific smoking RR (M08)
+      RR_full <- (1 + ee * (RRc - 1)) / (1 + p0 * (RRc - 1))    # per-year vector
+    } else {                                                    # case_fatality (M16)
+      RRc <- if (identical(bs, "Male")) cfg$vasc_rr_male else cfg$vasc_rr_female
+      if (!is.finite(RRc)) RRc <- cfg$vasc_rr_pooled            # pooled fallback only
+      erd10 <- cfg$erd10_by_band[sex == bs & age_lo == alo, erd10][1]
+      if (!is.finite(erd10)) erd10 <- cfg$erd10_pooled
+      RRq     <- 1 + (1 - erd10) * (RRc - 1)                    # residual RR at 10+ yrs cessation
+      RR_full <- (1 + ee * (RRc - 1) + (p0 - ee) * (RRq - 1)) / (1 + p0 * (RRc - 1))  # per-year vector
+    }
+
+    # Cohort-weighted timing scalar lambda_bar_t for each modeled year.
+    lam_bar <- vapply(yy, function(t) {
+      idx <- which(yy <= t)
+      if (!length(idx)) return(0)
+      qw <- q_u[idx]; denom <- sum(qw)
+      if (denom <= 0) return(0)
+      k <- t - yy[idx]                                          # years since cessation per cohort
+      if (base_timing) {
+        lam_k <- ifelse(k < 3, lam_lt3, ifelse(k <= 9, lam_y39, lam_ge10))
+      } else {
+        lam_k <- tobacco_lag_fraction(k, cfg$lag_rate, cfg$full_effect_year)
+      }
+      sum(qw * lam_k) / denom
+    }, numeric(1))
+
+    rr_eff_year <- 1 - lam_bar * (1 - RR_full)                  # RR_effective per year
+    # Expand this band to single-year ages within the row's applicable age range.
+    # Join rr_eff BY YEAR (order-independent) rather than rep()-ing into a CJ,
+    # so the per-year value always lands on the correct (age, year) cell.
+    a_lo <- max(alo, r$age_start); a_hi <- min(ahi, r$age_stop)
+    if (a_lo > a_hi) next
+    yr_tab <- data.table(year = yy, rr_eff = rr_eff_year)
+    out[[b]] <- CJ(sex = bs, age = a_lo:a_hi, year = yy)[yr_tab, on = "year", rr_eff := i.rr_eff][]
+  }
+  rbindlist(out, use.names = TRUE)
+}
+
+#...........................................................
 # PUBLIC-HEALTH WORKBOOK-driven impact (Model 04 PH catalogue) ----
 #...........................................................
 # Applies the validated public-health effect rows built by Model 04
-# (public_health_scenarios[[scenario]]$ph_effect_rows) to incidence
-# (IR / eff_ir) ONLY -- this contract maps public-health policies to the
-# well -> sick transition. This is the EXPOSURE-based analogue of
-# calculate_fair_workbook_impact(); it does NOT use the clinical FAIR
-# apply_coverage_adjustment() coverage formula.
+# (public_health_scenarios[[scenario]]$ph_effect_rows) to BOTH modeled
+# transitions -- well -> sick (incidence, IR/eff_ir) AND sick -> dead (case
+# fatality, CF/eff_cf) -- mirroring the clinical calculate_fair_workbook_impact()
+# dispatch. Every row is applied on the COMPLETE key (cause, age, sex, year,
+# model_transition) so a well->sick effect can never touch sick->dead.
 #
-# For each intervention-cause row and model year t:
-#   1. achieved exposure pt(t): linear baseline -> target path over
-#      [start_year, target_year], floored at exposure_floor;
-#   2. full effect via the row's declared effect_model
-#      (direct_smoking_prevalence_shift_rr / direct_loglinear_rr_per_unit_reduction
-#       -- the latter is the DEFAULT industrial-TFA path via RR per percentage-point
-#       energy; tfa_attributable_ihd_PAF_x_regulatory_gap is the optional PAF path,
-#       used only when Assumptions$tfa_effect_method = "PAF");
-#   3. lag model: immediate_after_full_implementation -> effect tracks the
-#      exposure path; delayed_exponential_remaining_effect -> full target effect
-#      accrues as 1-(1-rate)^(years since start);
-#   4. constrain the realised effect to a valid proportional reduction [0,1];
-#   5. multiply the cause-specific incidence by the surviving fraction 1 - eff_t;
-#   6. multiple policies on the same cause/year combine MULTIPLICATIVELY on the
-#      surviving fraction (order-invariant; no double counting).
-calculate_public_health_workbook_impact <- function(intervention_rates, Country, effect_rows) {
+# For each effect row and model year t:
+#   1. achieved exposure pt(t): linear baseline -> target over [start,target];
+#   2. tobacco-CVD rows (jha_piecewise_shared_scalar / normalized_exponential_lag):
+#      RR_effective = 1 - lambda_bar*(1-RR_full), with RR_full = M08 (incidence)
+#      or M16 (sick->dead, sex/age-specific vascular mortality) and lambda_bar the
+#      cohort-weighted Jha (or exponential) timing scalar -- age/sex/year-specific;
+#   3. other rows keep the exposure-path proportional effect and are expressed as
+#      a rate ratio RR = 1 - realized (log-linear/immediate, tobacco-T2DM proxy
+#      delayed-exponential, optional TFA PAF);
+#   4. rate ratios COMBINE MULTIPLICATIVELY per transition, then the baseline
+#      probability is converted ONCE via M17 (rate_ratio_to_probability). This is
+#      the only change to the incidence application vs the legacy p*RR form; for
+#      small annual probabilities the two agree to <0.1%.
+# Public-health effects act on incidence AND case fatality (workbook contract).
+calculate_public_health_workbook_impact <- function(intervention_rates, Country,
+                                                    effect_rows, tobacco_config = NULL) {
 
   cat("  - Calculating public-health (workbook) policy impact\n")
 
@@ -1841,16 +1956,13 @@ calculate_public_health_workbook_impact <- function(intervention_rates, Country,
     return(intervention_rates[])
   }
 
-  # Exposure-tracking proportional incidence reduction for a vector of exposures.
+  # Exposure-tracking proportional reduction for the NON-tobacco-CVD rows
+  # (log-linear/immediate, delayed-exponential proxy, optional TFA PAF).
   ph_effect_from_exposure <- function(model, p0, pt, RR, paf) {
     if (identical(model, "direct_smoking_prevalence_shift_rr"))
       return(1 - (1 + pt * (RR - 1)) / (1 + p0 * (RR - 1)))
     if (identical(model, "direct_loglinear_rr_per_unit_reduction"))
       return(1 - 1 / (RR ^ (p0 - pt)))
-    # Optional TFA PAF path (regulatory-gap or legacy policy-score variant): a flat
-    # PAF x implementation-gap effect; RR carries the gap. Only used when the
-    # workbook selects tfa_effect_method = "PAF"; the RR base case uses the
-    # log-linear branch above and needs no PAF.
     if (grepl("^tfa_attributable_ihd_PAF", model))
       return(rep(ifelse(is.na(paf), 0, paf) * ifelse(is.na(RR), 0, RR), length(pt)))
     stop("PH wb: unsupported effect_model '", model, "'.", call. = FALSE)
@@ -1866,76 +1978,103 @@ calculate_public_health_workbook_impact <- function(intervention_rates, Country,
         paste(miss, collapse = ", "), "\n")
   er <- er[cause_code %in% present]
 
-  # Surviving incidence fraction (1 = no effect); accumulate (1 - effect) products.
-  dt[, ph_surv_ir := 1]
+  yrs <- sort(unique(dt$year))
+
+  # Combined RATE RATIOS per transition (1 = no effect). Effects accumulate
+  # multiplicatively on the rate-ratio scale; the baseline probability is
+  # converted to a new probability ONCE, after the loop (M17).
+  dt[, `:=`(ph_rr_ir = 1, ph_rr_cf = 1)]
+
+  n_cf_applied <- 0L; n_ir_applied <- 0L; n_age80_hits <- 0L
+  tobacco_lags <- c("jha_piecewise_shared_scalar", "normalized_exponential_lag")
 
   for (i in seq_len(nrow(er))) {
     r <- er[i]
 
+    # Guard: no valid transition should reach here (Model 04 drops them), but
+    # fail loud rather than silently skip a sick->dead link.
+    if (!r$model_transition %in% c("incidence", "case_fatality"))
+      stop("PH wb: link ", r$intervention_cause_key, " has unmapped model_transition '",
+           r$model_transition, "'.", call. = FALSE)
+
     p0   <- r$baseline_exposure; ptgt <- r$target_exposure
     flr  <- r$exposure_floor;    sy   <- r$start_year; ty <- r$target_year
-    RR   <- r$response_value;    paf  <- r$paf_value
-    Efull <- r$full_effect_at_target
 
-    # Achieved exposure path pt(t): before start = baseline; linear baseline ->
-    # target between start and target (inclusive); target thereafter; floored.
-    span <- max(ty - sy + 1, 1)
-    frac <- pmin(pmax((dt$year - sy + 1) / span, 0), 1)
-    expo <- p0 + (ptgt - p0) * frac
-    expo[dt$year < sy] <- p0
-    expo[dt$year > ty] <- ptgt
-    if (!is.na(flr)) expo <- pmax(expo, flr)
+    # Annual achieved exposure path pt(t) over the modeled years.
+    span   <- max(ty - sy + 1, 1)
+    fracy  <- pmin(pmax((yrs - sy + 1) / span, 0), 1)
+    expo_y <- p0 + (ptgt - p0) * fracy
+    expo_y[yrs < sy] <- p0
+    expo_y[yrs > ty] <- ptgt
+    if (!is.na(flr)) expo_y <- pmax(expo_y, flr)
 
-    # Realised proportional incidence reduction (0 before start year).
-    if (identical(r$lag_model, "immediate_after_full_implementation")) {
-      realized <- ph_effect_from_exposure(r$effect_model, p0, expo, RR, paf)
-    } else if (identical(r$lag_model, "delayed_exponential_remaining_effect")) {
-      yrs_since <- pmax(0, dt$year - sy)
-      lag_frac  <- 1 - (1 - r$lag_parameter) ^ yrs_since
-      realized  <- Efull * lag_frac
+    is_tobacco_cvd <- (r$lag_model %in% tobacco_lags) && !is.null(tobacco_config) &&
+                      !is.null(tobacco_config$scalar_matrix)
+
+    if (is_tobacco_cvd) {
+      # ---- Jha (or exponential) cohort-timed tobacco-CVD effect (M12/M08/M16) --
+      eff_tab <- calculate_tobacco_transition_effects(expo_y, yrs, r, tobacco_config)
+      if (nrow(eff_tab)) {
+        # rr_eff is defined on this row's cause only; join by (sex, age, year).
+        col <- if (identical(r$model_transition, "case_fatality")) "ph_rr_cf" else "ph_rr_ir"
+        et <- eff_tab[, .(sex, age, year, rr_eff)]
+        dt[et, on = .(sex, age, year),
+           (col) := get(col) * fifelse(cause == r$cause_code & is.finite(i.rr_eff), i.rr_eff, 1)]
+        n_age80_hits <- n_age80_hits + nrow(et[age >= 80])
+        if (identical(r$model_transition, "case_fatality")) n_cf_applied <- n_cf_applied + 1L
+        else n_ir_applied <- n_ir_applied + 1L
+      }
     } else {
-      stop("PH wb: unsupported lag_model '", r$lag_model, "' for link ",
-           r$intervention_cause_key, call. = FALSE)
-    }
-    realized[dt$year < sy] <- 0
-    realized[!is.finite(realized)] <- 0
-    realized <- pmin(pmax(realized, 0), 1)
+      # ---- Exposure-path proportional effect for the other rows ---------------
+      RR  <- r$response_value; paf <- r$paf_value; Efull <- r$full_effect_at_target
+      # realized proportional reduction per modeled year
+      if (identical(r$lag_model, "immediate_after_full_implementation")) {
+        realized_y <- ph_effect_from_exposure(r$effect_model, p0, expo_y, RR, paf)
+      } else if (identical(r$lag_model, "delayed_exponential_remaining_effect")) {
+        yrs_since  <- pmax(0, yrs - sy)
+        realized_y <- Efull * (1 - (1 - r$lag_parameter) ^ yrs_since)
+      } else {
+        stop("PH wb: unsupported lag_model '", r$lag_model, "' for link ",
+             r$intervention_cause_key, call. = FALSE)
+      }
+      realized_y[yrs < sy] <- 0
+      realized_y[!is.finite(realized_y)] <- 0
+      realized_y <- pmin(pmax(realized_y, 0), 1)
+      rr_eff_y   <- 1 - realized_y                              # express as a rate ratio
+      ry <- data.table(year = yrs, rr_eff = rr_eff_y)
 
-    # Public-wide policy applied to the mapped cause across its age/sex band.
-    gender_ok <- if (identical(r$sex, "Both")) rep(TRUE, nrow(dt)) else dt$sex == r$sex
-    mask <- dt$cause == r$cause_code &
-            dt$age  >= r$age_start &
-            dt$age  <= r$age_stop &
-            dt$year >= sy &
-            gender_ok
-    mask[is.na(mask)] <- FALSE
-    realized[!mask] <- 0
-
-    if (identical(r$model_transition, "incidence")) {
-      dt[, ph_surv_ir := ph_surv_ir * (1 - realized)]
-    } else {
-      stop("PH wb: model_transition '", r$model_transition, "' for link ",
-           r$intervention_cause_key, " is not the supported well -> sick incidence.",
-           call. = FALSE)
+      gender_ok <- identical(r$sex, "Both")
+      col <- if (identical(r$model_transition, "case_fatality")) "ph_rr_cf" else "ph_rr_ir"
+      dt[ry, on = .(year),
+         (col) := get(col) * fifelse(
+           cause == r$cause_code & age >= r$age_start & age <= r$age_stop &
+             (gender_ok | sex == r$sex) & is.finite(i.rr_eff), i.rr_eff, 1)]
+      if (identical(r$model_transition, "case_fatality")) n_cf_applied <- n_cf_applied + 1L
+      else n_ir_applied <- n_ir_applied + 1L
     }
   }
 
-  # Public-health effects act on incidence only (no case-fatality transition).
-  dt[, `:=`(
-    IR     = IR     * ph_surv_ir,
-    eff_ir = eff_ir * ph_surv_ir
-  )]
+  # ---- Convert combined rate ratios to probabilities ONCE (M17) --------------
+  dt[, `:=`(IR_pre_ph = IR, CF_pre_ph = CF)]
+  dt[, IR := rate_ratio_to_probability(IR, ph_rr_ir)]
+  dt[, CF := rate_ratio_to_probability(CF, ph_rr_cf)]
+  # Track the public-health surviving fraction into eff_ir/eff_cf so PH stacks
+  # with any clinical effects already applied (order-invariant, multiplicative).
+  dt[, eff_ir := eff_ir * fifelse(IR_pre_ph > 0, IR / IR_pre_ph, 1)]
+  dt[, eff_cf := eff_cf * fifelse(CF_pre_ph > 0, CF / CF_pre_ph, 1)]
 
-  dt[IR > 0.99, IR := 0.99]
-  dt[IR < 0, IR := 0]
-  dt[, ph_surv_ir := NULL]
+  dt[IR > 0.99, IR := 0.99]; dt[IR < 0, IR := 0]
+  dt[CF > 0.99, CF := 0.99]; dt[CF < 0, CF := 0]
+  dt[, c("ph_rr_ir", "ph_rr_cf", "IR_pre_ph", "CF_pre_ph") := NULL]
 
-  if (dt[, any(is.na(IR))])
-    stop("PH workbook computation produced NA in IR.", call. = FALSE)
+  if (dt[, any(is.na(IR))] || dt[, any(is.na(CF))])
+    stop("PH workbook computation produced NA in IR or CF.", call. = FALSE)
 
   setorder(dt, year, sex, location, cause, age)
-  cat("    Applied", nrow(er), "public-health effect row(s) across cause(s):",
-      paste(sort(unique(er$cause_code)), collapse = ", "), "\n")
+  cat(sprintf("    Applied %d PH effect row(s): %d incidence, %d case-fatality; cause(s): %s\n",
+      nrow(er), n_ir_applied, n_cf_applied, paste(sort(unique(er$cause_code)), collapse = ", ")))
+  if (n_cf_applied > 0L && n_age80_hits > 0L)
+    cat(sprintf("    (tobacco sick->dead: ages 80-95 use the documented 60-79 Jha scalars)\n"))
   dt[]
 }
 
@@ -2019,7 +2158,11 @@ project.all <- function(Country,
                         fair_effect_rows       = NULL,
                         # PUBLIC-HEALTH WORKBOOK effect rows (validated Model 04 PH
                         # catalogue); drives the "ph_wb" intervention.
-                        ph_effect_rows         = NULL
+                        ph_effect_rows         = NULL,
+                        # Parsed tobacco Jha timing / vascular-mortality config
+                        # (public_health_inputs$tobacco_effect_config from Model 04);
+                        # required for the tobacco sick->dead and Jha-timed rows.
+                        ph_tobacco_config      = NULL
 ) {
 
   cat("\n========================================\n")
@@ -2372,7 +2515,8 @@ project.all <- function(Country,
     intervention_rates <- calculate_public_health_workbook_impact(
       intervention_rates = intervention_rates,
       Country            = Country,
-      effect_rows        = ph_effect_rows
+      effect_rows        = ph_effect_rows,
+      tobacco_config     = ph_tobacco_config
     )
 
     applied_interventions <- c(applied_interventions, "PublicHealth")
@@ -2568,7 +2712,10 @@ run_multiple_scenarios <- function(Country,
                                    fair_target_year       = 2050,
                                    fair_target_coverage   = 0.80,
                                    fair_baseline_coverage = 0,
-                                   fair_bundle_coverage   = NULL) {
+                                   fair_bundle_coverage   = NULL,
+                                   # Parsed tobacco Jha timing / mortality config (Model 04);
+                                   # threaded to every public-health scenario run.
+                                   ph_tobacco_config      = NULL) {
 
   results <- list()
   
@@ -2589,6 +2736,7 @@ run_multiple_scenarios <- function(Country,
       fam_arg  <- if (!is.null(entry$family)) entry$family else NA_character_
       role_arg <- if (!is.null(entry$scenario_role)) entry$scenario_role else NA_character_
       ppid_arg <- if (!is.null(entry$parent_package_id)) entry$parent_package_id else NA_character_
+      lvl_arg  <- if (!is.null(entry$scenario_level)) entry$scenario_level else NA_character_
     } else {
       ints_arg <- entry
       fer_arg  <- NULL
@@ -2596,6 +2744,7 @@ run_multiple_scenarios <- function(Country,
       fam_arg  <- NA_character_
       role_arg <- NA_character_
       ppid_arg <- NA_character_
+      lvl_arg  <- NA_character_
     }
 
     results[[scenario_name]] <- project.all(
@@ -2603,6 +2752,7 @@ run_multiple_scenarios <- function(Country,
       interventions       = ints_arg,
       fair_effect_rows    = fer_arg,
       ph_effect_rows      = per_arg,
+      ph_tobacco_config   = ph_tobacco_config,
       target_control      = target_control,
       control_start_year  = control_start_year,
       control_target_year = control_target_year,
@@ -2641,6 +2791,7 @@ run_multiple_scenarios <- function(Country,
       results[[scenario_name]][, intervention_family := fam_arg]
       results[[scenario_name]][, scenario_role := role_arg]
       results[[scenario_name]][, parent_package_id := ppid_arg]
+      results[[scenario_name]][, scenario_level := lvl_arg]
     }
   }
 
@@ -2956,9 +3107,31 @@ if (isTRUE(run_public_health_interventions)) {
   }
 }
 
+# Joint clinical + public-health family: the genuine combined scenario is run
+# ONLY when both families are enabled. It is a single project.all() run applying
+# fair_wb + ph_wb once each to the same baseline-rate copy (never an arithmetic
+# combination of the separate `all` / `all_public_health` outputs).
+if (isTRUE(run_clinical_interventions) && isTRUE(run_public_health_interventions) &&
+    exists("combined_scenarios") && !is.null(combined_scenarios)) {
+  for (nm in setdiff(names(combined_scenarios), baseline_id)) {
+    if (nm %in% names(scenarios))
+      stop("Model 06: joint scenario id collision: '", nm,
+           "'. Rename the combined-catalogue scenario id.", call. = FALSE)
+    ent <- combined_scenarios[[nm]]
+    if (is.null(ent$family)) ent$family <- "clinical_public_health"
+    scenarios[[nm]] <- ent
+  }
+}
+
 cat(sprintf("\nModel 06 families: clinical=%s, public_health=%s | scenarios (%d): %s\n\n",
             isTRUE(run_clinical_interventions), isTRUE(run_public_health_interventions),
             length(scenarios), paste(names(scenarios), collapse = ", ")))
+
+# Parsed tobacco Jha timing / vascular-mortality config from Model 04. Required
+# by the public-health apply path for the tobacco sick->dead and Jha-timed
+# incidence rows; NULL when the PH family is off (clinical runs never use it).
+ph_tobacco_config <- if (exists("public_health_inputs") && !is.null(public_health_inputs))
+  public_health_inputs$tobacco_effect_config else NULL
 
 # explicit hypertension control parameters
 target_control <- 0.5
@@ -3013,6 +3186,11 @@ clusterExport(
     "calculate_fair_cvd_impact",
     "calculate_fair_workbook_impact",
     "calculate_public_health_workbook_impact",
+    "calculate_tobacco_transition_effects",
+    "rate_ratio_to_probability",
+    "tobacco_lag_fraction",
+    ".tobacco_band_index",
+    "ph_tobacco_config",
     "load_fair_cvd_params",
     ".fair_clean_chr",
     "dt_fair_params",
@@ -3118,7 +3296,8 @@ results_list <- foreach(
       fair_target_year       = 2050,
       fair_target_coverage   = 0.80,
       fair_baseline_coverage = 0,
-      fair_bundle_coverage   = NULL
+      fair_bundle_coverage   = NULL,
+      ph_tobacco_config      = ph_tobacco_config
     )
   }, error = function(e) {
     cat("ERROR in", country, "/", target_col, ":", e$message, "\n")

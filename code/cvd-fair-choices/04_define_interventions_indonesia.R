@@ -1933,7 +1933,17 @@ if (!exists("public_health_inputs_file")) {
 .build_public_health_catalogue <- function(inputs_path,
                                            cause_map,
                                            strict      = FALSE,
-                                           baseline_id = "baseline") {
+                                           baseline_id = "baseline",
+                                           # Timing model for the tobacco-CVD effect (both incidence
+                                           # and the sick -> dead mortality proxy). "base" uses the
+                                           # workbook Jha age-sex-duration scalars; the sensitivity
+                                           # option overrides only tobacco timing. Read by name; no
+                                           # numeric assumption is set here.
+                                           tobacco_timing_analysis = "base",
+                                           # Include the EXPLORATORY SSB -> T2DM mortality (sick ->
+                                           # dead) link even though its Intervention_Cause_Map
+                                           # include_flag = 0. FALSE (default) keeps it inert.
+                                           ssb_mortality_enabled   = FALSE) {
 
   if (!file.exists(inputs_path))
     stop("Public-health: input workbook not found: ", inputs_path)
@@ -1986,6 +1996,26 @@ if (!exists("public_health_inputs_file")) {
   reg_partial_score     <- numv(getA("regulatory_partial_score", 0.5))
   reg_full_score        <- numv(getA("regulatory_full_score", 1))
 
+  # Tobacco-CVD timing + vascular-mortality parameters (all read by name; used to
+  # build the Jha timing/RR config consumed by Model 06 and the pooled M16
+  # illustrative here). Sex-specific vascular RRs (2.9 M / 3.1 F) are the applied
+  # values; the pooled 3.0 / pooled ERD are illustrative fallbacks only.
+  tob_lag_model_base   <- chrv(getA("tobacco_cvd_lag_model_base", "jha_piecewise_shared_scalar"))
+  tob_lag_model_sens   <- chrv(getA("tobacco_cvd_lag_model_sensitivity", "normalized_exponential_lag"))
+  tob_full_effect_year <- as.integer(numv(getA("tobacco_cvd_full_effect_year", 10)))
+  tob_lag_rate         <- numv(getA("tobacco_cvd_lag_rate", 0.0616))
+  tob_rr_mort_male     <- numv(getA("tobacco_vascular_mortality_rr_male",   2.9))
+  tob_rr_mort_female   <- numv(getA("tobacco_vascular_mortality_rr_female", 3.1))
+  tob_rr_mort_pooled   <- numv(getA("tobacco_vascular_mortality_rr_pooled", 3.0))
+  tob_erd10_pooled     <- numv(getA("tobacco_vascular_erd_ge10_pooled",     0.90125))
+  tob_age80_extrap     <- chrv(getA("tobacco_age80_scalar_extrapolation", "use_age_60_79"))
+  # Selected timing model for THIS run (Model 00 switch): base Jha or the
+  # normalized-exponential sensitivity. Only these two are valid.
+  tob_timing_selected  <- if (identical(chrv(tobacco_timing_analysis), "normalized_exponential_lag"))
+                            tob_lag_model_sens else tob_lag_model_base
+  if (!tob_timing_selected %in% c("jha_piecewise_shared_scalar", "normalized_exponential_lag"))
+    tob_timing_selected <- "jha_piecewise_shared_scalar"
+
   ## -- cause_id -> model cause short code (explicit translation table) --------
   # C_CMYO -> cmd and C_T2DM -> dm2 as required, plus the shared CVD mappings.
   # C_SHARED intentionally absent (shared-cost bucket; not a modeled cause).
@@ -1997,11 +2027,16 @@ if (!exists("public_health_inputs_file")) {
          "cause_map: ", paste(bad_codes, collapse = ", "))
 
   ## -- transition translation (workbook from/to -> model transition) ----------
-  # This contract maps public-health effects to well -> sick incidence ONLY.
+  # Public-health effects now map to BOTH modeled transitions: well -> sick
+  # (incidence, IR/eff_ir) and sick -> dead (case fatality, CF/eff_cf -- the
+  # tobacco vascular-mortality proxy and the exploratory SSB mortality link).
+  # Anything outside this allowed pair returns NA and is rejected/flagged. This
+  # mirrors the clinical .build_fair_catalogue translate_transition().
   translate_transition <- function(from, to) {
     from <- tolower(chrv(from)); to <- tolower(chrv(to))
     out <- rep(NA_character_, length(from))
     out[from == "well" & to == "sick"] <- "incidence"
+    out[from %in% c("sick", "sick_severe", "sick_hf") & grepl("^dead", to)] <- "case_fatality"
     out
   }
 
@@ -2018,15 +2053,29 @@ if (!exists("public_health_inputs_file")) {
     out[lvl]  <- red_or_tgt[lvl]
     pmax(floor, out)
   }
-  # Target-exposure full proportional incidence reduction (illustrative).
-  reproduce_full_effect <- function(model, p0, pt, RR, paf) {
+  # Target-exposure full proportional effect (ILLUSTRATIVE, single scalar per
+  # link). This reproduces the workbook Model_Input_View illustrative_full_effect
+  # for the QA cross-check ONLY; the applied, age-sex-year-specific effect (and,
+  # for the mortality model, the sex-specific vascular RR and Jha timing) is
+  # computed in Model 06. `erd10_pooled` is the pooled 10+ year excess-risk
+  # reduction used by the workbook's illustrative pooled mortality formula (M16).
+  reproduce_full_effect <- function(model, p0, pt, RR, paf, erd10_pooled = NA_real_) {
     model <- chrv(model)
     n <- length(model); e <- rep(NA_real_, n)
-    sm <- model == "direct_smoking_prevalence_shift_rr"
-    ll <- model == "direct_loglinear_rr_per_unit_reduction"
-    tf <- grepl("^tfa_attributable_ihd_PAF", model)   # optional PAF path (any variant)
+    sm <- model == "direct_smoking_prevalence_shift_rr"      # M08 tobacco incidence
+    ll <- model == "direct_loglinear_rr_per_unit_reduction"  # M09 log-linear (alcohol/salt/TFA/SSB)
+    mo <- model == "tobacco_mortality_prevalence_shift_rr"   # M16 tobacco sick -> dead
+    tf <- grepl("^tfa_attributable_ihd_PAF", model)          # optional PAF path (any variant)
     e[sm] <- 1 - (1 + pt[sm] * (RR[sm] - 1)) / (1 + p0[sm] * (RR[sm] - 1))
     e[ll] <- 1 - 1 / (RR[ll] ^ (p0[ll] - pt[ll]))
+    # M16 (illustrative, pooled): residual-risk model. RR[] carries the pooled
+    # current-smoker vascular-mortality HR; erd10_pooled is the pooled 10+ year
+    # ERD. Model 06 replaces both with sex/age-specific workbook values.
+    if (any(mo)) {
+      RRq <- 1 + (1 - erd10_pooled) * (RR[mo] - 1)
+      e[mo] <- 1 - (1 + pt[mo] * (RR[mo] - 1) + (p0[mo] - pt[mo]) * (RRq - 1)) /
+                   (1 + p0[mo] * (RR[mo] - 1))
+    }
     # Optional TFA PAF path only: effect = PAF * implementation gap (RR[] carries the
     # gap/score). Used solely when Assumptions$tfa_effect_method = "PAF"; the RR base
     # case runs through the log-linear branch above and needs no PAF.
@@ -2165,7 +2214,18 @@ if (!exists("public_health_inputs_file")) {
               "regulatory score outside none/partial/full", "FAIL")
 
   map[, include_flag := as.integer(numv(include_flag))]
+  # Exploratory SSB -> T2DM mortality (sick -> dead) link ships DISABLED
+  # (include_flag = 0). Promote it to selected ONLY when the run explicitly opts
+  # in via run_ssb_diabetes_mortality (Model 00). Nothing else is ever forced on.
+  ssb_mort_key <- "I_PH_SSB_TAX__C_T2DM__SICK_DEAD"
+  if (isTRUE(ssb_mortality_enabled) && ssb_mort_key %in% chrv(map$intervention_cause_key)) {
+    map[chrv(intervention_cause_key) == ssb_mort_key, include_flag := 1L]
+    cat(sprintf("Public-health: exploratory SSB->T2DM mortality link ENABLED (%s).\n", ssb_mort_key))
+  }
   map_sel <- map[include_flag == 1L]
+  # Label the mapped transition on the selected rows so the structural
+  # acceptance counts below can be split by incidence vs sick->dead.
+  map_sel[, model_transition := translate_transition(transition_from, transition_to)]
 
   # Duplicate / missing intervention_cause_key (selected links) ----------------
   dupk <- map_sel[, .N, by = intervention_cause_key][N > 1L]
@@ -2241,12 +2301,15 @@ if (!exists("public_health_inputs_file")) {
                 "TFA exposure not in % energy; RR per percentage-point not applicable", "FAIL")
 
   ## -- Per-link effect table (reproduce full effect at target) ----------------
-  supported_effect_models <- c("direct_smoking_prevalence_shift_rr",
-                               "direct_loglinear_rr_per_unit_reduction",
+  supported_effect_models <- c("direct_smoking_prevalence_shift_rr",     # M08 tobacco incidence
+                               "tobacco_mortality_prevalence_shift_rr",  # M16 tobacco sick -> dead
+                               "direct_loglinear_rr_per_unit_reduction", # M09 alcohol/salt/TFA/SSB
                                "tfa_attributable_ihd_PAF_x_regulatory_gap",
                                "tfa_attributable_ihd_PAF_x_policy_score")
-  supported_lag_models <- c("delayed_exponential_remaining_effect",
-                            "immediate_after_full_implementation")
+  supported_lag_models <- c("delayed_exponential_remaining_effect",  # tobacco-T2DM proxy (legacy)
+                            "immediate_after_full_implementation",   # log-linear risks
+                            "jha_piecewise_shared_scalar",           # tobacco-CVD base timing (M12)
+                            "normalized_exponential_lag")            # tobacco-CVD sensitivity timing
   F <- eff[, .(intervention_cause_key = chrv(intervention_cause_key),
                intervention_id = chrv(intervention_id), risk_id = chrv(risk_id),
                cause_id = chrv(cause_id), effect_model = chrv(effect_model),
@@ -2319,7 +2382,8 @@ if (!exists("public_health_inputs_file")) {
                 "TFA PAF mode selected but optional PAF missing/zero (effect provisional)", "REVIEW")
   }
   L[, full_effect_at_target := reproduce_full_effect(effect_model, baseline_exposure,
-                                                     target_exposure, response_value, paf_value)]
+                                                     target_exposure, response_value, paf_value,
+                                                     erd10_pooled = tob_erd10_pooled)]
   # QA: reproduced full effect vs Model_Input_View illustrative_full_effect
   miv_e <- miv[, .(intervention_cause_key = chrv(intervention_cause_key),
                    illustrative_full_effect = numv(illustrative_full_effect))]
@@ -2334,7 +2398,7 @@ if (!exists("public_health_inputs_file")) {
   }
   padd(L$n_eff != 1L,                              "effect match != 1")
   padd(is.na(L$cause_code),                        "cause_id absent from Model 00 cause_map")
-  padd(is.na(L$model_transition),                  "transition not the intended well -> sick incidence")
+  padd(is.na(L$model_transition),                  "transition outside allowed {well->sick incidence, sick->dead case_fatality}")
   padd(!(L$effect_model %in% supported_effect_models), "unsupported effect_model")
   padd(!(L$lag_model %in% supported_lag_models),   "unsupported lag_model")
   padd(is.na(L$lag_parameter) | L$lag_parameter < 0, "missing/negative lag_parameter")
@@ -2472,7 +2536,13 @@ if (!exists("public_health_inputs_file")) {
   to_engine <- function(dd)
     dd[, .(intervention_id, intervention_cause_key, effect_key, exposure_key, cost_join_key,
            cause_id, cause_code, model_transition,
-           effect_model, baseline_exposure, target_exposure, exposure_floor,
+           # Raw workbook transition fields carried through so every downstream
+           # join can key on the COMPLETE transition (prevents a well->sick effect
+           # ever being applied to sick->dead or vice-versa) and Model 09 can
+           # report the original transition.
+           transition_from = chrv(transition_from), transition_to = chrv(transition_to),
+           effect_model, response_key,
+           baseline_exposure, target_exposure, exposure_floor,
            start_year = exposure_start_year, target_year = exposure_target_year,
            scale_up_shape = exposure_scale_up_shape,
            response_value, paf_value, lag_model, lag_parameter,
@@ -2554,14 +2624,27 @@ if (!exists("public_health_inputs_file")) {
                         ph_effect_rows = to_engine(valid_links))
 
   ## -- Acceptance-criteria checks (structural; add issues only on failure) -----
+  # Counts are split by transition so the sick -> dead additions are audited
+  # against the workbook QA sheet: 48 well->sick incidence links + 12 tobacco-CVD
+  # sick->dead links (+ 1 SSB sick->dead when explicitly enabled).
   n_exec <- uniqueN(map_sel$intervention_id)
   if (n_exec != 12L)
     add_issue("ph_contract", "interventions", "count",
               sprintf("%d executable interventions (expected 12)", n_exec), "REVIEW")
-  n_keys <- uniqueN(map_sel$intervention_cause_key)
-  if (n_keys != 48L)
-    add_issue("ph_contract", "intervention_cause_key", "count",
-              sprintf("%d unique link keys (expected 48)", n_keys), "REVIEW")
+  n_inc  <- map_sel[model_transition == "incidence",     uniqueN(intervention_cause_key)]
+  n_cf   <- map_sel[model_transition == "case_fatality", uniqueN(intervention_cause_key)]
+  n_cf_tob <- map_sel[model_transition == "case_fatality" & grepl("^I_PH_TOB", intervention_id),
+                      uniqueN(intervention_cause_key)]
+  exp_cf <- if (isTRUE(ssb_mortality_enabled)) 13L else 12L
+  if (n_inc != 48L)
+    add_issue("ph_contract", "incidence_links", "count",
+              sprintf("%d well->sick incidence links (expected 48)", n_inc), "REVIEW")
+  if (n_cf != exp_cf)
+    add_issue("ph_contract", "sick_dead_links", "count",
+              sprintf("%d sick->dead links selected (expected %d)", n_cf, exp_cf), "REVIEW")
+  if (n_cf_tob != 12L)
+    add_issue("ph_contract", "tobacco_sick_dead_links", "count",
+              sprintf("%d tobacco-CVD sick->dead links (expected 12)", n_cf_tob), "REVIEW")
   for (iid in runnable_ints) {
     if (nrow(E[intervention_id == iid]) != 1L)
       add_issue("ph_contract", iid, "exposure", "not exactly one exposure row", "FAIL")
@@ -2583,12 +2666,69 @@ if (!exists("public_health_inputs_file")) {
     n_interventions = length(s$intervention_ids),
     component_order = s$component_order)), fill = TRUE)
 
+  ## -- Tobacco Jha timing / vascular-mortality config (parsed once; consumed by
+  ## Model 06). Parses the SCALAR_JHA_* grid into (sex, age band, cessation
+  ## duration) rows carrying the ERD and the shared timing scalar
+  ## lambda = min(1, ERD_duration / ERD_10plus) (M12), plus ERD_10plus per band
+  ## and the sex-specific vascular-mortality HRs (M16). No numbers are invented:
+  ## every value is a Risk_Response / Assumptions cell read by name.
+  build_tobacco_scalar_matrix <- function(rr_dt) {
+    j <- rr_dt[grepl("^SCALAR_JHA_", chrv(response_key))]
+    if (!nrow(j)) return(NULL)
+    parse_key <- function(k) {
+      s   <- sub("^SCALAR_JHA_", "", k)                # e.g. M_20_39_LT3 / F_40_49_Y3_9
+      sx  <- substr(s, 1, 1)
+      rest <- sub("^[MF]_", "", s)
+      if      (grepl("_LT3$",  rest)) { d <- "LT3";  ages <- sub("_LT3$",  "", rest) }
+      else if (grepl("_GE10$", rest)) { d <- "GE10"; ages <- sub("_GE10$", "", rest) }
+      else if (grepl("_Y3_9$", rest)) { d <- "Y3_9"; ages <- sub("_Y3_9$", "", rest) }
+      else stop("Public-health: unparseable SCALAR_JHA key '", k, "'")
+      ab <- strsplit(ages, "_")[[1]]
+      data.table(sex = ifelse(sx == "M", "Male", "Female"),
+                 age_lo = as.integer(ab[1]), age_hi = as.integer(ab[2]),
+                 duration = d)
+    }
+    meta <- rbindlist(lapply(chrv(j$response_key), parse_key))
+    sm <- cbind(meta, ERD = numv(j$source_effect_value),
+                lambda_wb = numv(j$model_response_value))
+    # lambda = min(1, ERD_duration / ERD_10plus) within each sex x age band (M12).
+    sm[, ERD_ge10 := ERD[duration == "GE10"], by = .(sex, age_lo, age_hi)]
+    sm[, lambda   := pmin(1, ERD / ERD_ge10)]
+    # QA: reproduced lambda must match the workbook cached model_response_value.
+    for (ii in which(is.finite(sm$lambda_wb) & abs(sm$lambda - sm$lambda_wb) > 1e-6))
+      add_issue("ph_tobacco", paste0(sm$sex[ii], "_", sm$age_lo[ii], "_", sm$duration[ii]),
+                "SCALAR_JHA", sprintf("reproduced lambda %.6g != workbook %.6g",
+                                      sm$lambda[ii], sm$lambda_wb[ii]), "REVIEW")
+    sm[]
+  }
+  tob_scalar_matrix <- build_tobacco_scalar_matrix(rr)
+  # ERD_10plus per (sex, age band) drives the M16 residual mortality RR.
+  tob_erd10_by_band <- if (!is.null(tob_scalar_matrix))
+    unique(tob_scalar_matrix[duration == "GE10", .(sex, age_lo, age_hi, erd10 = ERD)]) else NULL
+  tobacco_effect_config <- list(
+    scalar_matrix   = tob_scalar_matrix,     # sex x age band x duration -> lambda
+    erd10_by_band   = tob_erd10_by_band,     # sex x age band -> ERD_10plus (M16)
+    vasc_rr_male    = tob_rr_mort_male,       # 2.9 (applied)
+    vasc_rr_female  = tob_rr_mort_female,     # 3.1 (applied)
+    vasc_rr_pooled  = tob_rr_mort_pooled,     # 3.0 (illustrative fallback only)
+    erd10_pooled    = tob_erd10_pooled,       # 0.90125 (illustrative fallback only)
+    timing_mode     = tob_timing_selected,    # jha_piecewise_shared_scalar | normalized_exponential_lag
+    lag_rate        = tob_lag_rate,           # 0.0616 (sensitivity timing only)
+    full_effect_year = tob_full_effect_year,  # 10
+    age80_extrapolation = tob_age80_extrap,   # use_age_60_79 (documented fallback)
+    # Age band 80-95 reuses the 60-79 scalars per Assumptions; recorded for the
+    # Model 06 diagnostic so the extrapolation is auditable, not silent.
+    age80_reuses_60_79 = identical(tob_age80_extrap, "use_age_60_79"))
+  cat(sprintf("Public-health: tobacco timing model = %s (full effect year %d; sens. lag rate %.4g).\n",
+              tob_timing_selected, tob_full_effect_year, tob_lag_rate))
+
   ## -- Assemble public_health_inputs (consumed by Model 09) -------------------
   public_health_inputs <- list(
     links          = L,
     valid_links    = valid_links,
     blocked_links  = L[valid == FALSE],
     effect_rows_engine = to_engine(valid_links),
+    tobacco_effect_config = tobacco_effect_config,
     exposure       = E,
     policy_levers  = lev,
     policy_levers_processed = Lv,
@@ -2665,9 +2805,15 @@ if (!exists("public_health_inputs_file")) {
 }
 
 if (isTRUE(run_public_health_interventions)) {
+  # Timing model + exploratory-SSB switch come from Model 00 (execution-level);
+  # default to the reproducible base case if Model 00 did not declare them.
+  .tob_timing <- if (exists("tobacco_timing_analysis")) tobacco_timing_analysis else "base"
+  .ssb_mort   <- if (exists("run_ssb_diabetes_mortality")) isTRUE(run_ssb_diabetes_mortality) else FALSE
   .ph_built <- .build_public_health_catalogue(public_health_inputs_file, cause_map,
                                               strict      = strict_model_input_validation,
-                                              baseline_id = baseline_scenario_id)
+                                              baseline_id = baseline_scenario_id,
+                                              tobacco_timing_analysis = .tob_timing,
+                                              ssb_mortality_enabled   = .ssb_mort)
   public_health_scenarios <- .ph_built$scenarios
   public_health_inputs    <- .ph_built$inputs
   rm(.ph_built)
@@ -2679,3 +2825,74 @@ if (isTRUE(run_public_health_interventions)) {
   cat("\nPublic-health interventions disabled (run_public_health_interventions = FALSE); ",
       "PH catalogue not built.\n\n", sep = "")
 }
+
+#===========================================================================
+# JOINT CLINICAL + PUBLIC-HEALTH SCENARIO  (feeds Models 06, 07 and 09) ----
+#---------------------------------------------------------------------------
+# When BOTH intervention families are enabled we build ONE genuine joint
+# scenario, `all_clinical_public_health`, that carries the complete validated
+# clinical effect rows (from the clinical `all` scenario) AND the complete
+# validated public-health effect rows (from `all_public_health`). Model 06 runs
+# it as a SINGLE projection that applies `fair_wb` and `ph_wb` exactly once each
+# to the same baseline-rate copy -- it is NEVER an arithmetic combination of the
+# separate `all` / `all_public_health` outputs. The two family catalogues above
+# are left completely untouched; this only ADDS a third catalogue object.
+#===========================================================================
+.run_cl <- if (exists("run_clinical_interventions"))      isTRUE(run_clinical_interventions)      else TRUE
+.run_ph <- if (exists("run_public_health_interventions")) isTRUE(run_public_health_interventions) else TRUE
+if (.run_cl && .run_ph) {
+  # Complete validated effect rows of each family's combined scenario.
+  .cl_all  <- if (exists("fair_scenarios") && !is.null(fair_scenarios))
+    fair_scenarios[["all"]] else NULL
+  .ph_all  <- if (exists("public_health_scenarios") && !is.null(public_health_scenarios))
+    public_health_scenarios[["all_public_health"]] else NULL
+  .cl_rows <- if (!is.null(.cl_all)) .cl_all$fair_effect_rows else NULL
+  .ph_rows <- if (!is.null(.ph_all)) .ph_all$ph_effect_rows   else NULL
+
+  if (is.null(.cl_rows) || !nrow(.cl_rows) || is.null(.ph_rows) || !nrow(.ph_rows))
+    stop("Model 04: run_clinical_interventions and run_public_health_interventions are ",
+         "both TRUE but the validated combined effect rows are unavailable. The joint ",
+         "scenario requires the clinical 'all' scenario (>= 2 runnable clinical ",
+         "interventions) and the public-health 'all_public_health' scenario (>= 2 ",
+         "runnable public-health interventions). Clinical rows: ",
+         if (is.null(.cl_rows)) "MISSING" else nrow(.cl_rows), "; public-health rows: ",
+         if (is.null(.ph_rows)) "MISSING" else nrow(.ph_rows), ".", call. = FALSE)
+
+  .cl_ids <- .cl_all$intervention_ids
+  .ph_ids <- .ph_all$intervention_ids
+  .joint_id <- "all_clinical_public_health"
+  # Collision-safety: the joint id must not clash with either family catalogue.
+  if (.joint_id %in% c(names(fair_scenarios), names(public_health_scenarios)))
+    stop("Model 04: joint scenario id '", .joint_id, "' collides with an existing ",
+         "family scenario id.", call. = FALSE)
+
+  combined_scenarios <- list()
+  combined_scenarios[[.joint_id]] <- list(
+    scenario_id      = .joint_id,
+    scenario_label   = "All clinical + public-health interventions (combined)",
+    family           = "clinical_public_health",
+    scenario_level   = "combined",
+    scenario_role    = "combined",
+    parent_package_id   = NA_character_,
+    parent_package_name = NA_character_,
+    intervention_id  = NA_character_,
+    # Union of all runnable intervention IDs, with family provenance retained.
+    intervention_ids = c(.cl_ids, .ph_ids),
+    clinical_intervention_ids      = .cl_ids,
+    public_health_intervention_ids = .ph_ids,
+    component_order  = NA_integer_,
+    # BOTH engines run once each in a single projection (fair_wb + ph_wb).
+    interventions    = c("fair_wb", "ph_wb"),
+    fair_effect_rows = .cl_rows,          # complete validated clinical rows
+    ph_effect_rows   = .ph_rows)          # complete validated public-health rows
+
+  cat(sprintf(paste0("\nJoint scenario built: '%s' -> %d clinical + %d public-health ",
+                     "runnable interventions; %d clinical + %d public-health effect rows ",
+                     "(single joint run, fair_wb + ph_wb).\n\n"),
+              .joint_id, length(.cl_ids), length(.ph_ids), nrow(.cl_rows), nrow(.ph_rows)))
+} else {
+  # Not a both-families run: no joint scenario (single-family runs unchanged).
+  combined_scenarios <- NULL
+}
+rm(list = intersect(ls(), c(".run_cl", ".run_ph", ".cl_all", ".ph_all", ".cl_rows",
+                            ".ph_rows", ".cl_ids", ".ph_ids", ".joint_id")))

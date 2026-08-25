@@ -108,17 +108,54 @@ if (!isTRUE(run_public_health_interventions) && !isTRUE(run_clinical_interventio
 # public-health cost/value formula workbook Model 09 writes. Names are kept
 # deliberately distinct from the clinical `model_inputs_file` /
 # `cost_value_output_file` above so the two families can never be confused.
-# The authoritative contract is the UPDATED workbook (individual interventions,
-# nested tobacco/salt packages, fiscal/regulatory levers, Scenario_Hierarchy);
-# fall back to the previous non-suffixed file only if the updated one is absent.
-public_health_inputs_file <- paste0(wd, "data/indonesia_model_inputs_public_health_updated.xlsx")
-if (!file.exists(public_health_inputs_file)) {
-  .ph_alt <- paste0(wd, "data/indonesia_model_inputs_public_health.xlsx")
-  if (file.exists(.ph_alt)) public_health_inputs_file <- .ph_alt
-  rm(.ph_alt)
-}
+# The authoritative contract is the MORTALITY-updated workbook (adds the
+# tobacco sick -> dead / case-fatality proxy links via Cho/Jha et al. 2024 and
+# the exploratory SSB -> T2DM mortality link). Fall back to the previous
+# `_updated` file, then the non-suffixed file, only if newer ones are absent.
+.ph_candidates <- paste0(wd, c(
+  "data/indonesia_model_inputs_public_health_updated_mortality.xlsx",  # authoritative (mortality)
+  "data/indonesia_model_inputs_public_health_updated.xlsx",            # previous updated
+  "data/indonesia_model_inputs_public_health.xlsx"))                   # original
+public_health_inputs_file <- .ph_candidates[file.exists(.ph_candidates)][1]
+if (is.na(public_health_inputs_file))
+  stop("No public-health input workbook found; expected one of:\n  ",
+       paste(.ph_candidates, collapse = "\n  "), call. = FALSE)
+rm(.ph_candidates)
 public_health_cost_value_formulae_file <- paste0(
   wd_outp, "indonesia_cost_value_public_health_formulae.xlsx")
+# Combined clinical + public-health formula workbook Model 09 writes when BOTH
+# families are enabled (baseline + all clinical + all public-health + the genuine
+# joint `all_clinical_public_health` scenario). Declared here once so Models 09
+# and the tests share a single source of truth for the path.
+combined_cost_value_formulae_file <- paste0(
+  wd_outp, "indonesia_model_cost_value_clinical_public_health_formulae.xlsx")
+
+#---------------------------------------------------------------------------
+# PUBLIC-HEALTH MORTALITY / TIMING EXECUTION SWITCHES (execution-level only) --
+#---------------------------------------------------------------------------
+# These select which analytic OPTION of the workbook contract this run uses.
+# They never carry numeric assumptions -- effect sizes, hazard ratios, Jha ERD
+# scalars, exposure paths and lag rates all live in the workbook and are read by
+# name (see Assumptions / Risk_Response / Effect_Parameters).
+#
+# tobacco_timing_analysis: which timing model applies the tobacco-CVD effect as
+# smokers quit. "base" uses the workbook Jha age-sex-duration piecewise scalars
+# (jha_piecewise_shared_scalar); "normalized_exponential_lag" is the SENSITIVITY
+# alternative that overrides ONLY tobacco timing and reads the annual fraction
+# tobacco_cvd_lag_rate (0.0616) from the Assumptions sheet. Both are cohort-based
+# (each annual quitting cohort accrues cessation duration separately).
+tobacco_timing_analysis <- "base"   # "base" | "normalized_exponential_lag"
+if (!tobacco_timing_analysis %in% c("base", "normalized_exponential_lag"))
+  stop("tobacco_timing_analysis must be 'base' or 'normalized_exponential_lag'.",
+       call. = FALSE)
+
+# run_ssb_diabetes_mortality: the workbook carries an EXPLORATORY SSB-tax ->
+# type-2-diabetes all-cause-mortality (sick -> dead) link, disabled by default
+# (Intervention_Cause_Map include_flag = 0). Set TRUE to include it despite that
+# flag; it then acts ONLY on the dm2 sick -> dead transition and is labelled an
+# all-cause-mortality proxy (NOT diabetes-specific mortality). FALSE keeps every
+# result identical to the base case.
+run_ssb_diabetes_mortality <- FALSE
 
 #===========================================================================
 # CENTRAL MODEL CONFIGURATION  (SINGLE SOURCE OF TRUTH) ----
@@ -160,6 +197,31 @@ dx_include <- unname(cause_map)
 
 # Short codes (kept for backward compatibility with downstream references).
 cause_cols <- names(cause_map)
+
+## --- CVD 40q30 causes -------------------------------------------------------
+# The SIX cardiovascular-disease causes whose combined age-specific mortality
+# defines the period CVD 40q30 (unconditional probability of dying from CVD
+# between exact ages 30 and 70). Declared ONCE here beside `cause_map` using the
+# current short codes; Models 07 and 09 derive the metric from THIS vector only.
+# Deliberately EXCLUDES `dm2` (diabetes) and the `all`-cause envelope: 40q30 is a
+# CVD-specific measure, not all-cause and not diabetes.
+cvd_40q30_cause_codes <- c("ihd", "istroke", "hstroke", "hhd", "rhd", "cmd")
+local({
+  if (length(cvd_40q30_cause_codes) != 6L)
+    stop("cvd_40q30_cause_codes must contain exactly six CVD cause codes; got ",
+         length(cvd_40q30_cause_codes), ".")
+  if (anyDuplicated(cvd_40q30_cause_codes))
+    stop("cvd_40q30_cause_codes has duplicate code(s): ",
+         paste(cvd_40q30_cause_codes[duplicated(cvd_40q30_cause_codes)], collapse = ", "))
+  miss <- setdiff(cvd_40q30_cause_codes, names(cause_map))
+  if (length(miss))
+    stop("cvd_40q30_cause_codes references code(s) absent from cause_map: ",
+         paste(miss, collapse = ", "))
+  if (any(c("dm2", all_cause_code) %in% cvd_40q30_cause_codes))
+    stop("cvd_40q30_cause_codes must not include 'dm2' or the all-cause envelope '",
+         all_cause_code, "'.")
+  cat(sprintf("CVD 40q30 causes (6): %s\n", paste(cvd_40q30_cause_codes, collapse = ", ")))
+})
 
 ## --- Ages ------------------------------------------------------------------
 # Single-year model ages. Numeric age 95 represents the OPEN-ENDED GBD

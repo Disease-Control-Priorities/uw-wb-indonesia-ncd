@@ -354,5 +354,39 @@ if(run_CF_trend== TRUE){
   
 }
 
+#...........................................................
+# dm2 baseline sanity guard (public-health diabetes sick -> dead effect) ----
+#...........................................................
+# The public-health SSB -> T2DM mortality proxy (run_ssb_diabetes_mortality) and
+# the existing tobacco -> T2DM incidence links act on the dm2 cause. Confirm dm2
+# carries a valid baseline sick stock (PREVt0, seeded as sick = Nx*PREVt0 in
+# Model 06) and case fatality (CF) through the SAME pipeline steps as the CVD
+# causes, so the sick -> dead effect has something to act on. dm2 IS included in
+# the secular BG.mx / CF trend joins above via the central `cause_lookup` (its
+# long GBD name maps to "dm2"), so its CF is trended, not silently held flat.
+# Fail loud rather than emit NA/all-zero sick or CF for dm2. Non-analytic guard.
+if ("dm2" %in% b_rates$cause) {
+  .dm2 <- b_rates[cause == "dm2" & year >= 2025]
+  .bad_cf   <- anyNA(.dm2$CF)     || all(.dm2$CF     == 0, na.rm = TRUE)
+  .bad_sick <- anyNA(.dm2$PREVt0) || all(.dm2$PREVt0 == 0, na.rm = TRUE)
+  if (.bad_cf || .bad_sick)
+    stop("Model 05: dm2 has NA/all-zero ", if (.bad_cf) "CF " else "",
+         if (.bad_sick) "PREVt0 " else "",
+         "-- the diabetes sick->dead effect would have nothing to act on. ",
+         "Check the calibration output and the secular-trend cause_lookup join.",
+         call. = FALSE)
+  cat(sprintf(paste0("Model 05: dm2 baseline OK (CF mean %.4g, max %.4g; PREVt0 mean %.4g); ",
+                     "diabetes sick->dead effect has a valid target.\n"),
+              mean(.dm2$CF, na.rm = TRUE), max(.dm2$CF, na.rm = TRUE),
+              mean(.dm2$PREVt0, na.rm = TRUE)))
+  rm(.dm2, .bad_cf, .bad_sick)
+} else {
+  cat("Model 05: dm2 not in cause_map; diabetes sick->dead effect inactive.\n")
+}
+
 # Clean up environment
 rm("adjustments","bgmx_fcst","dt_pop_unwpp","wpp.adj","rep","pop20")
+
+
+## HERE I Include a patch to align to an aggregate projection for alignment with the UNWPP 2024 population projections. 
+# This is a temporary fix to ensure that the model's population projections are consistent with the official UNWPP data.
