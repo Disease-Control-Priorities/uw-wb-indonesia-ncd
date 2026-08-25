@@ -1822,7 +1822,9 @@ calculate_fair_workbook_impact <- function(intervention_rates, Country, effect_r
 #      [start_year, target_year], floored at exposure_floor;
 #   2. full effect via the row's declared effect_model
 #      (direct_smoking_prevalence_shift_rr / direct_loglinear_rr_per_unit_reduction
-#       / tfa_attributable_ihd_PAF_x_policy_score);
+#       -- the latter is the DEFAULT industrial-TFA path via RR per percentage-point
+#       energy; tfa_attributable_ihd_PAF_x_regulatory_gap is the optional PAF path,
+#       used only when Assumptions$tfa_effect_method = "PAF");
 #   3. lag model: immediate_after_full_implementation -> effect tracks the
 #      exposure path; delayed_exponential_remaining_effect -> full target effect
 #      accrues as 1-(1-rate)^(years since start);
@@ -1845,7 +1847,11 @@ calculate_public_health_workbook_impact <- function(intervention_rates, Country,
       return(1 - (1 + pt * (RR - 1)) / (1 + p0 * (RR - 1)))
     if (identical(model, "direct_loglinear_rr_per_unit_reduction"))
       return(1 - 1 / (RR ^ (p0 - pt)))
-    if (identical(model, "tfa_attributable_ihd_PAF_x_policy_score"))
+    # Optional TFA PAF path (regulatory-gap or legacy policy-score variant): a flat
+    # PAF x implementation-gap effect; RR carries the gap. Only used when the
+    # workbook selects tfa_effect_method = "PAF"; the RR base case uses the
+    # log-linear branch above and needs no PAF.
+    if (grepl("^tfa_attributable_ihd_PAF", model))
       return(rep(ifelse(is.na(paf), 0, paf) * ifelse(is.na(RR), 0, RR), length(pt)))
     stop("PH wb: unsupported effect_model '", model, "'.", call. = FALSE)
   }
@@ -2581,11 +2587,15 @@ run_multiple_scenarios <- function(Country,
       fer_arg  <- entry$fair_effect_rows
       per_arg  <- entry$ph_effect_rows
       fam_arg  <- if (!is.null(entry$family)) entry$family else NA_character_
+      role_arg <- if (!is.null(entry$scenario_role)) entry$scenario_role else NA_character_
+      ppid_arg <- if (!is.null(entry$parent_package_id)) entry$parent_package_id else NA_character_
     } else {
       ints_arg <- entry
       fer_arg  <- NULL
       per_arg  <- NULL
       fam_arg  <- NA_character_
+      role_arg <- NA_character_
+      ppid_arg <- NA_character_
     }
 
     results[[scenario_name]] <- project.all(
@@ -2624,10 +2634,14 @@ run_multiple_scenarios <- function(Country,
       fair_bundle_coverage   = fair_bundle_coverage
     )
 
-    # Trace the intervention family on every output row for unambiguous
-    # downstream selection (baseline / clinical / public_health / combined).
-    if (is.data.frame(results[[scenario_name]]))
+    # Trace the intervention family + public-health hierarchy on every output row
+    # for unambiguous downstream selection (baseline / clinical / public_health;
+    # scenario_role = standalone / child / package / combined; parent package id).
+    if (is.data.frame(results[[scenario_name]])) {
       results[[scenario_name]][, intervention_family := fam_arg]
+      results[[scenario_name]][, scenario_role := role_arg]
+      results[[scenario_name]][, parent_package_id := ppid_arg]
+    }
   }
 
   combined_results <- rbindlist(results, idcol = "scenario")

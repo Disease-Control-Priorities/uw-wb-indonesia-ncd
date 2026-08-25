@@ -1,0 +1,6 @@
+cause_id,gbd_cause_name,cause_long,cause_short
+C_HHD,Hypertensive heart disease,Hypertensive heart disease,hhd
+C_ICH,Intracerebral hemorrhage,Intracerebral hemorrhage,hstroke
+C_IHD,Ischemic heart disease,Ischemic heart disease,ihd
+C_IS,Ischemic stroke,Ischemic stroke,istroke
+C_RHD,Rheumatic heart disease,Rheumatic heart disease,rhd

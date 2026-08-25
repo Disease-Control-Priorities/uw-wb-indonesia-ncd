@@ -108,9 +108,10 @@ if (!isTRUE(run_public_health_interventions) && !isTRUE(run_clinical_interventio
 # public-health cost/value formula workbook Model 09 writes. Names are kept
 # deliberately distinct from the clinical `model_inputs_file` /
 # `cost_value_output_file` above so the two families can never be confused.
-# The repository file name contains a space ("indonesia_model_inputs_ public_health.xlsx");
-# use the ACTUAL file, falling back to the no-space variant if it is ever renamed.
-public_health_inputs_file <- paste0(wd, "data/indonesia_model_inputs_public_health.xlsx")
+# The authoritative contract is the UPDATED workbook (individual interventions,
+# nested tobacco/salt packages, fiscal/regulatory levers, Scenario_Hierarchy);
+# fall back to the previous non-suffixed file only if the updated one is absent.
+public_health_inputs_file <- paste0(wd, "data/indonesia_model_inputs_public_health_updated.xlsx")
 if (!file.exists(public_health_inputs_file)) {
   .ph_alt <- paste0(wd, "data/indonesia_model_inputs_public_health.xlsx")
   if (file.exists(.ph_alt)) public_health_inputs_file <- .ph_alt

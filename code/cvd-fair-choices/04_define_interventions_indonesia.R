@@ -1908,8 +1908,11 @@ rm(.fair_built)
 #        effect = 1 - (1 + pt*(RR-1)) / (1 + p0*(RR-1))
 #   2. direct_loglinear_rr_per_unit_reduction
 #        effect = 1 - 1 / (RR ^ (p0 - pt))          # delta = p0 - pt
-#   3. tfa_attributable_ihd_PAF_x_policy_score
-#        effect = PAF * achieved_policy_score
+#        This is the DEFAULT industrial-TFA path (RR per 1 percentage-point energy,
+#        e.g. RR_TFA_IHD_1PCT = 1.10); it needs no PAF.
+#   3. tfa_attributable_ihd_PAF_x_regulatory_gap (optional; only when
+#        Assumptions$tfa_effect_method = "PAF")
+#        effect = optional_PAF * implementation_gap
 # The exposure path pt = pt(t) (baseline -> target over start..target year,
 # floored) and the lag model are applied per YEAR in Model 06; here we reproduce
 # only the target-exposure full effect (illustrative_full_effect) for validation
@@ -1921,8 +1924,11 @@ rm(.fair_built)
 # fallbacks so this script can also be sourced stand-alone.
 if (!exists("run_public_health_interventions"))
   run_public_health_interventions <- TRUE
-if (!exists("public_health_inputs_file"))
-  public_health_inputs_file <- paste0(wd, "data/indonesia_model_inputs_public_health.xlsx")
+if (!exists("public_health_inputs_file")) {
+  public_health_inputs_file <- paste0(wd, "data/indonesia_model_inputs_public_health_updated.xlsx")
+  if (!file.exists(public_health_inputs_file))
+    public_health_inputs_file <- paste0(wd, "data/indonesia_model_inputs_public_health.xlsx")
+}
 
 .build_public_health_catalogue <- function(inputs_path,
                                            cause_map,
@@ -1934,7 +1940,7 @@ if (!exists("public_health_inputs_file"))
 
   req_sheets <- c("Assumptions", "Intervention_Cause_Map", "Policy_Levers",
                   "Exposure_Targets", "Effect_Parameters", "Risk_Response",
-                  "Model_Input_View", "Cost_Components")
+                  "Model_Input_View", "Cost_Components", "Scenario_Hierarchy")
   have <- readxl::excel_sheets(inputs_path)
   miss <- setdiff(req_sheets, have)
   if (length(miss))
@@ -1971,6 +1977,14 @@ if (!exists("public_health_inputs_file"))
   reporting_price_year  <- as.integer(numv(getA("reporting_price_year", 2023)))
   source_cost_price_year <- as.integer(numv(getA("source_cost_price_year", 2017)))
   scale_up_shape        <- chrv(getA("scale_up_shape", "linear"))
+  # TFA effect method switch (RR default; PAF optional). Regulatory scores map the
+  # none/partial/full implementation categories (M03). All read by name.
+  tfa_effect_method     <- toupper(chrv(getA("tfa_effect_method", "RR")))
+  if (!(tfa_effect_method %in% c("RR", "PAF"))) tfa_effect_method <- "RR"
+  tfa_optional_ihd_paf  <- numv(getA("tfa_optional_ihd_paf", NA))
+  reg_none_score        <- numv(getA("regulatory_none_score", 0))
+  reg_partial_score     <- numv(getA("regulatory_partial_score", 0.5))
+  reg_full_score        <- numv(getA("regulatory_full_score", 1))
 
   ## -- cause_id -> model cause short code (explicit translation table) --------
   # C_CMYO -> cmd and C_T2DM -> dm2 as required, plus the shared CVD mappings.
@@ -2010,11 +2024,12 @@ if (!exists("public_health_inputs_file"))
     n <- length(model); e <- rep(NA_real_, n)
     sm <- model == "direct_smoking_prevalence_shift_rr"
     ll <- model == "direct_loglinear_rr_per_unit_reduction"
-    tf <- model == "tfa_attributable_ihd_PAF_x_policy_score"
+    tf <- grepl("^tfa_attributable_ihd_PAF", model)   # optional PAF path (any variant)
     e[sm] <- 1 - (1 + pt[sm] * (RR[sm] - 1)) / (1 + p0[sm] * (RR[sm] - 1))
     e[ll] <- 1 - 1 / (RR[ll] ^ (p0[ll] - pt[ll]))
-    # TFA: PAF * achieved policy-score effect (response_value carries the score
-    # effect; paf the attributable fraction). Missing PAF -> 0 (flagged below).
+    # Optional TFA PAF path only: effect = PAF * implementation gap (RR[] carries the
+    # gap/score). Used solely when Assumptions$tfa_effect_method = "PAF"; the RR base
+    # case runs through the log-linear branch above and needs no PAF.
     e[tf] <- ifelse(is.na(paf[tf]), 0, paf[tf]) * ifelse(is.na(RR[tf]), 0, RR[tf])
     e
   }
@@ -2027,6 +2042,127 @@ if (!exists("public_health_inputs_file"))
   cst <- rd("Cost_Components")
   rr  <- rd("Risk_Response")
   miv <- rd("Model_Input_View")
+  sh  <- rd("Scenario_Hierarchy")
+
+  ## -- Scenario hierarchy (parent packages <-> child interventions) -----------
+  # Read every field by name; classify individual interventions vs nested
+  # tobacco/salt packages. Never hard-code the membership lists here.
+  SH <- sh[, .(parent_scenario_id       = chrv(parent_scenario_id),
+               parent_scenario_name     = chrv(parent_scenario_name),
+               intervention_id          = chrv(intervention_id),
+               intervention_name        = chrv(intervention_name),
+               package_group            = chrv(package_group),
+               scenario_role            = tolower(chrv(scenario_role)),
+               include_in_parent_scenario = as.integer(numv(include_in_parent_scenario)),
+               standalone_scenario_id   = chrv(standalone_scenario_id),
+               parent_aggregation_rule  = chrv(parent_aggregation_rule),
+               outcome_reporting_rule   = chrv(outcome_reporting_rule),
+               cost_reporting_rule      = chrv(cost_reporting_rule),
+               component_order          = as.integer(numv(component_order)),
+               source_note              = chrv(source_note))]
+  SH[is.na(include_in_parent_scenario), include_in_parent_scenario := 1L]
+  # Parent packages = parent_scenario_id that own >= 1 child row.
+  package_ids  <- unique(SH[scenario_role == "child", parent_scenario_id])
+  children_of  <- function(pid) SH[scenario_role == "child" &
+                                     parent_scenario_id == pid &
+                                     include_in_parent_scenario == 1L, intervention_id]
+  # Hierarchy QA: tobacco has 3 children, salt has 4 (from the workbook, not hard-coded).
+  tob_pkg <- package_ids[grepl("TOBACCO", package_ids)]
+  salt_pkg <- package_ids[grepl("SALT", package_ids)]
+  if (length(tob_pkg) == 1L && length(children_of(tob_pkg)) != 3L)
+    add_issue("ph_hierarchy", tob_pkg, "children",
+              sprintf("tobacco package has %d children (expected 3)", length(children_of(tob_pkg))), "FAIL")
+  if (length(salt_pkg) == 1L && length(children_of(salt_pkg)) != 4L)
+    add_issue("ph_hierarchy", salt_pkg, "children",
+              sprintf("salt package has %d children (expected 4)", length(children_of(salt_pkg))), "FAIL")
+  child_ids_all <- unique(SH[scenario_role == "child", intervention_id])
+  for (cid in child_ids_all)
+    if (!nzchar(unique(SH[intervention_id == cid, parent_scenario_id])[1]))
+      add_issue("ph_hierarchy", cid, "parent_scenario_id", "child without a parent package", "FAIL")
+
+  ## -- Policy levers: reproduce fiscal / regulatory quantities in R -----------
+  # Read all fiscal, regulatory and hierarchy lever fields by name. Reproduce the
+  # tax-share / price-change / regulatory-gap identities (Countdown M03-M06) and
+  # keep the workbook's cached values only as QA comparators.
+  level2score <- function(x) {
+    x <- tolower(trimws(as.character(x)))
+    out <- rep(NA_real_, length(x))
+    out[x == "none"]    <- reg_none_score
+    out[x == "partial"] <- reg_partial_score
+    out[x %in% c("full", "best practice", "best-practice")] <- reg_full_score
+    out
+  }
+  Lv <- lev[, .(
+    lever_id = chrv(lever_id), intervention_id = chrv(intervention_id),
+    intervention_name = chrv(intervention_name), component = chrv(component),
+    lever_method = chrv(lever_method), baseline_value = numv(baseline_value),
+    target_value = numv(target_value), lever_unit = chrv(lever_unit),
+    effect_parameter = numv(effect_parameter),
+    effect_parameter_unit = chrv(effect_parameter_unit),
+    estimated_risk_reduction_wb = numv(estimated_risk_reduction),
+    parent_package_id = chrv(parent_package_id),
+    parent_package_name = chrv(parent_package_name),
+    intervention_role = chrv(intervention_role),
+    fiscal_baseline_tax_level = numv(fiscal_baseline_tax_level),
+    fiscal_target_tax_level = numv(fiscal_target_tax_level),
+    fiscal_tax_level_unit = chrv(fiscal_tax_level_unit),
+    regulatory_baseline_level = chrv(regulatory_baseline_level),
+    regulatory_target_level = chrv(regulatory_target_level),
+    regulatory_baseline_score = numv(regulatory_baseline_score),
+    regulatory_target_score = numv(regulatory_target_score),
+    implementation_gap_wb = numv(implementation_gap),
+    implied_price_change_wb = numv(implied_price_change),
+    fiscal_tax_delta_wb = numv(fiscal_tax_delta),
+    lever_review = chrv(review_status), lever_qa = chrv(qa_status))]
+  Lv[, method := tolower(lever_method)]
+  # Regulatory implementation scores: prefer the none/partial/full level strings
+  # (M03); fall back to the explicit numeric score columns when a level is blank.
+  Lv[, reg_baseline_score := fcoalesce(level2score(regulatory_baseline_level), regulatory_baseline_score)]
+  Lv[, reg_target_score   := fcoalesce(level2score(regulatory_target_level),   regulatory_target_score)]
+  Lv[, implementation_gap := NA_real_]
+  Lv[method == "regulatory_gap_multiplicative",
+     implementation_gap := pmax(0, reg_target_score - reg_baseline_score)]          # M04
+  Lv[, fiscal_tax_delta := NA_real_]
+  Lv[method == "price_elasticity",
+     fiscal_tax_delta := pmax(0, fiscal_target_tax_level - fiscal_baseline_tax_level)]  # M05
+  Lv[, implied_price_change := NA_real_]
+  Lv[method == "tax_share_to_price_elasticity",
+     implied_price_change := (1 - fiscal_baseline_tax_level) /
+       (1 - fiscal_target_tax_level) - 1]                                           # M06
+  Lv[method == "price_elasticity", implied_price_change := fiscal_tax_delta]
+  # Reproduced relative exposure reduction implied by the lever.
+  Lv[, policy_reduction := NA_real_]
+  Lv[method == "regulatory_gap_multiplicative",
+     policy_reduction := effect_parameter * implementation_gap]
+  Lv[method %in% c("price_elasticity", "tax_share_to_price_elasticity"),
+     policy_reduction := abs(effect_parameter) * implied_price_change]
+  Lv[, policy_reduction := pmax(0, policy_reduction)]
+  # QA: reproduced levers vs workbook-cached values (REVIEW on drift only).
+  qa_tol <- function(a, b) is.finite(a) & is.finite(b) &
+    abs(a - b) > 1e-6 + 1e-4 * pmax(abs(b), 1)
+  for (i in which(qa_tol(Lv$policy_reduction, Lv$estimated_risk_reduction_wb)))
+    add_issue("ph_lever", Lv$intervention_id[i], "estimated_risk_reduction",
+              sprintf("reproduced reduction %.6g != workbook %.6g",
+                      Lv$policy_reduction[i], Lv$estimated_risk_reduction_wb[i]), "REVIEW")
+  for (i in which(qa_tol(Lv$implied_price_change, Lv$implied_price_change_wb)))
+    add_issue("ph_lever", Lv$intervention_id[i], "implied_price_change",
+              sprintf("reproduced %.6g != workbook %.6g",
+                      Lv$implied_price_change[i], Lv$implied_price_change_wb[i]), "REVIEW")
+  for (i in which(qa_tol(Lv$implementation_gap, Lv$implementation_gap_wb)))
+    add_issue("ph_lever", Lv$intervention_id[i], "implementation_gap",
+              sprintf("reproduced %.6g != workbook %.6g",
+                      Lv$implementation_gap[i], Lv$implementation_gap_wb[i]), "REVIEW")
+  # QA: tax rows must carry fiscal baseline/target; regulatory rows valid scores.
+  bad_fiscal <- Lv[method %in% c("price_elasticity", "tax_share_to_price_elasticity") &
+                     (is.na(fiscal_baseline_tax_level) | is.na(fiscal_target_tax_level))]
+  for (i in seq_len(nrow(bad_fiscal)))
+    add_issue("ph_lever", bad_fiscal$intervention_id[i], "fiscal_tax_level",
+              "fiscal lever missing baseline/target tax level", "FAIL")
+  bad_reg <- Lv[method == "regulatory_gap_multiplicative" &
+                  (!(reg_baseline_score %in% c(0, 0.5, 1)) | !(reg_target_score %in% c(0, 0.5, 1)))]
+  for (i in seq_len(nrow(bad_reg)))
+    add_issue("ph_lever", bad_reg$intervention_id[i], "regulatory_level",
+              "regulatory score outside none/partial/full", "FAIL")
 
   map[, include_flag := as.integer(numv(include_flag))]
   map_sel <- map[include_flag == 1L]
@@ -2056,9 +2192,19 @@ if (!exists("public_health_inputs_file"))
                target_year = as.integer(numv(target_year)),
                scale_up_shape = chrv(scale_up_shape),
                exposure_review = chrv(review_status))]
-  # applied reduction/target: desired override > applied > recommended
-  E[, red_or_target := fcoalesce(desired_reduction_override, applied_reduction_or_target,
-                                 recommended_reduction_or_target)]
+  # Reproduced relative reduction from the policy lever (fiscal/regulatory) takes
+  # precedence for "relative" rows; the cached workbook values are the QA fallback.
+  E <- merge(E, Lv[, .(intervention_id, lever_policy_reduction = policy_reduction)],
+             by = "intervention_id", all.x = TRUE)
+  E[, red_or_target := fcoalesce(
+      desired_reduction_override,
+      ifelse(tolower(reduction_method) == "relative" & is.finite(lever_policy_reduction),
+             lever_policy_reduction, NA_real_),
+      applied_reduction_or_target, recommended_reduction_or_target)]
+  for (i in which(qa_tol(E$red_or_target, E$applied_reduction_or_target)))
+    add_issue("ph_exposure", E$intervention_id[i], "applied_reduction_or_target",
+              sprintf("reproduced reduction %.6g != workbook %.6g",
+                      E$red_or_target[i], E$applied_reduction_or_target[i]), "REVIEW")
   E[is.na(exposure_floor), exposure_floor := 0]
   E[, target_exposure := reproduce_target(baseline_exposure, reduction_method,
                                           red_or_target, exposure_floor)]
@@ -2086,10 +2232,18 @@ if (!exists("public_health_inputs_file"))
     for (i in seq_len(nrow(bad_exp)))
       add_issue("ph_exposure", bad_exp$intervention_id[i], "exposure",
                 "invalid baseline/target exposure, dates, or reduction_method", "FAIL")
+  # TFA RR is expressed per percentage-point of dietary energy; the exposure must
+  # be in % energy before the log-linear RR formula is applied.
+  tfa_expo <- E[risk_id == "R_TFA"]
+  if (nrow(tfa_expo) && !all(grepl("energy", tolower(tfa_expo$exposure_unit))))
+    for (i in which(!grepl("energy", tolower(tfa_expo$exposure_unit))))
+      add_issue("ph_exposure", tfa_expo$intervention_id[i], "exposure_unit",
+                "TFA exposure not in % energy; RR per percentage-point not applicable", "FAIL")
 
   ## -- Per-link effect table (reproduce full effect at target) ----------------
   supported_effect_models <- c("direct_smoking_prevalence_shift_rr",
                                "direct_loglinear_rr_per_unit_reduction",
+                               "tfa_attributable_ihd_PAF_x_regulatory_gap",
                                "tfa_attributable_ihd_PAF_x_policy_score")
   supported_lag_models <- c("delayed_exponential_remaining_effect",
                             "immediate_after_full_implementation")
@@ -2123,6 +2277,7 @@ if (!exists("public_health_inputs_file"))
                          intervention_name = chrv(intervention_name),
                          risk_id = chrv(risk_id), cause_id = chrv(cause_id),
                          cause_name = chrv(cause_name),
+                         effect_key = chrv(effect_key), exposure_key = chrv(exposure_key),
                          cost_join_key = chrv(cost_join_key), cost_scope = chrv(cost_scope),
                          transition_from, transition_to,
                          requires_cause_expansion = as.integer(numv(requires_cause_expansion)))],
@@ -2140,6 +2295,29 @@ if (!exists("public_health_inputs_file"))
                       exposure_scale_up_shape = scale_up_shape, reduction_method,
                       exposure_review)],
              by = "intervention_id", all.x = TRUE)
+  # bring the lever trace/reproduction (fiscal, regulatory, hierarchy) onto each link
+  L <- merge(L, Lv[, .(intervention_id, parent_package_id, parent_package_name,
+                       intervention_role, implied_price_change, fiscal_tax_delta,
+                       implementation_gap, lever_policy_reduction = policy_reduction)],
+             by = "intervention_id", all.x = TRUE)
+  L[, tfa_effect_method := tfa_effect_method]
+  # Optional TFA PAF method: only when Assumptions$tfa_effect_method = "PAF". The RR
+  # base case leaves the log-linear effect model untouched (no PAF required).
+  tfa_paf_optional <- tfa_optional_ihd_paf
+  if (is.na(tfa_paf_optional)) {
+    .prv <- rr[chrv(response_key) == "PAF_TFA_IHD_OPTIONAL", numv(model_response_value)]
+    if (length(.prv)) tfa_paf_optional <- .prv[1]
+  }
+  if (identical(tfa_effect_method, "PAF")) {
+    L[risk_id == "R_TFA", `:=`(
+      effect_model  = "tfa_attributable_ihd_PAF_x_regulatory_gap",
+      response_value = implementation_gap,     # RR slot carries the implementation gap
+      paf_value     = tfa_paf_optional,
+      lag_model     = "immediate_after_full_implementation")]
+    if (nrow(L[risk_id == "R_TFA"]) && (is.na(tfa_paf_optional) || tfa_paf_optional == 0))
+      add_issue("ph_effect", "I_PH_TFA_POLICY", "paf_value",
+                "TFA PAF mode selected but optional PAF missing/zero (effect provisional)", "REVIEW")
+  }
   L[, full_effect_at_target := reproduce_full_effect(effect_model, baseline_exposure,
                                                      target_exposure, response_value, paf_value)]
   # QA: reproduced full effect vs Model_Input_View illustrative_full_effect
@@ -2200,7 +2378,17 @@ if (!exists("public_health_inputs_file"))
                price_year = as.integer(numv(price_year)),
                indonesia_adjusted_flag = as.integer(numv(indonesia_adjusted_flag)),
                source_country = chrv(source_country), source_file = chrv(source_file),
-               cost_review = chrv(review_status), notes = chrv(notes))]
+               cost_review = chrv(review_status), notes = chrv(notes),
+               # NEW allocation fields (read by name): parent package, child share,
+               # package total and the allocation method / scenario role.
+               parent_package_id = chrv(parent_package_id),
+               cost_allocation_share = numv(cost_allocation_share),
+               package_total_cost_usd_per_capita = numv(package_total_cost_usd_per_capita),
+               allocation_method = chrv(allocation_method),
+               cost_scenario_role = chrv(scenario_role))]
+  # Retain ALL cost rows (incl. parent_reference rows) for the allocation audit;
+  # cost only the in-scope executable intervention rows.
+  Call <- copy(C)
   C <- C[intervention_id %in% sel_int]
 
   # Exactly one selected base-case row per in-scope cost_component_key -----------
@@ -2256,42 +2444,144 @@ if (!exists("public_health_inputs_file"))
           population_in_need_measure %in% c("all", "prevalence", "incidence") &
           chrv(cost_join_key) %in% valid_cjk]
 
+  ## -- Package cost allocation QA (M13/M14): child shares sum to 1 within each
+  ## package and package cost equals the sum of its selected child costs. The
+  ## parent_reference rows (selected_for_base_case = 0) are never charged.
+  cost_reference <- Call[selected_for_base_case == 0L]
+  for (pid in package_ids) {
+    kids <- Call[selected_for_base_case == 1L & parent_package_id == pid]
+    if (!nrow(kids)) next
+    sh_sum <- sum(kids$cost_allocation_share, na.rm = TRUE)
+    if (abs(sh_sum - 1) > 1e-6)
+      add_issue("ph_cost", pid, "cost_allocation_share",
+                sprintf("child cost-allocation shares sum to %.6g (expected 1)", sh_sum), "FAIL")
+    child_cost <- sum(kids$unit_cost_usd, na.rm = TRUE)
+    ref <- cost_reference[intervention_id == pid]
+    pkg_total <- if (nrow(ref)) ref$unit_cost_usd[1] else
+      suppressWarnings(unique(kids$package_total_cost_usd_per_capita)[1])
+    if (is.finite(pkg_total) && abs(child_cost - pkg_total) > 1e-6 + 1e-4 * abs(pkg_total))
+      add_issue("ph_cost", pid, "package_total_cost_usd_per_capita",
+                sprintf("sum of child costs %.6g != package total %.6g", child_cost, pkg_total), "REVIEW")
+  }
+
   ## -- Runnable interventions & scenario catalogue ----------------------------
   valid_links   <- L[valid == TRUE]
   runnable_ints <- unique(valid_links$intervention_id)
   blocked_ints  <- setdiff(sel_int, runnable_ints)
 
   to_engine <- function(dd)
-    dd[, .(intervention_id, intervention_cause_key, cause_code, model_transition,
+    dd[, .(intervention_id, intervention_cause_key, effect_key, exposure_key, cost_join_key,
+           cause_id, cause_code, model_transition,
            effect_model, baseline_exposure, target_exposure, exposure_floor,
            start_year = exposure_start_year, target_year = exposure_target_year,
            scale_up_shape = exposure_scale_up_shape,
            response_value, paf_value, lag_model, lag_parameter,
            full_effect_at_target,
+           # fiscal / regulatory reproduction + hierarchy trace carried per link
+           parent_package_id, intervention_role, implied_price_change, fiscal_tax_delta,
+           implementation_gap, tfa_effect_method,
            # age band / sex of applicability from Risk_Response (else population-wide)
            age_start = rr_age_start, age_stop = rr_age_stop, sex = rr_sex)]
+
+  # Scenario labels: individual interventions and parent packages (from the hierarchy).
+  int_label <- function(iid) {
+    v <- unique(SH[intervention_id == iid, intervention_name]); v <- v[nzchar(v)]
+    if (length(v)) v[1] else iid
+  }
+  pkg_label <- function(pid) {
+    v <- unique(SH[parent_scenario_id == pid, parent_scenario_name]); v <- v[nzchar(v)]
+    if (length(v)) v[1] else pid
+  }
 
   scen <- list()
   scen[[baseline_id]] <- list(scenario_id = baseline_id,
                               scenario_label = "Baseline (no new intervention)",
-                              family = "baseline",
+                              family = "baseline", scenario_level = "baseline",
+                              scenario_role = "baseline",
+                              parent_package_id = NA_character_,
+                              parent_package_name = NA_character_,
+                              intervention_id = NA_character_,
                               intervention_ids = character(0),
+                              component_order = NA_integer_,
                               interventions = character(0),
                               ph_effect_rows = NULL)
-  for (iid in runnable_ints) {
-    nm <- unique(map_sel[intervention_id == iid, chrv(intervention_name)])[1]
-    scen[[iid]] <- list(scenario_id = iid, scenario_label = nm,
-                        family = "public_health",
-                        intervention_ids = iid, interventions = "ph_wb",
+
+  # (2) one standalone scenario per runnable intervention (uses standalone_scenario_id).
+  SH_ind <- unique(SH[, .(intervention_id, standalone_scenario_id, scenario_role,
+                          parent_scenario_id, component_order)])
+  for (i in seq_len(nrow(SH_ind))) {
+    iid <- SH_ind$intervention_id[i]
+    if (!(iid %in% runnable_ints)) next
+    sid  <- if (nzchar(SH_ind$standalone_scenario_id[i])) SH_ind$standalone_scenario_id[i] else iid
+    role <- SH_ind$scenario_role[i]
+    ppid <- if (identical(role, "child")) SH_ind$parent_scenario_id[i] else NA_character_
+    scen[[sid]] <- list(scenario_id = sid, scenario_label = int_label(iid),
+                        family = "public_health", scenario_level = "standalone",
+                        scenario_role = role,
+                        parent_package_id = ppid,
+                        parent_package_name = if (is.na(ppid)) NA_character_ else pkg_label(ppid),
+                        intervention_id = iid, intervention_ids = iid,
+                        component_order = SH_ind$component_order[i],
+                        interventions = "ph_wb",
                         ph_effect_rows = to_engine(valid_links[intervention_id == iid]))
   }
+
+  # (3) one JOINT scenario per parent package: all runnable children applied
+  # together in a single model run (never sum standalone child outcomes).
+  for (pid in package_ids) {
+    kids <- intersect(children_of(pid), runnable_ints)
+    if (!length(kids)) next
+    scen[[pid]] <- list(scenario_id = pid, scenario_label = pkg_label(pid),
+                        family = "public_health", scenario_level = "package",
+                        scenario_role = "package",
+                        parent_package_id = pid, parent_package_name = pkg_label(pid),
+                        intervention_id = NA_character_, intervention_ids = kids,
+                        component_order = NA_integer_,
+                        interventions = "ph_wb",
+                        ph_effect_rows = to_engine(valid_links[intervention_id %in% kids]))
+  }
+
+  # (4) combined all-public-health scenario (>= 2 runnable interventions).
   if (length(runnable_ints) >= 2L)
     scen[["all_public_health"]] <- list(scenario_id = "all_public_health",
                         scenario_label = "All selected public-health interventions (combined)",
-                        family = "public_health",
-                        intervention_ids = runnable_ints,
+                        family = "public_health", scenario_level = "combined",
+                        scenario_role = "combined",
+                        parent_package_id = NA_character_, parent_package_name = NA_character_,
+                        intervention_id = NA_character_, intervention_ids = runnable_ints,
+                        component_order = NA_integer_,
                         interventions = "ph_wb",
                         ph_effect_rows = to_engine(valid_links))
+
+  ## -- Acceptance-criteria checks (structural; add issues only on failure) -----
+  n_exec <- uniqueN(map_sel$intervention_id)
+  if (n_exec != 12L)
+    add_issue("ph_contract", "interventions", "count",
+              sprintf("%d executable interventions (expected 12)", n_exec), "REVIEW")
+  n_keys <- uniqueN(map_sel$intervention_cause_key)
+  if (n_keys != 48L)
+    add_issue("ph_contract", "intervention_cause_key", "count",
+              sprintf("%d unique link keys (expected 48)", n_keys), "REVIEW")
+  for (iid in runnable_ints) {
+    if (nrow(E[intervention_id == iid]) != 1L)
+      add_issue("ph_contract", iid, "exposure", "not exactly one exposure row", "FAIL")
+    if (!nrow(valid_links[intervention_id == iid]))
+      add_issue("ph_contract", iid, "effect", "no valid effect rows", "FAIL")
+    if (!nrow(Cbase[intervention_id == iid & cost_ready == TRUE]))
+      add_issue("ph_contract", iid, "cost_join", "no ready child-specific cost row", "REVIEW")
+  }
+
+  ## -- Processed hierarchy + scenario catalogue (exported for Models 06/09) ----
+  hierarchy_dt <- copy(SH)
+  hierarchy_dt[, is_runnable := intervention_id %in% runnable_ints]
+  hierarchy_dt[, is_parent_package := intervention_id %in% package_ids]
+  scenario_catalogue <- rbindlist(lapply(scen, function(s) data.table(
+    scenario_id = s$scenario_id, scenario_label = s$scenario_label, family = s$family,
+    scenario_level = s$scenario_level, scenario_role = s$scenario_role,
+    parent_package_id = s$parent_package_id, parent_package_name = s$parent_package_name,
+    intervention_ids = paste(s$intervention_ids, collapse = "; "),
+    n_interventions = length(s$intervention_ids),
+    component_order = s$component_order)), fill = TRUE)
 
   ## -- Assemble public_health_inputs (consumed by Model 09) -------------------
   public_health_inputs <- list(
@@ -2301,6 +2591,11 @@ if (!exists("public_health_inputs_file"))
     effect_rows_engine = to_engine(valid_links),
     exposure       = E,
     policy_levers  = lev,
+    policy_levers_processed = Lv,
+    scenario_hierarchy = SH,
+    hierarchy      = hierarchy_dt,
+    scenario_catalogue = scenario_catalogue,
+    package_ids    = package_ids,
     effect_parameters = eff,
     risk_response  = rr,
     model_input_view = miv,
@@ -2309,6 +2604,7 @@ if (!exists("public_health_inputs_file"))
     qa_workbook    = rd_opt("QA_Checks"),
     costs          = Cbase,
     cost_all       = C,
+    cost_reference = cost_reference,
     validation     = issues,
     cause_translation = data.table(cause_id = names(cause_id2code),
                                    cause_code = unname(cause_id2code)),
@@ -2328,7 +2624,12 @@ if (!exists("public_health_inputs_file"))
       source_cost_price_year = source_cost_price_year,
       currency               = getA("currency", "USD"),
       scale_up_shape         = scale_up_shape,
-      economic_perspective   = getA("economic_perspective", "health_system")))
+      economic_perspective   = getA("economic_perspective", "health_system"),
+      tfa_effect_method      = tfa_effect_method,
+      tfa_optional_ihd_paf   = tfa_paf_optional,
+      regulatory_none_score    = reg_none_score,
+      regulatory_partial_score = reg_partial_score,
+      regulatory_full_score    = reg_full_score))
 
   ## -- Report ------------------------------------------------------------------
   n_fail <- sum(issues$severity == "FAIL")
@@ -2339,6 +2640,10 @@ if (!exists("public_health_inputs_file"))
               nrow(map_sel), nrow(valid_links), nrow(L[valid == FALSE])))
   cat(sprintf("Runnable interventions (%d): %s\n",
               length(runnable_ints), paste(runnable_ints, collapse = ", ")))
+  cat(sprintf("TFA effect method: %s\n", tfa_effect_method))
+  for (pid in package_ids)
+    cat(sprintf("Package %s -> children: %s\n", pid,
+                paste(intersect(children_of(pid), runnable_ints), collapse = ", ")))
   if (length(blocked_ints))
     cat(sprintf("BLOCKED interventions (%d): %s\n",
                 length(blocked_ints), paste(blocked_ints, collapse = ", ")))

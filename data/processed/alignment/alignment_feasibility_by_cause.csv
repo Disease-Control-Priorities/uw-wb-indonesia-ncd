@@ -1,0 +1,11 @@
+cause,sex,n_cells,ir_infeasible_frac,cf_infeasible_frac,cause_short
+Hypertensive heart disease,Female,2592,0,0,hhd
+Hypertensive heart disease,Male,2592,0,0,hhd
+Intracerebral hemorrhage,Female,2592,0.103009259259259,0.0621141975308642,hstroke
+Intracerebral hemorrhage,Male,2592,0.0999228395061728,0.18287037037037,hstroke
+Ischemic heart disease,Female,2592,0,0,ihd
+Ischemic heart disease,Male,2592,0,0,ihd
+Ischemic stroke,Female,2592,0.168595679012346,0,istroke
+Ischemic stroke,Male,2592,0.189429012345679,0,istroke
+Rheumatic heart disease,Female,2592,0.573688271604938,0,rhd
+Rheumatic heart disease,Male,2592,0.580632716049383,0,rhd
