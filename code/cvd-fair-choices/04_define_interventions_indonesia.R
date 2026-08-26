@@ -1549,6 +1549,35 @@ if (!exists("strict_model_input_validation"))
 if (!exists("baseline_scenario_id"))
   baseline_scenario_id <- "baseline"
 
+# ---------------------------------------------------------------------------
+# Binding intervention-inclusion contract (single source of truth).
+#
+# `Intervention_Cause_Map$include_flag` is the authoritative, row-level
+# decision on whether a link enters the analysis. This helper normalizes and
+# VALIDATES the column for BOTH the clinical and public-health catalogues so
+# the rule is enforced identically everywhere:
+#   * accept only unambiguous 0 / 1 (numeric, integer, or safely coercible
+#     text such as "0"/"1"); anything else -- blank, NA, "TRUE", "yes", 2,
+#     0.5 -- is a hard error, never silently treated as included;
+#   * return an integer 0/1 vector the callers filter with `== 1L`.
+# No execution switch may override a value produced here: inclusion is decided
+# by the workbook alone. To (de)activate a link, edit its workbook include_flag.
+# ---------------------------------------------------------------------------
+.normalize_include_flag <- function(x, context = "Intervention_Cause_Map") {
+  raw <- trimws(as.character(x))
+  num <- suppressWarnings(as.numeric(raw))
+  bad <- is.na(num) | !(num %in% c(0, 1))
+  if (any(bad)) {
+    idx  <- which(bad)
+    shown <- ifelse(is.na(raw[idx]) | !nzchar(raw[idx]), "<blank>", raw[idx])
+    stop(sprintf(
+      "%s: include_flag must be exactly 0 or 1 for every row; found %d invalid value(s) at row(s) %s (value(s): %s). Blank/NA/other values are not permitted -- set the flag explicitly.",
+      context, length(idx), paste(utils::head(idx, 25L), collapse = ", "),
+      paste(utils::head(shown, 25L), collapse = ", ")), call. = FALSE)
+  }
+  as.integer(round(num))
+}
+
 .build_fair_catalogue <- function(inputs_path,
                                   cause_map,
                                   strict      = FALSE,
@@ -1614,7 +1643,9 @@ if (!exists("baseline_scenario_id"))
   cov <- rd("Coverage")
   cst <- rd("Cost_Components")
 
-  map[, include_flag := as.integer(numv(include_flag))]
+  # Binding inclusion contract: validate 0/1 then keep only include_flag == 1.
+  map[, include_flag := .normalize_include_flag(
+        include_flag, sprintf("Intervention_Cause_Map (%s)", basename(inputs_path)))]
   map_sel <- map[include_flag == 1L]
 
   # Duplicate / missing intervention_cause_key (selected links) ----------------
@@ -1939,11 +1970,7 @@ if (!exists("public_health_inputs_file")) {
                                            # workbook Jha age-sex-duration scalars; the sensitivity
                                            # option overrides only tobacco timing. Read by name; no
                                            # numeric assumption is set here.
-                                           tobacco_timing_analysis = "base",
-                                           # Include the EXPLORATORY SSB -> T2DM mortality (sick ->
-                                           # dead) link even though its Intervention_Cause_Map
-                                           # include_flag = 0. FALSE (default) keeps it inert.
-                                           ssb_mortality_enabled   = FALSE) {
+                                           tobacco_timing_analysis = "base") {
 
   if (!file.exists(inputs_path))
     stop("Public-health: input workbook not found: ", inputs_path)
@@ -2115,15 +2142,15 @@ if (!exists("public_health_inputs_file")) {
   children_of  <- function(pid) SH[scenario_role == "child" &
                                      parent_scenario_id == pid &
                                      include_in_parent_scenario == 1L, intervention_id]
-  # Hierarchy QA: tobacco has 3 children, salt has 4 (from the workbook, not hard-coded).
-  tob_pkg <- package_ids[grepl("TOBACCO", package_ids)]
-  salt_pkg <- package_ids[grepl("SALT", package_ids)]
-  if (length(tob_pkg) == 1L && length(children_of(tob_pkg)) != 3L)
-    add_issue("ph_hierarchy", tob_pkg, "children",
-              sprintf("tobacco package has %d children (expected 3)", length(children_of(tob_pkg))), "FAIL")
-  if (length(salt_pkg) == 1L && length(children_of(salt_pkg)) != 4L)
-    add_issue("ph_hierarchy", salt_pkg, "children",
-              sprintf("salt package has %d children (expected 4)", length(children_of(salt_pkg))), "FAIL")
+  # Hierarchy QA (data-driven): a parent package must own at least one child in
+  # the workbook hierarchy. The number of children is whatever the workbook
+  # declares -- not a fixed count -- and the RUNNABLE children (hierarchy
+  # children intersected with include_flag == 1) are computed later at scenario
+  # assembly, where a package with no runnable child is simply omitted.
+  for (pid in package_ids)
+    if (!length(children_of(pid)))
+      add_issue("ph_hierarchy", pid, "children",
+                "parent package has no children in Scenario_Hierarchy", "FAIL")
   child_ids_all <- unique(SH[scenario_role == "child", intervention_id])
   for (cid in child_ids_all)
     if (!nzchar(unique(SH[intervention_id == cid, parent_scenario_id])[1]))
@@ -2213,15 +2240,12 @@ if (!exists("public_health_inputs_file")) {
     add_issue("ph_lever", bad_reg$intervention_id[i], "regulatory_level",
               "regulatory score outside none/partial/full", "FAIL")
 
-  map[, include_flag := as.integer(numv(include_flag))]
-  # Exploratory SSB -> T2DM mortality (sick -> dead) link ships DISABLED
-  # (include_flag = 0). Promote it to selected ONLY when the run explicitly opts
-  # in via run_ssb_diabetes_mortality (Model 00). Nothing else is ever forced on.
-  ssb_mort_key <- "I_PH_SSB_TAX__C_T2DM__SICK_DEAD"
-  if (isTRUE(ssb_mortality_enabled) && ssb_mort_key %in% chrv(map$intervention_cause_key)) {
-    map[chrv(intervention_cause_key) == ssb_mort_key, include_flag := 1L]
-    cat(sprintf("Public-health: exploratory SSB->T2DM mortality link ENABLED (%s).\n", ssb_mort_key))
-  }
+  # Binding inclusion contract: validate 0/1 then keep only include_flag == 1.
+  # No execution switch may override the workbook. Any link that ships with
+  # include_flag = 0 (e.g. the exploratory SSB -> T2DM sick -> dead mortality
+  # link) stays excluded; to enable such a link, set its workbook flag to 1.
+  map[, include_flag := .normalize_include_flag(
+        include_flag, sprintf("Intervention_Cause_Map (%s)", basename(inputs_path)))]
   map_sel <- map[include_flag == 1L]
   # Label the mapped transition on the selected rows so the structural
   # acceptance counts below can be split by incidence vs sick->dead.
@@ -2623,28 +2647,27 @@ if (!exists("public_health_inputs_file")) {
                         interventions = "ph_wb",
                         ph_effect_rows = to_engine(valid_links))
 
-  ## -- Acceptance-criteria checks (structural; add issues only on failure) -----
-  # Counts are split by transition so the sick -> dead additions are audited
-  # against the workbook QA sheet: 48 well->sick incidence links + 12 tobacco-CVD
-  # sick->dead links (+ 1 SSB sick->dead when explicitly enabled).
-  n_exec <- uniqueN(map_sel$intervention_id)
-  if (n_exec != 12L)
-    add_issue("ph_contract", "interventions", "count",
-              sprintf("%d executable interventions (expected 12)", n_exec), "REVIEW")
-  n_inc  <- map_sel[model_transition == "incidence",     uniqueN(intervention_cause_key)]
-  n_cf   <- map_sel[model_transition == "case_fatality", uniqueN(intervention_cause_key)]
+  ## -- Acceptance-criteria checks (data-driven; add issues only on failure) ----
+  # Inclusion is decided by the workbook include_flag, so the number of runnable
+  # interventions and selected links is whatever the flags leave -- NOT a fixed
+  # historical count. A valid exclusion (all links flagged 0) must never trip a
+  # warning. We therefore assert only structural invariants that must hold for
+  # every runnable intervention, and log the resulting counts for the audit
+  # trail without comparing them to a hard-coded expectation.
+  n_exec   <- uniqueN(map_sel$intervention_id)
+  n_inc    <- map_sel[model_transition == "incidence",     uniqueN(intervention_cause_key)]
+  n_cf     <- map_sel[model_transition == "case_fatality", uniqueN(intervention_cause_key)]
   n_cf_tob <- map_sel[model_transition == "case_fatality" & grepl("^I_PH_TOB", intervention_id),
                       uniqueN(intervention_cause_key)]
-  exp_cf <- if (isTRUE(ssb_mortality_enabled)) 13L else 12L
-  if (n_inc != 48L)
-    add_issue("ph_contract", "incidence_links", "count",
-              sprintf("%d well->sick incidence links (expected 48)", n_inc), "REVIEW")
-  if (n_cf != exp_cf)
-    add_issue("ph_contract", "sick_dead_links", "count",
-              sprintf("%d sick->dead links selected (expected %d)", n_cf, exp_cf), "REVIEW")
-  if (n_cf_tob != 12L)
-    add_issue("ph_contract", "tobacco_sick_dead_links", "count",
-              sprintf("%d tobacco-CVD sick->dead links (expected 12)", n_cf_tob), "REVIEW")
+  cat(sprintf(paste0("Public-health inclusion contract (from workbook include_flag): ",
+                     "%d runnable intervention(s), %d incidence link(s), %d sick->dead link(s) ",
+                     "(%d tobacco-CVD).\n"),
+              n_exec, n_inc, n_cf, n_cf_tob))
+  # A family must have at least one runnable intervention to be analyzable.
+  if (n_exec < 1L)
+    add_issue("ph_contract", "interventions", "count",
+              "no runnable public-health interventions after applying include_flag", "FAIL")
+  # Per-runnable-intervention structural invariants (these are the binding ones).
   for (iid in runnable_ints) {
     if (nrow(E[intervention_id == iid]) != 1L)
       add_issue("ph_contract", iid, "exposure", "not exactly one exposure row", "FAIL")
@@ -2805,15 +2828,15 @@ if (!exists("public_health_inputs_file")) {
 }
 
 if (isTRUE(run_public_health_interventions)) {
-  # Timing model + exploratory-SSB switch come from Model 00 (execution-level);
-  # default to the reproducible base case if Model 00 did not declare them.
+  # Timing model is an execution-level analytic choice from Model 00; default to
+  # the reproducible base case if Model 00 did not declare it. Row-level
+  # inclusion is decided solely by the workbook include_flag (see
+  # .normalize_include_flag); no execution switch can force an excluded link on.
   .tob_timing <- if (exists("tobacco_timing_analysis")) tobacco_timing_analysis else "base"
-  .ssb_mort   <- if (exists("run_ssb_diabetes_mortality")) isTRUE(run_ssb_diabetes_mortality) else FALSE
   .ph_built <- .build_public_health_catalogue(public_health_inputs_file, cause_map,
                                               strict      = strict_model_input_validation,
                                               baseline_id = baseline_scenario_id,
-                                              tobacco_timing_analysis = .tob_timing,
-                                              ssb_mortality_enabled   = .ssb_mort)
+                                              tobacco_timing_analysis = .tob_timing)
   public_health_scenarios <- .ph_built$scenarios
   public_health_inputs    <- .ph_built$inputs
   rm(.ph_built)

@@ -592,6 +592,52 @@ if (length(.miss40))
 BCAP <- setNames(as.character(bca_params$value), bca_params$parameter_id)
 
 # ==========================================================================
+# Active-scenario contract helpers (shared across all three workbooks).
+#
+# `Scenario_Catalog` describes exactly the current run's scenarios and is the
+# single authoritative row/label/order source for downstream consumers (e.g.
+# the executive deck). It is derived from the Model 04 catalogues intersected
+# with what Model 06 actually produced, so it inherits the binding include_flag
+# contract -- excluded interventions never appear.
+# ==========================================================================
+.coalesce_scalar <- function(x, default) if (is.null(x) || length(x) == 0L || is.na(x[1])) default else x[1]
+
+# Build the Scenario_Catalog data.table for ONE family's scenario list.
+# Columns match the combined workbook's existing Scenario_Catalog contract.
+.scenario_catalog_dt <- function(scn_list, family_label, base_id, produced_ids = NULL) {
+  if (is.null(scn_list) || !length(scn_list)) return(data.table())
+  ids <- names(scn_list)
+  if (!is.null(produced_ids)) ids <- intersect(ids, produced_ids)
+  # Baseline first, then the remaining scenarios in catalogue order.
+  ids <- c(intersect(base_id, ids), setdiff(ids, base_id))
+  rbindlist(lapply(ids, function(scn) {
+    e  <- scn_list[[scn]]
+    iv <- e$intervention_ids
+    if (is.null(iv)) iv <- character(0)
+    lvl <- .coalesce_scalar(e$scenario_level,
+             if (identical(scn, base_id)) "baseline"
+             else if (scn %in% c("all", "all_public_health", "all_clinical_public_health")) "combined"
+             else "standalone")
+    data.table(
+      scenario            = scn,
+      scenario_label      = as.character(.coalesce_scalar(e$scenario_label, scn)),
+      intervention_family = as.character(.coalesce_scalar(e$family, family_label)),
+      scenario_level      = as.character(lvl),
+      scenario_role       = as.character(.coalesce_scalar(e$scenario_role, NA_character_)),
+      parent_package_id   = as.character(.coalesce_scalar(e$parent_package_id, NA_character_)),
+      intervention_ids    = paste(iv, collapse = "; "),
+      n_interventions     = length(iv))
+  }), fill = TRUE)
+}
+
+# Accumulator: each workbook writer stashes its R-value cost-effectiveness table
+# here so a single BCA-FREE, current-run results contract can be written for the
+# executive deck (no Excel recalculation required). BCA/Model 08 outputs are
+# untouched; this is an additional, non-BCA contract.
+deck_cea_list     <- list()
+deck_catalog_list <- list()
+
+# ==========================================================================
 # CLINICAL (FAIR Choices) cost/value workbooks -- written only when clinical
 # interventions are enabled. All existing behaviour and both existing output
 # files are preserved unchanged inside this block. (Braces do not create a new
@@ -778,6 +824,11 @@ setcolorder(cea, c("scenario", "scenario_label", "deaths_averted", "cases_averte
                    "incremental_cost", "disc_incremental_cost",
                    "cost_per_death_averted", "dominance"))
 setorder(cea, -deaths_averted)
+
+# Capture the clinical R-value CE table for the deck results contract.
+deck_cea_list[["clinical"]]     <- copy(cea)
+deck_catalog_list[["clinical"]] <- .scenario_catalog_dt(fair_scenarios, "clinical",
+                                                        base_id, produced)
 
 ## --- 7. Economic value (reuse Model 08 VSL/VSLY when reconcilable) ----------
 # We sum ONLY aggregate monetary-value columns (economic_value_* = VSL-based,
@@ -1903,9 +1954,21 @@ style_sheet("Calculation_Map", names(cmap), nrow(cmap), wrap_cols = c(3, 4), fil
 setColWidths(wb, "Calculation_Map", cols = 1:5, widths = c(22, 18, 34, 52, 26))
 
 # =========================================================================
+# 11.x Scenario_Catalog  (authoritative current-run scenario contract)
+# Describes exactly the scenarios in THIS clinical run (baseline + each active
+# intervention + the combined 'all'), derived from the Model 04 catalogue under
+# the binding include_flag rule. Literal R-source values (no formulas).
+# =========================================================================
+scat_clin <- as.data.frame(deck_catalog_list[["clinical"]])
+addWorksheet(wb, "Scenario_Catalog")
+writeData(wb, "Scenario_Catalog", scat_clin, headerStyle = st_hdr)
+style_sheet("Scenario_Catalog", names(scat_clin), nrow(scat_clin),
+            rsource_cols = seq_along(scat_clin), wrap_cols = c(2, 7))
+
+# =========================================================================
 # 11.17 worksheet order, recalc-on-open, save
 # =========================================================================
-desired_order <- c("README","Run_Metadata","Selected_Interventions","Blocked_Links",
+desired_order <- c("README","Run_Metadata","Scenario_Catalog","Selected_Interventions","Blocked_Links",
                    "Cost_Components","Annual_Mortality","Health_Outcomes",
                    "CVD_40q30","CVD_40q30_Age","Annual_Cost","Budget_Impact",
                    "Cost_Effectiveness","Economic_Value","Benefit_Cost","QA_Checks","Input_Diagnostic",
@@ -2056,6 +2119,11 @@ source_public_health_cost_value <- function() {
   setcolorder(cea, c("scenario", "scenario_label", "deaths_averted", "cases_averted",
                      "incremental_cost", "disc_incremental_cost", "cost_per_death_averted", "dominance"))
   setorder(cea, -deaths_averted)
+
+  # Capture the public-health R-value CE table for the deck results contract.
+  deck_cea_list[["public_health"]]     <<- copy(cea)
+  deck_catalog_list[["public_health"]] <<- .scenario_catalog_dt(phs, "public_health",
+                                                                base_id, produced)
 
   ## ---- R QA anchors -------------------------------------------------------
   tol <- 1e-6
@@ -2675,8 +2743,9 @@ source_public_health_cost_value <- function() {
                "Deaths averted = baseline - scenario at matched year/cause",
                sprintf(paste0("PH effects map to well->sick incidence OR sick->dead case fatality; ",
                               "%d case-fatality link(s) in this run; 0 outside the allowed set / no ",
-                              "cross-pathway application. Exploratory SSB->T2DM mortality stays disabled ",
-                              "unless run_ssb_diabetes_mortality=TRUE."), n_cf_links),
+                              "cross-pathway application. Inclusion is set by the workbook ",
+                              "include_flag; links flagged 0 (e.g. the exploratory SSB->T2DM ",
+                              "mortality link) stay excluded."), n_cf_links),
                "well/sick/new_cases/deaths/population >= 0",
                "Per cause row; small residual from 95+ pooling / rounding",
                "all.mx taken once per stratum (population not duplicated across causes)",
@@ -2983,8 +3052,18 @@ source_public_health_cost_value <- function() {
   write_summary("Child_Intervention_Summary", sc[scenario_level == "standalone"])
   write_summary("Parent_Package_Summary",     sc[scenario_level %in% c("package", "combined")])
 
+  ## ===== Scenario_Catalog (authoritative current-run scenario contract) ===
+  # Baseline + each active standalone intervention + parent packages + the
+  # combined all-public-health scenario, derived from the Model 04 catalogue
+  # under the binding include_flag rule. Literal R-source values (no formulas).
+  scat_ph <- as.data.frame(deck_catalog_list[["public_health"]])
+  addWorksheet(wb, "Scenario_Catalog")
+  writeData(wb, "Scenario_Catalog", scat_ph, headerStyle = st_hdr)
+  style_sheet("Scenario_Catalog", names(scat_ph), nrow(scat_ph),
+              rsource_cols = seq_along(scat_ph), wrap_cols = c(2, 7))
+
   ## ===== order, recalc, strip, save ======================================
-  desired_order <- c("README","Run_Metadata","Scenario_Hierarchy","Selected_Interventions","Blocked_Links",
+  desired_order <- c("README","Run_Metadata","Scenario_Catalog","Scenario_Hierarchy","Selected_Interventions","Blocked_Links",
                      "Policy_Levers","Exposure_Targets","Effect_Parameters","Risk_Response","Cost_Components",
                      "Annual_Mortality","Health_Outcomes","CVD_40q30","CVD_40q30_Age","Annual_Cost","Budget_Impact","Cost_Effectiveness",
                      "Child_Intervention_Summary","Parent_Package_Summary","Economic_Value","Benefit_Cost","QA_Checks",
@@ -3192,6 +3271,9 @@ source_combined_cost_value <- function() {
                      "incremental_cost", "disc_incremental_cost", "cost_per_death_averted"))
   setorder(cea, -deaths_averted)
 
+  # Capture the combined (joint) R-value CE table for the deck results contract.
+  deck_cea_list[["combined"]] <<- copy(cea)
+
   # anchor scenario for Excel-vs-R reconciliation
   anchor_scn <- joint_id
   ar <- cea[scenario == anchor_scn]
@@ -3227,7 +3309,15 @@ source_combined_cost_value <- function() {
       intervention_ids = paste(e$intervention_ids, collapse = "; "),
       n_interventions = length(e$intervention_ids))
   }
-  scat <- rbindlist(lapply(comparators, catrow), fill = TRUE)
+  # Include a baseline row so the Scenario_Catalog lists EVERY scenario in the
+  # run (baseline + comparators), matching the clinical / public-health catalogs
+  # and the deck results contract. Baseline carries no interventions.
+  .base_row <- data.table(
+    scenario = base_id, scenario_label = "Baseline (no new intervention)",
+    intervention_family = "baseline", scenario_level = "baseline",
+    scenario_role = NA_character_, parent_package_id = NA_character_,
+    intervention_ids = "", n_interventions = 0L)
+  scat <- rbindlist(c(list(.base_row), lapply(comparators, catrow)), fill = TRUE)
 
   ## ---- BCA sources (Model 07 health, Model 08 value) ----------------------
   ho_src_comb <- dt_h07[scenario %in% comparators, .(
@@ -3763,6 +3853,113 @@ if (isTRUE(run_clinical_interventions) && isTRUE(run_public_health_interventions
   combined_ok <- tryCatch({ source_combined_cost_value(); TRUE },
                           error = function(e) { message("  Combined workbook FAILED: ",
                                                         conditionMessage(e)); FALSE })
+}
+
+#===========================================================================
+# 14. Deck results contract (BCA-FREE, current-run) ----
+#---------------------------------------------------------------------------
+# A compact, R-side results contract for the executive slide deck so it can
+# compile WITHOUT Excel recalculation and WITHOUT any BCA/VSL/VSLY input.
+# Every number here is the SAME R-engine value the workbooks store (as formulas):
+#   * deaths averted + incremental cost + cost per death averted: from each
+#     workbook's own R-value cost-effectiveness table (deck_cea_list);
+#   * 2050 death levels (for % reduction): from Model 07 health output;
+#   * CVD 40q30 (level + baseline + % reduction in 2050): from Model 07 40q30.
+# Scenario identity/labels/order use the same Scenario_Catalog contract written
+# into the workbooks. This is ADDITIONAL to (never a replacement for) the BCA /
+# Model 08 artifacts, which remain untouched.
+#===========================================================================
+if (length(deck_cea_list)) {
+  .assump <- if (exists("fair_inputs") && !is.null(fair_inputs$assumptions))
+      fair_inputs$assumptions
+    else if (exists("public_health_inputs") && !is.null(public_health_inputs$assumptions))
+      public_health_inputs$assumptions
+    else list()
+  .num <- function(v, d = NA_real_) { x <- suppressWarnings(as.numeric(v))
+    if (length(x) && !is.na(x[1])) x[1] else d }
+
+  # Restrict health artifacts to a single HTN-coverage target (current run).
+  .pick_htn <- function(dt) {
+    if (!"htn_target_scenario" %in% names(dt)) return(dt)
+    tg <- unique(dt$htn_target_scenario)
+    if (length(tg) > 1L) tg <- if ("htncov2_aspirational" %in% tg) "htncov2_aspirational" else tg[1]
+    dt[htn_target_scenario %in% tg]
+  }
+  h07 <- .pick_htn(copy(dt_h07))
+  q40 <- .pick_htn(copy(dt_cvd_40q30))
+  if ("cause" %in% names(h07)) h07 <- h07[!(tolower(as.character(cause)) %in% "all")]
+  ymax <- max(analysis_yrs)
+
+  # 2050 modeled + baseline deaths (all modeled causes) per scenario.
+  d2050 <- h07[year == ymax,
+               .(deaths_2050 = sum(deaths, na.rm = TRUE),
+                 baseline_deaths_2050 = sum(base_deaths, na.rm = TRUE)), by = scenario]
+  d2050[, pct_reduction_deaths_2050 := ifelse(baseline_deaths_2050 > 0,
+        100 * (baseline_deaths_2050 - deaths_2050) / baseline_deaths_2050, NA_real_)]
+
+  # CVD 40q30 in 2050 (level, baseline, % reduction) per scenario.
+  q2050 <- q40[year == ymax,
+               .(cvd_40q30_2050 = cvd_40q30[1],
+                 baseline_cvd_40q30_2050 = baseline_cvd_40q30[1],
+                 cvd_40q30_pct_reduction_2050 = percent_reduction[1]), by = scenario]
+
+  build_family <- function(wbkey, meta) {
+    cea <- deck_cea_list[[wbkey]]
+    if (is.null(cea) || !nrow(cea) || is.null(meta) || !nrow(meta)) return(NULL)
+    scn_set <- union(cea$scenario, baseline_scenario_id)
+    meta <- meta[scenario %in% scn_set]
+    keep <- intersect(c("scenario", "deaths_averted", "cases_averted",
+                        "incremental_cost", "disc_incremental_cost",
+                        "cost_per_death_averted"), names(cea))
+    out <- merge(meta, cea[, ..keep], by = "scenario", all.x = TRUE)
+    out <- merge(out, d2050, by = "scenario", all.x = TRUE)
+    out <- merge(out, q2050, by = "scenario", all.x = TRUE)
+    out[, workbook := wbkey]
+    # Uniform cost-effectiveness status / dominance labelling.
+    out[, ce_status := "USD per death averted"]
+    out[!is.na(deaths_averted) & deaths_averted > 0 & !is.na(disc_incremental_cost) &
+          disc_incremental_cost < 0, ce_status := "Dominant (more health, lower cost)"]
+    out[!is.na(deaths_averted) & deaths_averted <= 0 & !is.na(disc_incremental_cost) &
+          disc_incremental_cost > 0, ce_status := "Dominated (less/no health, higher cost)"]
+    out[!is.na(deaths_averted) & deaths_averted <= 0 & !is.na(disc_incremental_cost) &
+          disc_incremental_cost <= 0, ce_status := "No deaths averted; ratio not defined"]
+    out[is.na(deaths_averted) | scenario == baseline_scenario_id,
+        ce_status := "baseline / not applicable"]
+    out[]
+  }
+
+  meta_comb <- unique(rbindlist(list(
+      .scenario_catalog_dt(if (exists("fair_scenarios")) fair_scenarios else NULL,
+                           "clinical", baseline_scenario_id),
+      .scenario_catalog_dt(if (exists("public_health_scenarios")) public_health_scenarios else NULL,
+                           "public_health", baseline_scenario_id),
+      .scenario_catalog_dt(if (exists("combined_scenarios")) combined_scenarios else NULL,
+                           "clinical_public_health", baseline_scenario_id)),
+    fill = TRUE), by = "scenario")
+
+  deck_rows <- rbindlist(list(
+      build_family("clinical",      deck_catalog_list[["clinical"]]),
+      build_family("public_health", deck_catalog_list[["public_health"]]),
+      build_family("combined",      meta_comb)), fill = TRUE)
+
+  deck_meta <- list(
+    horizon_start        = .num(.assump$analysis_start_year, min(analysis_yrs)),
+    horizon_end          = .num(.assump$analysis_end_year,   ymax),
+    cost_discount_rate   = .num(.assump$cost_discount_rate),
+    cost_price_year      = .num(.assump$cost_price_year),
+    currency             = as.character(.coalesce_scalar(.assump$currency, "USD (market)")),
+    economic_perspective = as.character(.coalesce_scalar(.assump$economic_perspective, NA_character_)),
+    cost_effectiveness_unit = "USD per death averted (discounted incremental cost / undiscounted deaths averted)",
+    baseline_scenario    = baseline_scenario_id,
+    generated_scenarios  = sort(unique(deck_rows$scenario)),
+    excluded_note        = "Scenarios reflect the binding Intervention_Cause_Map include_flag; excluded interventions do not appear.")
+  attr(deck_rows, "deck_meta") <- deck_meta
+
+  deck_results_file <- file.path(wd_outp, "09_deck_results.rds")
+  saveRDS(list(results = deck_rows, meta = deck_meta), deck_results_file)
+  message("  Wrote deck results contract: ", deck_results_file,
+          sprintf(" (%d scenario-rows across %d workbook families)",
+                  nrow(deck_rows), uniqueN(deck_rows$workbook)))
 }
 
 message("=== Model 09 complete ===")

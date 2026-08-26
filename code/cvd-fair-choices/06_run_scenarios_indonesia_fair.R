@@ -3334,6 +3334,19 @@ cat("Failed countries:", paste(locs[!successful], collapse = ", "), "\n")
 # Combine all results (if not too large)
 #all_results <- rbindlist(results_list, fill = TRUE)
 
+# # save validation trace
+# dt <- as.data.table(readRDS("C:/Users/wrgar/OneDrive - UW/02Work/WorldBank-Indonesia/uw-wb-indonesia-ncd/output/out_model/model_output_Indonesia_htncov2_aspirational.rds"))
+# 
+# # Baseline population projection
+# dt_pop <- dt[scenario=="baseline" & cause=="ihd", .(population = sum(pop)), by = .(year)]
+# 
+# # dt epi
+# dt_epi <- dt[scenario=="baseline", .(population = sum(pop),dead = sum(dead),sick=sum(sick),newcases=sum(newcases)), by = .(year,cause)]
+# 
+# # fwrite dt_epi
+# fwrite(dt_epi, "C:/Users/wrgar/OneDrive - UW/02Work/WorldBank-Indonesia/uw-wb-indonesia-ncd/output/out_model/dt_epi.csv")
+
+
 #...........................................................
 # Cleaning up the workspace ----
 #...........................................................

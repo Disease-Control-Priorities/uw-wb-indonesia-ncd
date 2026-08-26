@@ -355,34 +355,54 @@ if(run_CF_trend== TRUE){
 }
 
 #...........................................................
-# dm2 baseline sanity guard (public-health diabetes sick -> dead effect) ----
+# Sick -> dead baseline sanity guard (generic, driven by selected links) ----
 #...........................................................
-# The public-health SSB -> T2DM mortality proxy (run_ssb_diabetes_mortality) and
-# the existing tobacco -> T2DM incidence links act on the dm2 cause. Confirm dm2
-# carries a valid baseline sick stock (PREVt0, seeded as sick = Nx*PREVt0 in
-# Model 06) and case fatality (CF) through the SAME pipeline steps as the CVD
-# causes, so the sick -> dead effect has something to act on. dm2 IS included in
-# the secular BG.mx / CF trend joins above via the central `cause_lookup` (its
-# long GBD name maps to "dm2"), so its CF is trended, not silently held flat.
-# Fail loud rather than emit NA/all-zero sick or CF for dm2. Non-analytic guard.
-if ("dm2" %in% b_rates$cause) {
-  .dm2 <- b_rates[cause == "dm2" & year >= 2025]
-  .bad_cf   <- anyNA(.dm2$CF)     || all(.dm2$CF     == 0, na.rm = TRUE)
-  .bad_sick <- anyNA(.dm2$PREVt0) || all(.dm2$PREVt0 == 0, na.rm = TRUE)
-  if (.bad_cf || .bad_sick)
-    stop("Model 05: dm2 has NA/all-zero ", if (.bad_cf) "CF " else "",
-         if (.bad_sick) "PREVt0 " else "",
-         "-- the diabetes sick->dead effect would have nothing to act on. ",
-         "Check the calibration output and the secular-trend cause_lookup join.",
-         call. = FALSE)
-  cat(sprintf(paste0("Model 05: dm2 baseline OK (CF mean %.4g, max %.4g; PREVt0 mean %.4g); ",
-                     "diabetes sick->dead effect has a valid target.\n"),
-              mean(.dm2$CF, na.rm = TRUE), max(.dm2$CF, na.rm = TRUE),
-              mean(.dm2$PREVt0, na.rm = TRUE)))
-  rm(.dm2, .bad_cf, .bad_sick)
-} else {
-  cat("Model 05: dm2 not in cause_map; diabetes sick->dead effect inactive.\n")
+# Any intervention that acts on a sick -> dead (case-fatality) transition needs
+# the target cause to carry a valid baseline sick stock (PREVt0, seeded as
+# sick = Nx*PREVt0 in Model 06) and case fatality (CF), so the effect has
+# something to act on. The set of target causes is derived from the SELECTED,
+# RUNNABLE case-fatality links in the Model 04 catalogues -- i.e. it honours the
+# workbook include_flag. A cause is required here only if a currently active
+# intervention actually targets its sick -> dead transition; an excluded
+# intervention (e.g. an SSB -> diabetes mortality link flagged 0) imposes no
+# requirement. Fail loud rather than emit NA/all-zero sick or CF. Non-analytic.
+.sick_dead_target_codes <- character(0)
+for (.obj in c("public_health_inputs", "fair_inputs")) {
+  if (exists(.obj) && !is.null(get(.obj)) && !is.null(get(.obj)$valid_links)) {
+    .vl <- as.data.table(get(.obj)$valid_links)
+    if (all(c("model_transition", "cause_code") %in% names(.vl)))
+      .sick_dead_target_codes <- c(
+        .sick_dead_target_codes,
+        .vl[model_transition == "case_fatality", unique(as.character(cause_code))])
+  }
 }
+.sick_dead_target_codes <- unique(.sick_dead_target_codes[
+  !is.na(.sick_dead_target_codes) & nzchar(.sick_dead_target_codes)])
+# Restrict to causes that are actually modeled in the baseline.
+.sick_dead_target_codes <- intersect(.sick_dead_target_codes, unique(b_rates$cause))
+if (length(.sick_dead_target_codes)) {
+  for (.cc in .sick_dead_target_codes) {
+    .sub <- b_rates[cause == .cc & year >= 2025]
+    .bad_cf   <- anyNA(.sub$CF)     || all(.sub$CF     == 0, na.rm = TRUE)
+    .bad_sick <- anyNA(.sub$PREVt0) || all(.sub$PREVt0 == 0, na.rm = TRUE)
+    if (.bad_cf || .bad_sick)
+      stop("Model 05: cause '", .cc, "' has NA/all-zero ",
+           if (.bad_cf) "CF " else "", if (.bad_sick) "PREVt0 " else "",
+           "-- a selected sick->dead intervention effect would have nothing to ",
+           "act on. Check the calibration output and the secular-trend join.",
+           call. = FALSE)
+    cat(sprintf(paste0("Model 05: sick->dead target '%s' baseline OK ",
+                       "(CF mean %.4g, max %.4g; PREVt0 mean %.4g).\n"),
+                .cc, mean(.sub$CF, na.rm = TRUE), max(.sub$CF, na.rm = TRUE),
+                mean(.sub$PREVt0, na.rm = TRUE)))
+  }
+  rm(.sub, .bad_cf, .bad_sick, .cc)
+} else {
+  cat("Model 05: no selected sick->dead intervention links; ",
+      "no case-fatality-target baseline guard required.\n", sep = "")
+}
+rm(.sick_dead_target_codes)
+suppressWarnings(rm(.obj, .vl))
 
 # Clean up environment
 rm("adjustments","bgmx_fcst","dt_pop_unwpp","wpp.adj","rep","pop20")
@@ -390,3 +410,172 @@ rm("adjustments","bgmx_fcst","dt_pop_unwpp","wpp.adj","rep","pop20")
 
 ## HERE I Include a patch to align to an aggregate projection for alignment with the UNWPP 2024 population projections. 
 # This is a temporary fix to ensure that the model's population projections are consistent with the official UNWPP data.
+
+# Upload the handoff file with probablities 2025-2050 to replace the model's projections for Indonesia. 
+# This file should contain the necessary adjustments to align the model's outputs with the UNWPP 2024 projections
+
+dt_calibrated <- as.data.table(readRDS(paste0(wd_data,"transition_probabilities_indonesia_handoff.rds")))
+
+# # write 2% sample csv files b_rated and dt_calibrated
+# sample_b_rates <- b_rates[sample(.N, .N * 0.02)]
+# sample_dt_calibrated <- dt_calibrated[sample(.N, .N * 0.02)]
+# fwrite(sample_b_rates, paste0(wd_data,"sample_b_rates.csv"), row.names = FALSE)
+# fwrite(sample_dt_calibrated, paste0(wd_data,"sample_dt_calibrated.csv"), row.names = FALSE)
+
+#replacing model parametesr in b_rates with the calibrated values from dt_calibrated for Indonesia from2025-2050
+
+#..............................................................................
+# Replace Indonesia baseline parameters with calibrated values, 2025–2050 ----
+#..............................................................................
+
+setDT(b_rates)
+setDT(dt_calibrated)
+
+# Translate calibration cause IDs to the model's internal cause codes.
+calibration_cause_map <- c(
+  C_IHD = "ihd",
+  C_IS  = "istroke",
+  C_ICH = "hstroke",
+  C_HHD = "hhd",
+  C_RHD = "rhd",
+  C_CMD = "cmd",
+  C_DM  = "dm2"
+)
+
+dt_calibrated[, cause := unname(calibration_cause_map[cause_id])]
+
+# Fail if the handoff contains an unrecognized cause.
+unmapped_causes <- unique(
+  dt_calibrated[
+    location_name == "Indonesia" &
+      between(year, 2025L, 2050L) &
+      is.na(cause),
+    cause_id
+  ]
+)
+
+if (length(unmapped_causes) > 0L) {
+  stop(
+    "Model 05: unmapped cause_id values in the calibration handoff: ",
+    paste(unmapped_causes, collapse = ", "),
+    call. = FALSE
+  )
+}
+
+# Prepare one calibrated row per model key.
+calibrated_update <- dt_calibrated[
+  location_name == "Indonesia" &
+    between(year, 2025L, 2050L),
+  .(
+    location  = location_name,
+    year      = as.integer(year),
+    age       = as.integer(age),
+    sex       = as.character(sex),
+    cause,
+    BG.mx.all = background_mx_all_modelled_causes,
+    ALL.mx    = all_cause_mx,
+    BG.mx     = background_mx_for_cause,
+    IR,
+    CF,
+    Nx        = population,
+    pop       = population
+  )
+]
+
+calibration_keys <- c("location", "year", "age", "sex", "cause")
+
+# Each calibrated parameter set must be unique.
+duplicate_calibration_rows <- calibrated_update[
+  duplicated(calibrated_update, by = calibration_keys) |
+    duplicated(calibrated_update, by = calibration_keys, fromLast = TRUE)
+]
+
+if (nrow(duplicate_calibration_rows) > 0L) {
+  stop(
+    "Model 05: the calibration handoff contains duplicate rows for ",
+    "location-year-age-sex-cause.",
+    call. = FALSE
+  )
+}
+
+# Ensure every calibration row has a corresponding row in b_rates.
+unmatched_calibration_rows <- calibrated_update[
+  !b_rates,
+  on = calibration_keys
+]
+
+if (nrow(unmatched_calibration_rows) > 0L) {
+  stop(
+    "Model 05: ", nrow(unmatched_calibration_rows),
+    " calibrated Indonesia rows could not be matched to b_rates. ",
+    "Check location, year, age, sex, and cause identifiers.",
+    call. = FALSE
+  )
+}
+
+# Update by reference. Because calibrated_update contains only 2025–2050,
+# observations before 2025 cannot be modified.
+b_rates[
+  calibrated_update,
+  on = calibration_keys,
+  `:=`(
+    BG.mx.all = i.BG.mx.all,
+    ALL.mx    = i.ALL.mx,
+    BG.mx     = i.BG.mx,
+    IR        = i.IR,
+    CF        = i.CF,
+    Nx        = i.Nx,
+    pop       = i.pop
+  )
+]
+
+# Refresh diagnostic transition sums after replacing the parameters.
+b_rates[
+  location == "Indonesia" & between(year, 2025L, 2050L),
+  `:=`(
+    check_well = BG.mx + covid.mx + IR,
+    check_sick = BG.mx + covid.mx + CF
+  )
+]
+
+# Validate the updated transition probabilities.
+invalid_calibrated_rows <- b_rates[
+  location == "Indonesia" &
+    between(year, 2025L, 2050L) &
+    (
+      is.na(BG.mx) | is.na(BG.mx.all) | is.na(IR) | is.na(CF) |
+        IR < 0 | IR >= 1 |
+        CF < 0 | CF >= 1 |
+        check_well > 1 |
+        check_sick > 1
+    )
+]
+
+# if (nrow(invalid_calibrated_rows) > 0L) {
+#   stop(
+#     "Model 05: ", nrow(invalid_calibrated_rows),
+#     " Indonesia rows have invalid calibrated transition probabilities.",
+#     call. = FALSE
+#   )
+# }
+# 
+# cat(
+#   sprintf(
+#     paste0(
+#       "Model 05: updated %,d Indonesia age-sex-cause-year rows ",
+#       "with calibrated parameters for 2025–2050; pre-2025 data preserved.\n"
+#     ),
+#     nrow(calibrated_update)
+#   )
+# )
+
+rm(
+  calibration_cause_map,
+  calibration_keys,
+  calibrated_update,
+  duplicate_calibration_rows,
+  invalid_calibrated_rows,
+  unmatched_calibration_rows,
+  unmapped_causes
+)
+

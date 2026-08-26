@@ -149,13 +149,14 @@ if (!tobacco_timing_analysis %in% c("base", "normalized_exponential_lag"))
   stop("tobacco_timing_analysis must be 'base' or 'normalized_exponential_lag'.",
        call. = FALSE)
 
-# run_ssb_diabetes_mortality: the workbook carries an EXPLORATORY SSB-tax ->
-# type-2-diabetes all-cause-mortality (sick -> dead) link, disabled by default
-# (Intervention_Cause_Map include_flag = 0). Set TRUE to include it despite that
-# flag; it then acts ONLY on the dm2 sick -> dead transition and is labelled an
-# all-cause-mortality proxy (NOT diabetes-specific mortality). FALSE keeps every
-# result identical to the base case.
-run_ssb_diabetes_mortality <- FALSE
+# Row-level intervention inclusion is decided EXCLUSIVELY by the workbook
+# Intervention_Cause_Map$include_flag (see .normalize_include_flag in Model 04);
+# no Model 00 execution switch may override it. The workbook carries an
+# EXPLORATORY SSB-tax -> type-2-diabetes all-cause-mortality (sick -> dead) link
+# that ships DISABLED (include_flag = 0). To include it, set that link's
+# include_flag to 1 in the public-health workbook -- there is no code switch that
+# can force an excluded link on. (The former run_ssb_diabetes_mortality switch,
+# which promoted the flag from 0 to 1, has been removed for this reason.)
 
 #===========================================================================
 # CENTRAL MODEL CONFIGURATION  (SINGLE SOURCE OF TRUTH) ----
