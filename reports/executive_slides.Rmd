@@ -16,6 +16,10 @@ output:
 classoption: "aspectratio=169"
 bibliography: references.bib
 link-citations: false
+header-includes:
+  - '\definecolor{srcgrey}{HTML}{5B6B7B}'
+  - '\newcommand{\srcmethod}[1]{{\par\vspace{1pt}\scriptsize\itshape\color{srcgrey}#1\par}}'
+  - '\newcommand{\costcaveat}{\textbf{Preliminary costing results:} unit costs, service use, and delivery assumptions require further validation against BPJS and Ministry of Health data before policy use.}'
 ---
 
 ```{r setup, include=FALSE}
@@ -42,6 +46,26 @@ link-citations: false
 ##  displays NO benefit-cost / VSL / VSLY content; the value-for-money metric is
 ##  COST PER DEATH AVERTED (in market US$). The full benefit-cost analysis lives
 ##  in the pipeline workbooks and is intentionally not shown here.
+##
+##  2026 REFRESH (executive/plain-language pass):
+##    * Every content-slide title is a plain-language takeaway; the metric
+##      formerly labelled "40q30" is written as "Probability of death from CVD
+##      before age 70" in ALL rendered text (internal object/sheet/column names
+##      such as CVD_40q30 / cvd_40q30_r are kept in code only).
+##    * Every analytical slide carries a muted italic Source/Method footnote
+##      (\srcmethod macro, defined in header-includes); cost/CE slides also carry
+##      the fixed BPJS/MOH validation caveat (\costcaveat).
+##    * Average annual additional cost per capita (undiscounted & discounted) is
+##      added to the three CE slides: numerator = the contract's cumulative
+##      additional cost (= workbook Budget_Impact); denominator = 25 x the 2026
+##      national population, counted ONCE per location x year x age x sex from the
+##      baseline (current-course) demography in dt_output_dalys.rds (UN WPP 2024).
+##    * A separate 70-30-30 -> 70-70-70 cascade strategy sub-section (4 slides)
+##      reads ONLY the ISOLATED cascade workbook under output/70_30_30_to_70_70_70/
+##      (validated to contain exactly {baseline, S_70_30_30_TO_70_70_70}); it is
+##      NEVER merged into the ordinary results contract.
+##    * A high-level DCP costing-methods slide + an appendix of the adapted
+##      equations cite Watkins et al. (2020).
 ## =====================================================================
 library(here)
 library(data.table)
@@ -89,6 +113,18 @@ fmt_short <- function(x, acc = 0.1) ifelse(is.na(x), "--", label_number(scale_cu
 fmt_pct   <- function(x, d = 1) ifelse(is.na(x), "--", paste0(formatC(x, format = "f", digits = d), "\\%"))
 fmt_usd   <- function(x) ifelse(is.na(x), "--", paste0("US\\$", formatC(round(x), format = "d", big.mark = ",")))
 fmt_usd_short <- function(x) ifelse(is.na(x), "--", paste0("US\\$", fmt_short(x)))
+## Per-capita US$ to 2 decimals (LaTeX-safe: escaped $).
+fmt_usd_pc <- function(x) ifelse(is.na(x), "--", paste0("US\\$", formatC(x, format = "f", digits = 2, big.mark = ",")))
+## Title-safe (plain-text, NO % or $ so it survives pandoc -> \frametitle):
+## express a count in the most readable unit ("3.5 million", "1.13 million").
+fmt_title_num <- function(x, acc = 0.1) {
+  if (is.na(x)) return("--")
+  if (abs(x) >= 1e6) return(paste0(formatC(x / 1e6, format = "f", digits = 1), " million"))
+  if (abs(x) >= 1e3) return(paste0(formatC(round(x / 1e3), format = "d", big.mark = ","), " thousand"))
+  formatC(round(x), format = "d", big.mark = ",")
+}
+## USD in billions/millions as plain words (no $) for prose reconciliation lines.
+fmt_bn <- function(x, d = 2) ifelse(is.na(x), "--", paste0(formatC(x / 1e9, format = "f", digits = d), " billion"))
 ## Two-line table headers (converts embedded "\n" to \makecell line breaks).
 mkhdr <- function(v) kableExtra::linebreak(v, align = "c")
 
@@ -113,9 +149,17 @@ deck_file <- outp("09_deck_results.rds")
 wb_comb   <- outp("indonesia_model_cost_value_clinical_public_health_formulae.xlsx")
 wb_clin   <- outp("indonesia_model_cost_value_formulae.xlsx")
 wb_ph     <- outp("indonesia_cost_value_public_health_formulae.xlsx")
+dalys_file<- outp("dt_output_dalys.rds")   # authoritative model demography (per-capita denominator)
 csv_cmp   <- here("data", "raw", "03_asean_cvd_40q30_comparison.csv")
 
-.req_files <- c(results_contract = deck_file, combined_workbook = wb_comb, comparator = csv_cmp)
+## Isolated 70-30-30 -> 70-70-70 cascade run (its OWN output dir; never merged with the
+## ordinary results contract). Overridable for testing, defaults to the standard path.
+.casc_dir <- Sys.getenv("EXEC_DECK_CASCADE_DIR", unset = "")
+casc_wb <- if (nzchar(.casc_dir)) file.path(.casc_dir, "indonesia_70_30_30_to_70_70_70_cost_value_formulae.xlsx") else
+  here("output", "70_30_30_to_70_70_70", "indonesia_70_30_30_to_70_70_70_cost_value_formulae.xlsx")
+
+.req_files <- c(results_contract = deck_file, combined_workbook = wb_comb,
+                model_demography = dalys_file, comparator = csv_cmp, cascade_workbook = casc_wb)
 .missing <- .req_files[!file.exists(.req_files)]
 if (length(.missing))
   stop("VALIDATION STOP -- required input file(s) not found:\n  ",
@@ -323,9 +367,16 @@ impact_row <- function(tab, sc) data.table(
   q50 = fmt_pct(hv(sc, "cvd_40q30_2050", tab), 1),
   qr  = fmt_pct(hv(sc, "cvd_40q30_pct_reduction_2050", tab), 1),
   dr  = fmt_pct(hv(sc, "pct_reduction_deaths_2050", tab), 1))
+## Average annual additional cost per capita for one scenario (undisc / disc):
+## cumulative additional cost / (25 x 2026 national population). `percap_den` is
+## built in the percapita chunk (evaluated before any table chunk runs).
+pc_undisc <- function(tab, sc) fmt_usd_pc(hv(sc, "incremental_cost", tab)      / percap_den)
+pc_disc   <- function(tab, sc) fmt_usd_pc(hv(sc, "disc_incremental_cost", tab) / percap_den)
 ce_row <- function(tab, sc) cbind(
   impact_row(tab, sc),
-  data.table(cpd = fmt_usd(hv(sc, "cost_per_death_averted", tab))))
+  data.table(cpd = fmt_usd(hv(sc, "cost_per_death_averted", tab)),
+             pcu = pc_undisc(tab, sc),
+             pcd = pc_disc(tab, sc)))
 
 ## Build a display table for a family's top-level rows, capped for space.
 ## Returns list(tb, agg_row_idx, n_omitted, omitted_labels).
@@ -349,9 +400,186 @@ family_table <- function(tab, agg_id, row_fun) {
 }
 ```
 
-# Reducing CVD in Indonesia
+```{r percapita, include=FALSE}
+## ---------------------------------------------------------------------------
+## 4. Average annual ADDITIONAL cost per capita (team request), for the three
+##    aggregate scenarios. Numerator = cumulative additional cost over the
+##    scale-up horizon (contract value = workbook Budget_Impact cumulative
+##    additional cost; 2025 additional cost is 0 by construction, so the
+##    horizon total equals the 2026-2050 sum). Denominator = 25 x 2026 national
+##    population, counted ONCE per location x year x age x sex from the model's
+##    authoritative demography, NOT the eligible/treated population.
+## ---------------------------------------------------------------------------
+percap_years <- (HZ_START + 1L):HZ_END                       # 2026..2050
+val_stop(length(percap_years) == 25L,
+         sprintf("expected 25 projection years (2026-%d); got %d", HZ_END, length(percap_years)))
 
-## Why this matters for Indonesia
+## Single defensible national population series = the baseline (current-course)
+## demographic projection, which is cause-invariant. Guard that claim.
+.dd     <- as.data.table(readRDS(dalys_file))
+.pk     <- c("location", "year", "age", "sex")
+.base26 <- .dd[scenario == "baseline" & location == "Indonesia" & year == (HZ_START + 1L)]
+val_stop(nrow(.base26) > 0, "model demography has no baseline Indonesia row for the 2026 population denominator")
+.spread <- .base26[, .(sp = max(population) - min(population)), by = .pk]
+val_stop(all(.spread$sp < 1),
+         "no single defensible 2026 national-population series: baseline population differs by >=1 person across causes within a location/year/age/sex cell")
+.pop_cells <- .base26[, .(population = mean(population)), by = .pk]   # collapse fp noise across causes
+pop_2026   <- .pop_cells[, sum(population)]
+val_stop(is.finite(pop_2026) && pop_2026 > 1e8, "2026 national population is missing or implausible")
+percap_den <- length(percap_years) * pop_2026
+rm(.dd)  # free the large demography table
+
+## Formatted "undiscounted / discounted" per-capita callout for one aggregate scenario.
+percap_vals <- function(tab, sc) {
+  undisc <- hv(sc, "incremental_cost", tab) / percap_den
+  disc   <- hv(sc, "disc_incremental_cost", tab) / percap_den
+  list(undisc = undisc, disc = disc,
+       txt = sprintf("\\textbf{Average annual additional cost per capita} (simple average over the %d-year scale-up, %d population denominator): \\textbf{%s} undiscounted, \\textbf{%s} discounted.",
+                     length(percap_years), (HZ_START + 1L), fmt_usd_pc(undisc), fmt_usd_pc(disc)))
+}
+## Emit the per-capita callout as a compact tinted single line under a cost table.
+percap_callout <- function(tab, sc, famcol = "wbnavy") {
+  v <- percap_vals(tab, sc)
+  if (!is.finite(v$undisc) || !is.finite(v$disc)) return(invisible())
+  cat(sprintf("\n\n\\vspace{2pt}\\noindent\\colorbox{%s!8}{\\parbox{\\dimexpr\\linewidth-2\\fboxsep}{\\footnotesize %s}}\n",
+              famcol, v$txt))
+}
+```
+
+```{r cascade-data, include=FALSE}
+## ---------------------------------------------------------------------------
+## 5. ISOLATED 70-30-30 -> 70-70-70 cascade strategy analysis. Read ONLY from
+##    the cascade workbook's stored/literal values; never merged with the
+##    ordinary results contract. Fail loudly on any structural surprise.
+## ---------------------------------------------------------------------------
+csh   <- openxlsx::getSheetNames(casc_wb)
+.creq <- c("Run_Metadata","Scenario_Catalog","Cascade_Assumptions","Cascade_Trajectory",
+           "Annual_Mortality","CVD_40q30","Annual_Cost","Budget_Impact","Cost_Effectiveness")
+val_stop(all(.creq %in% csh),
+         sprintf("cascade workbook missing sheet(s): %s", paste(setdiff(.creq, csh), collapse = ", ")))
+cread <- function(s) as.data.table(openxlsx::read.xlsx(casc_wb, sheet = s))
+need_cols <- function(dt, cols, sheet)
+  val_stop(all(cols %in% names(dt)),
+           sprintf("cascade sheet '%s' missing column(s): %s", sheet, paste(setdiff(cols, names(dt)), collapse = ", ")))
+
+## (a) Exactly the two expected scenarios (baseline + the cascade scenario).
+CASC_SCEN <- "S_70_30_30_TO_70_70_70"
+c_cat <- cread("Scenario_Catalog"); need_cols(c_cat, "scenario", "Scenario_Catalog")
+val_stop(setequal(c_cat$scenario, c("baseline", CASC_SCEN)),
+         sprintf("cascade Scenario_Catalog must be exactly {baseline, %s}; got {%s}",
+                 CASC_SCEN, paste(c_cat$scenario, collapse = ", ")))
+
+## (b) Assumptions -> parameter lookup + metadata.
+c_as <- cread("Cascade_Assumptions"); need_cols(c_as, c("parameter_id","value"), "Cascade_Assumptions")
+getp  <- function(id) { v <- c_as[parameter_id == id, value][1]; val_stop(!is.na(v), sprintf("cascade assumption '%s' missing", id)); v }
+getpn <- function(id) suppressWarnings(as.numeric(getp(id)))
+casc_disc  <- getpn("cost_discount_rate")
+casc_price <- getpn("cost_price_year")
+casc_curr  <- getp("currency")
+casc_diag  <- getpn("target_diagnosis_share")
+casc_t30   <- getpn("first_target_treatment_conditional")
+casc_c30   <- getpn("first_target_control_conditional")
+casc_t40   <- getpn("final_target_treatment_conditional")
+casc_c40   <- getpn("final_target_control_conditional")
+casc_half  <- getpn("treated_uncontrolled_effect_fraction")
+casc_eff30 <- getpn("first_target_effective_coverage_exact")
+casc_eff40 <- getpn("final_target_effective_coverage_exact")
+casc_y0    <- as.integer(getpn("analysis_start_year"))
+casc_y1    <- as.integer(getpn("analysis_end_year"))
+casc_ytar1 <- as.integer(getpn("first_target_year"))
+casc_ytar2 <- as.integer(getpn("final_target_year"))
+c_meta <- cread("Run_Metadata")
+casc_persp <- { v <- c_meta[item == "Economic perspective", value]; ltx(gsub("_", " ", if (length(v)) v[1] else "health system")) }
+val_stop(is.finite(casc_disc) && is.finite(casc_price), "cascade discount rate / price year missing")
+## Nested-share + effective-coverage reconciliation (fail loud if the workbook drifts).
+val_stop(abs(casc_diag * casc_t30 * casc_c30 - 0.063) < 1e-6, "cascade 2030 controlled share does not reconcile to 6.3%")
+val_stop(abs(casc_diag * casc_t40 * casc_c40 - 0.343) < 1e-6, "cascade 2040 controlled share does not reconcile to 34.3%")
+.eff_cov <- function(diag, t, ctrl, half) diag * t * ctrl + half * (diag * t - diag * t * ctrl)
+val_stop(abs(.eff_cov(casc_diag, casc_t30, casc_c30, casc_half) - casc_eff30) < 1e-6,
+         "cascade 2030 effective coverage does not reconcile to the stored exact value")
+val_stop(abs(.eff_cov(casc_diag, casc_t40, casc_c40, casc_half) - casc_eff40) < 1e-6,
+         "cascade 2040 effective coverage does not reconcile to the stored exact value")
+
+## (c) Hypertension cascade shares (sex-averaged) for the bar figure.
+c_tr <- cread("Cascade_Trajectory")
+need_cols(c_tr, c("intervention_id","risk_factor_id","sex","year","controlled_share","treated_uncontrolled_share"), "Cascade_Trajectory")
+htn_shares <- function(iv, rf) {
+  d <- c_tr[intervention_id == iv & risk_factor_id == rf & year %in% c(HZ_START, casc_ytar1, casc_ytar2) &
+              !is.na(controlled_share)]
+  d[, treated := controlled_share + treated_uncontrolled_share]
+  d[, .(controlled = mean(controlled_share), treated = mean(treated)), by = year][order(year)]
+}
+htn_sh <- htn_shares("I_CVD_PRIMARY", "RF_HTN")
+val_stop(nrow(htn_sh) == 3L, "hypertension cascade needs baseline + two milestone years of shares")
+## diagnosed row: not modelled at baseline (leave NA); = target at milestone years
+htn_sh[, diagnosed := ifelse(year == HZ_START, NA_real_, casc_diag)]
+dm_base <- { d <- c_tr[intervention_id == "I_T2D_TREATMENT" & year == HZ_START & !is.na(controlled_share)]
+             d[, treated := controlled_share + treated_uncontrolled_share]
+             list(treated = mean(d$treated), controlled = mean(d$controlled_share)) }
+
+## (d) Probability-of-death-before-70 series (R-reconciled literal values).
+c_q <- cread("CVD_40q30"); need_cols(c_q, c("scenario","year","cvd_40q30_r"), "CVD_40q30")
+casc_q <- c_q[, .(scenario, year, q = cvd_40q30_r)][order(scenario, year)]
+val_stop(all(is.finite(casc_q$q)) && setequal(casc_q$year, casc_y0:casc_y1),
+         "cascade probability-of-death series has gaps or non-finite values")
+
+## (e) Cumulative DISCOUNTED cost levels (baseline vs intervention), de-duplicated.
+c_ac <- cread("Annual_Cost")
+need_cols(c_ac, c("year","disc_cost_baseline","disc_cost_scenario","disc_cost_incremental","shared_duplicate_count"), "Annual_Cost")
+c_ac[, w := 1 / pmax(shared_duplicate_count, 1)]              # count shared components once
+casc_cost <- c_ac[, .(base = sum(disc_cost_baseline * w), scen = sum(disc_cost_scenario * w),
+                      inc  = sum(disc_cost_incremental * w)), by = year][order(year)]
+casc_cost[, `:=`(cum_base = cumsum(base), cum_scen = cumsum(scen), cum_inc = cumsum(inc))]
+c_bi <- cread("Budget_Impact"); need_cols(c_bi, c("year","cumulative_disc_incremental_cost"), "Budget_Impact")
+casc_cost <- merge(casc_cost, c_bi[, .(year, bi_cum = cumulative_disc_incremental_cost)], by = "year")
+## Guard: our de-duplicated level difference must reconcile to the authoritative budget sheet.
+val_stop(max(abs((casc_cost$cum_scen - casc_cost$cum_base) - casc_cost$bi_cum)) < 1,
+         "cascade cost levels (Annual_Cost) do not reconcile to Budget_Impact cumulative additional cost")
+
+## (f) Cumulative deaths (six CVD causes + type-2 diabetes), baseline vs intervention.
+c_am <- cread("Annual_Mortality"); need_cols(c_am, c("scenario","year","cause_deaths","base_deaths","deaths_averted"), "Annual_Mortality")
+casc_base_d <- c_am[scenario == "baseline",  .(base = sum(cause_deaths)), by = year][order(year)]
+casc_scen_d <- c_am[scenario == CASC_SCEN,   .(scen = sum(cause_deaths)), by = year][order(year)]
+casc_deaths <- merge(casc_base_d, casc_scen_d, by = "year")
+casc_deaths[, `:=`(cum_base = cumsum(base), cum_scen = cumsum(scen))]
+casc_deaths[, cum_averted := cum_base - cum_scen]
+
+## (g) Headline metrics from the workbook Cost_Effectiveness (single source of truth).
+c_ce <- cread("Cost_Effectiveness"); need_cols(c_ce, c("scenario","deaths_averted","disc_incremental_cost","cost_per_death_averted"), "Cost_Effectiveness")
+c_ce <- c_ce[scenario == CASC_SCEN]
+val_stop(nrow(c_ce) == 1L, "cascade Cost_Effectiveness must have exactly the cascade scenario")
+casc_da   <- c_ce$deaths_averted[1]
+casc_cost_tot <- c_ce$disc_incremental_cost[1]
+casc_cpda <- c_ce$cost_per_death_averted[1]
+## Reconcile CE against the annual sheets we plotted (fail loud on drift).
+val_stop(abs(casc_deaths[year == casc_y1, cum_averted] - casc_da) < 1,
+         "cascade deaths averted (Annual_Mortality) do not reconcile to Cost_Effectiveness")
+val_stop(abs(casc_cost[year == casc_y1, bi_cum] - casc_cost_tot) < 1e4,
+         "cascade cumulative additional cost (Budget_Impact) does not reconcile to Cost_Effectiveness")
+
+## Cumulative snapshots for the results table (2030 / 2040 / 2050).
+casc_tab_years <- c(casc_ytar1, casc_ytar2, casc_y1)
+casc_snapshot <- function(y) list(
+  d_base = casc_deaths[year == y, cum_base], d_scen = casc_deaths[year == y, cum_scen],
+  d_av   = casc_deaths[year == y, cum_averted],
+  c_base = casc_cost[year == y, cum_base],   c_scen = casc_cost[year == y, cum_scen],
+  c_add  = casc_cost[year == y, bi_cum])
+```
+
+```{r deck-titles, include=FALSE}
+## Dynamic, plain-text (no %/$) takeaway titles derived from current outputs.
+title_exec <- if (has_joint)
+  sprintf("Together, clinical care and prevention could avert about %s deaths by %d",
+          fmt_title_num(combo_da), HZ_END) else
+  "Clinical care and population prevention each cut premature cardiovascular deaths"
+title_cascade_results <- sprintf(
+  "A stronger cascade could prevent about %s deaths by %d",
+  fmt_title_num(casc_da), casc_y1)
+```
+
+# The challenge, and the opportunity
+
+## Most premature cardiovascular deaths in Indonesia can be prevented or treated
 
 \begin{columns}[T]
 \begin{column}{0.52\textwidth}
@@ -359,7 +587,7 @@ family_table <- function(tab, agg_id, row_fun) {
 \normalsize
 Under current trends, a person reaching age 30 faces roughly a
 \hlkey{`r fmt_pct(base_q_2025,1)` chance} of dying from cardiovascular disease
-before age 70 --- the CVD ``40q30''. Most of this is \textbf{preventable or treatable}.
+before age 70. Most of this is \textbf{preventable or treatable}.
 \end{block}
 \end{column}
 \begin{column}{0.46\textwidth}
@@ -370,18 +598,17 @@ before age 70 --- the CVD ``40q30''. Most of this is \textbf{preventable or trea
     \item \textcolor{clinicalcol}{\textbf{Clinical care}} --- prevent and better treat established disease.
     \item \textcolor{phcol}{\textbf{Population prevention}} --- tobacco, salt, trans-fat.
   \end{itemize}
-  \item This analysis weighs their \textbf{health impact and cost-effectiveness} together.
+  \item This analysis weighs their \textbf{health impact and value for money} together.
 \end{itemize}
 \end{column}
 \end{columns}
 
-\vspace{3pt}
-\footnotesize Source: Indonesia CVD model (calibrated to GBD 2023; UN World Population Prospects 2024). CVD 40q30 = probability of dying from cardiovascular disease between exact ages 30 and 70.
+\srcmethod{\textbf{Source:} Indonesia CVD model, calibrated to GBD 2023 and UN World Population Prospects 2024; combined results workbook (annual probability-of-death sheet). \textbf{Method:} the probability of death from CVD before age 70 is the chance of dying from the six modelled cardiovascular diseases between exact ages 30 and 70, read from a single-year life table in the `r HZ_START` baseline year.}
 
-## What this analysis set out to do
+## We measured the health gains and the value for money of proven interventions
 
 \begin{block}{General aim}
-\normalsize Estimate the \textbf{health impact and cost-effectiveness} of scaling up evidence-based
+\normalsize Estimate the \textbf{health impact and value for money} of scaling up evidence-based
 \textbf{clinical} and \textbf{public-health} cardiovascular interventions in Indonesia through \textbf{2050}.
 \end{block}
 
@@ -389,25 +616,24 @@ before age 70 --- the CVD ``40q30''. Most of this is \textbf{preventable or trea
 \begin{columns}[T]
 \begin{column}{0.33\textwidth}
 \begin{clinicalblock}{Aim 1 --- Burden}
-\footnotesize Project the CVD burden and the premature-mortality indicator (CVD 40q30) under the \textbf{status quo} and under \textbf{alternative intervention scenarios}.
+\footnotesize Project the CVD burden and the probability of death from CVD before age 70 under the \textbf{current course} and under \textbf{alternative intervention scenarios}.
 \end{clinicalblock}
 \end{column}
 \begin{column}{0.33\textwidth}
 \begin{phblock}{Aim 2 --- Value for money}
-\footnotesize Estimate \textbf{deaths averted}, mortality reductions, \textbf{incremental costs}, and the \textbf{cost per death averted} for each intervention and package.
+\footnotesize Estimate \textbf{deaths averted}, mortality reductions, \textbf{additional costs}, and the \textbf{cost per death averted} for each intervention and package.
 \end{phblock}
 \end{column}
 \begin{column}{0.33\textwidth}
 \begin{combinedblock}{Aim 3 --- Better together}
-\footnotesize Quantify the \textbf{added value of combining} clinical and public-health action, modeled as a single joint run rather than a sum.
+\footnotesize Quantify the \textbf{added value of combining} clinical and public-health action, modelled as a single joint run rather than a sum.
 \end{combinedblock}
 \end{column}
 \end{columns}
 
-\vspace{3pt}
-\footnotesize Horizon `r HZ_START`--`r HZ_END`; the "status quo" baseline is the no-new-intervention comparator against which every scenario is measured.
+\srcmethod{\textbf{Source:} study design; Indonesia CVD model. \textbf{Method:} every scenario runs through one projection over `r HZ_START`--`r HZ_END`; the baseline (current course) is the no-new-intervention comparator against which each scenario is measured.}
 
-## Executive summary --- the headline numbers
+## `r title_exec`
 
 \begin{columns}[T]
 \begin{column}{0.5\textwidth}
@@ -416,7 +642,7 @@ if (has_joint) {
   cat(sprintf(paste0(
     "\\begin{combinedblock}{Combining clinical + public health is the big prize}\n",
     "\\footnotesize Together they could avert about \\hlkey{%s deaths} over %d--%d, ",
-    "cut the CVD 40q30 in %d by \\hlkey{%s}, at about \\hlkey{%s per death averted}.\n",
+    "cut the probability of death from CVD before age 70 in %d by \\hlkey{%s}, at about \\hlkey{%s per death averted}.\n",
     "\\end{combinedblock}\n"),
     fmt_short(combo_da), HZ_START, HZ_END, HZ_END, fmt_pct(combo_qred,0), fmt_usd(combo_cpda)))
 } else {
@@ -430,7 +656,7 @@ if (has_joint) {
 \begin{itemize}\footnotesize\itemsep3pt
 ```{r exec-bullets, results='asis'}
 if (has_clin)
-  cat(sprintf("  \\item \\textcolor{clinicalcol}{\\textbf{All clinical interventions}}: $\\approx$%s deaths averted; CVD 40q30 down %s by %d.\n",
+  cat(sprintf("  \\item \\textcolor{clinicalcol}{\\textbf{All clinical interventions}}: $\\approx$%s deaths averted; probability of death from CVD before age 70 down %s by %d.\n",
               fmt_short(clin_da), fmt_pct(clin_qred,0), HZ_END))
 if (has_ph)
   cat(sprintf("  \\item \\textcolor{phcol}{\\textbf{All public-health policies}}: $\\approx$%s deaths averted at about %s per death averted.\n",
@@ -446,10 +672,9 @@ if (has_joint)
 \end{column}
 \end{columns}
 
-\vspace{2pt}
-\scriptsize All figures from the model's current-run cost/value outputs. Deaths averted are cumulative `r HZ_START`--`r HZ_END` across modeled cardiovascular and diabetes causes. Cost per death averted uses discounted incremental cost in market US\$ (price year `r price_year`).
+\srcmethod{\textbf{Source:} results contract (\texttt{09\_deck\_results.rds}) + combined workbook. \textbf{Method:} deaths averted cumulative `r HZ_START`--`r HZ_END` (six CVD causes $+$ type-2 diabetes); cost per death averted $=$ discounted additional cost $\div$ deaths averted (`r price_year` US\$). \costcaveat}
 
-## How the model works --- in plain language
+## The model follows how prevention and treatment change disease and survival
 
 \begin{columns}[T]
 \begin{column}{0.54\textwidth}
@@ -458,20 +683,20 @@ if (has_joint)
   \item \textbf{People \& demography.} Indonesia's population is projected by age and sex (UN World Population Prospects 2024).
   \item \textbf{Starting health.} Disease and death rates are set to Indonesia's data (GBD 2023) and calibrated to match observed levels.
   \item \textbf{Year-by-year simulation.} Each year people can develop cardiovascular disease or diabetes, survive, or die.
-  \item \textbf{Interventions.} Clinical and public-health scenarios change how many people develop disease and how many survive it.
-  \item \textbf{Outcomes.} The model reports deaths, healthy years (DALYs), premature-mortality (40q30), costs, and cost-effectiveness.
+  \item \textbf{Interventions.} Clinical and public-health scenarios change how many people develop disease (new cases) and how many survive it.
+  \item \textbf{Outcomes.} The model reports deaths, healthy years lost or gained (DALYs), the probability of death from CVD before age 70, costs, and value for money.
 \end{enumerate}
 \end{column}
 \begin{column}{0.44\textwidth}
 \begin{block}{One consistent engine}
-\footnotesize Every scenario runs through the \textbf{same} projection, so results are directly comparable and the \textbf{combined} package is modeled as one run --- not a sum of separate estimates.
+\footnotesize Every scenario runs through the \textbf{same} projection, so results are directly comparable and the \textbf{combined} package is modelled as one run --- not a sum of separate estimates.
 \end{block}
-\vspace{2pt}
-\scriptsize Calibration fits the model to GBD estimates using a standard numerical optimiser. Demography and life expectancy use UN WPP 2024.
 \end{column}
 \end{columns}
 
-## How interventions change the disease pathway
+\srcmethod{\textbf{Source:} Indonesia CVD model engine; GBD 2023 (starting rates); UN World Population Prospects 2024 (demography, life expectancy). \textbf{Method:} a discrete-time state-transition simulation by single-year age and sex, calibrated to match observed GBD levels using a standard numerical optimiser.}
+
+## Interventions work by preventing new disease and by helping people survive it
 
 \vspace{-2pt}
 \begin{center}
@@ -488,10 +713,10 @@ if (has_joint)
 
   \draw[->, very thick, incidencecol]
        (well) -- node[above, midway, text=incidencecol]{\textbf{new CVD}}
-                  node[below, midway, text=incidencecol, font=\scriptsize]{incidence} (sick);
+                  node[below, midway, text=incidencecol, font=\scriptsize]{new cases} (sick);
   \draw[->, very thick, casefatalcol]
        (sick) -- node[above, midway, text=casefatalcol]{\textbf{dies of CVD}}
-                  node[below, midway, text=casefatalcol, font=\scriptsize]{case-fatality} (cvd);
+                  node[below, midway, text=casefatalcol, font=\scriptsize]{risk of dying with CVD} (cvd);
   \draw[->, thick, bgmortcol] (well) to[bend right=12] (bg);
   \draw[->, thick, bgmortcol] (sick) to[bend left=12]  (bg);
 \end{tikzpicture}
@@ -500,22 +725,21 @@ if (has_joint)
 \vspace{-2pt}
 \begin{columns}[T]
 \begin{column}{0.33\textwidth}\footnotesize
-\textcolor{incidencecol}{\textbf{Fewer people fall ill}}\\ \scriptsize Primary prevention \& \emph{all} public-health policies lower \textbf{incidence}.
+\textcolor{incidencecol}{\textbf{Fewer people fall ill}}\\ \scriptsize Primary prevention \& \emph{all} public-health policies reduce \textbf{new cases}.
 \end{column}
 \begin{column}{0.34\textwidth}\footnotesize
-\textcolor{casefatalcol}{\textbf{More people survive}}\\ \scriptsize Secondary prevention, treatment \& tobacco policy lower \textbf{case-fatality}.
+\textcolor{casefatalcol}{\textbf{More people survive}}\\ \scriptsize Secondary prevention, treatment \& tobacco policy lower the \textbf{risk of dying after developing CVD}.
 \end{column}
 \begin{column}{0.31\textwidth}\footnotesize
 \textcolor{bgmortcol}{\textbf{Background mortality}}\\ \scriptsize Other-cause deaths from demography; unchanged by these interventions.
 \end{column}
 \end{columns}
 
-\vspace{3pt}
-\scriptsize No recovery/remission transition is modeled: people living with CVD remain at elevated risk (a conservative assumption). Source: model engine, \texttt{06\_run\_scenarios\_indonesia\_fair.R}.
+\srcmethod{\textbf{Source:} Indonesia CVD model engine (\texttt{06\_run\_scenarios\_indonesia\_fair.R}). \textbf{Method:} interventions act on two transitions --- new cases (Healthy $\rightarrow$ Living with CVD) and the risk of dying after developing CVD (Living with CVD $\rightarrow$ death); no recovery/remission is modelled, a conservative assumption.}
 
-# The interventions
+# The interventions we tested
 
-## Clinical interventions (FAIR Choices)
+## Clinical care prevents disease and helps people survive it
 
 ```{r tbl-clin-interventions, results='asis'}
 ## Built from the ACTIVE clinical scenarios in this run (children/aggregate
@@ -525,7 +749,7 @@ clin_pop <- c(
   I_IHD_SECONDARY = "Heart-attack (IHD) survivors", I_STROKE_SECONDARY = "Stroke survivors",
   I_HF_CHRONIC = "Chronic heart-failure patients", I_HF_ACUTE = "Acute heart-failure patients",
   I_RHD_SECONDARY = "Rheumatic heart disease patients")
-clin_acts <- c(I_CVD_PRIMARY = "\\textcolor{incidencecol}{Incidence}")
+clin_acts <- c(I_CVD_PRIMARY = "\\textcolor{incidencecol}{Fewer new cases}")
 clin_disp <- top_level_rows(met_clin, clin_all_id)[scenario != clin_all_id]
 if (nrow(clin_disp)) {
   pluck <- function(vec, key, default) if (key %in% names(vec)) vec[[key]] else default
@@ -533,7 +757,7 @@ if (nrow(clin_disp)) {
     Intervention = vapply(clin_disp$scenario, function(s) lbl(s, met_clin), character(1)),
     Population   = vapply(clin_disp$scenario, function(s) pluck(clin_pop, s, "Target patient group"), character(1)),
     Acts         = vapply(clin_disp$scenario, function(s)
-                     pluck(clin_acts, s, "\\textcolor{casefatalcol}{Case-fatality}"), character(1)))
+                     pluck(clin_acts, s, "\\textcolor{casefatalcol}{Better survival}"), character(1)))
   print(kbl(cd, format="latex", booktabs=TRUE, escape=FALSE,
       col.names=c("Intervention","Target population","Model effect"), align="lll") |>
     kable_styling(latex_options="hold_position", font_size=8.5) |>
@@ -544,9 +768,11 @@ if (nrow(clin_disp)) {
 ```
 
 \vspace{2pt}
-\footnotesize \textbf{Implementation scenario (all clinical interventions):} coverage scales up \textbf{from a low base toward 80\%} of the eligible population between `r HZ_START` and `r HZ_END`. Effect sizes are drawn from the FAIR Choices intervention taxonomy; primary prevention lowers who develops CVD, while secondary prevention and treatment improve survival. \scriptsize Source: workbook \texttt{Selected\_Interventions}.
+\footnotesize \textbf{Implementation scenario (all clinical interventions):} coverage scales up \textbf{from a low base toward 80\%} of the people who need each service between `r HZ_START` and `r HZ_END`. Primary prevention lowers who develops CVD (new cases); secondary prevention and treatment improve survival.
 
-## Public-health interventions (fiscal \& regulatory policy)
+\srcmethod{\textbf{Source:} clinical results workbook, sheets \texttt{Selected\_Interventions} and \texttt{Scenario\_Catalog}. \textbf{Method:} the table lists the clinical interventions active in this run (excluded interventions never appear); effect sizes come from the FAIR Choices intervention taxonomy.}
+
+## Population policies cut tobacco, salt, and trans-fat risk across the whole population
 
 ```{r tbl-ph-interventions, results='asis'}
 ph_meta <- data.table(
@@ -556,14 +782,14 @@ ph_meta <- data.table(
   Risk  = c("Tobacco","Tobacco","Dietary salt/sodium","Industrial trans-fat",
             "Dietary salt/sodium","Dietary salt/sodium","Dietary salt/sodium","Dietary salt/sodium",
             "Tobacco","Tobacco","Tobacco"),
-  Acts  = c("\\textcolor{incidencecol}{Incidence} + \\textcolor{casefatalcol}{survival}",
-            "\\textcolor{incidencecol}{Incidence} + \\textcolor{casefatalcol}{survival}",
-            "\\textcolor{incidencecol}{Incidence}","\\textcolor{incidencecol}{Incidence}",
-            "\\textcolor{incidencecol}{Incidence}","\\textcolor{incidencecol}{Incidence}",
-            "\\textcolor{incidencecol}{Incidence}","\\textcolor{incidencecol}{Incidence}",
-            "\\textcolor{incidencecol}{Incidence} + \\textcolor{casefatalcol}{survival}",
-            "\\textcolor{incidencecol}{Incidence} + \\textcolor{casefatalcol}{survival}",
-            "\\textcolor{incidencecol}{Incidence} + \\textcolor{casefatalcol}{survival}"),
+  Acts  = c("\\textcolor{incidencecol}{New cases} + \\textcolor{casefatalcol}{survival}",
+            "\\textcolor{incidencecol}{New cases} + \\textcolor{casefatalcol}{survival}",
+            "\\textcolor{incidencecol}{New cases}","\\textcolor{incidencecol}{New cases}",
+            "\\textcolor{incidencecol}{New cases}","\\textcolor{incidencecol}{New cases}",
+            "\\textcolor{incidencecol}{New cases}","\\textcolor{incidencecol}{New cases}",
+            "\\textcolor{incidencecol}{New cases} + \\textcolor{casefatalcol}{survival}",
+            "\\textcolor{incidencecol}{New cases} + \\textcolor{casefatalcol}{survival}",
+            "\\textcolor{incidencecol}{New cases} + \\textcolor{casefatalcol}{survival}"),
   Lever = c("Raise tax to 75\\% of retail price","Clean-air law, mass media, ad ban",
             "Reformulation, labelling, media, procurement","Best-practice industrial TFA ban",
             "Mandatory reformulation","Front-of-pack labelling","Mass-media campaign","Public-institution environment",
@@ -573,28 +799,30 @@ if (nrow(ph_disp)) {
   pd <- merge(ph_disp[, .(scenario)], ph_meta, by = "scenario", all.x = TRUE, sort = FALSE)
   pd[, Policy := vapply(scenario, function(s) lbl(s, met_ph), character(1))]
   pd[is.na(Risk),  Risk  := "Behavioural risk factor"]
-  pd[is.na(Acts),  Acts  := "\\textcolor{incidencecol}{Incidence}"]
+  pd[is.na(Acts),  Acts  := "\\textcolor{incidencecol}{New cases}"]
   pd[is.na(Lever), Lever := "Fiscal / regulatory measure"]
   print(kbl(pd[, .(Policy, Risk, Acts, Lever)], format="latex", booktabs=TRUE, escape=FALSE,
       col.names=c("Policy","Risk factor","Model effect","Implementation lever"), align="llll") |>
-    kable_styling(latex_options="hold_position", font_size=8) |>
-    column_spec(1, bold=TRUE, width="3.1cm") |> column_spec(2, width="2.4cm") |>
-    column_spec(3, width="3.2cm") |> column_spec(4, width="5.0cm") |>
+    kable_styling(latex_options="hold_position", font_size=7.8) |>
+    column_spec(1, bold=TRUE, width="2.9cm") |> column_spec(2, width="2.3cm") |>
+    column_spec(3, width="3.1cm") |> column_spec(4, width="5.7cm") |>
     row_spec(0, bold=TRUE))
 } else cat("\\begin{center}\\large No public-health policies selected for this run.\\end{center}")
 ```
 
 \vspace{1pt}
-\footnotesize Policies reduce exposure (smoking, salt, trans-fat intake), lowering CVD \textbf{incidence}. \textbf{Tobacco} policies additionally improve \textbf{survival} after CVD. Packages are modeled as single joint runs of their component measures. \scriptsize Source: workbook \texttt{Selected\_Interventions} / \texttt{Policy\_Levers}.
+\footnotesize Policies reduce exposure (smoking, salt, trans-fat intake), lowering the number of \textbf{new CVD cases}. \textbf{Tobacco} policies additionally improve \textbf{survival} after CVD. Packages are modelled as single joint runs of their component measures.
 
-## Data sources
+\srcmethod{\textbf{Source:} public-health results workbook, sheets \texttt{Selected\_Interventions} / \texttt{Policy\_Levers} and \texttt{Scenario\_Catalog}. \textbf{Method:} the table lists the policies active in this run; effect sizes come from published risk-factor evidence stored in the workbook.}
+
+## Every input is traceable to a recognised data source
 
 ```{r tbl-sources}
 src <- data.table(
   Component = c("Population \\& demography","Cause-specific mortality \\& disease rates",
-                "Disability weights (healthy-years lost)","Clinical intervention effects",
+                "Disability weights (healthy years lost)","Clinical intervention effects",
                 "Public-health effect sizes","Intervention \\& policy costs",
-                "International 40q30 comparison"),
+                "International CVD mortality comparison"),
   Source = c("UN World Population Prospects","GBD (Indonesia)","GBD",
              "FAIR Choices intervention taxonomy","Published risk-factor evidence (in workbook)",
              "Programme \\& policy unit costs (in workbook)",
@@ -602,31 +830,67 @@ src <- data.table(
   Years = c("2024 revision","2023","2023","current","current",
             sprintf("price year %d", price_year), "1995--2050"),
   Use = c("Population, background mortality, life expectancy","Baseline burden \\& calibration targets",
-          "DALYs","Incidence \\& case-fatality effects","Incidence \\& survival effects",
-          "Budget impact \\& cost-effectiveness",
+          "Healthy years lost or gained (DALYs)","New-case \\& survival effects","New-case \\& survival effects",
+          "Budget impact \\& value for money",
           "Benchmarking Indonesia vs.\\ neighbours"))
 kbl(src, format="latex", booktabs=TRUE, escape=FALSE,
     col.names=c("Model component","Primary source","Years / version","Use in model"), align="llll") |>
-  kable_styling(latex_options=c("hold_position"), font_size=7.6) |>
-  column_spec(1, bold=TRUE, width="3.4cm") |> column_spec(2, width="4.2cm") |>
-  column_spec(3, width="2.0cm") |> column_spec(4, width="4.3cm") |>
+  kable_styling(latex_options=c("hold_position"), font_size=6.6) |>
+  column_spec(1, bold=TRUE, width="3.2cm") |> column_spec(2, width="4.0cm") |>
+  column_spec(3, width="1.9cm") |> column_spec(4, width="4.7cm") |>
   row_spec(0, bold=TRUE)
 ```
 
 \vspace{1pt}
-\scriptsize Sources verified in the modeling pipeline and input workbooks. Specific effect-size and cost citations are documented in the input workbooks. Population: UN World Population Prospects 2024; GBD [@GBDCVD2025; @Schumacher2024GBD2021].
+\scriptsize Population: UN World Population Prospects 2024; epidemiology: GBD 2023 [@GBDCVD2025; @Schumacher2024GBD2021].
 
-# Health impact and value for money
+\srcmethod{\textbf{Source:} modelling pipeline and input workbooks. \textbf{Method:} these inputs drive the demographic projection, calibration targets, and effect sizes; effect-size and cost citations are in the workbooks.}
 
-## Clinical: impact and cost-effectiveness
+## Costs depend on who needs care, how many receive it, and local prices
+
+\footnotesize We estimate the \textbf{additional health-system resources required to expand effective coverage}, using a costing approach adapted from Disease Control Priorities (DCP) [@Watkins2020ResourceRequirements].
+
+<!-- \footnotesize We estimate costs with an intervention-based approach adapted from the Disease Control Priorities (DCP) cost model of @Watkins2020ResourceRequirements, applied here from a \textbf{health-system perspective} with \textbf{annual} projections. Each service is costed as: \emph{who needs it} $\times$ \emph{how much of that need is met} $\times$ \emph{services per person per year} $\times$ \emph{Indonesia-adjusted unit cost}. -->
+
+\vspace{2pt}
+\begin{center}
+\resizebox{\linewidth}{!}{%
+\begin{tikzpicture}[
+   >=Latex, node distance = 5mm, font=\scriptsize,
+   costbox/.style = {rectangle, rounded corners, draw=wbnavy, thick, fill=wbnavy!6,
+                  text width=22mm, minimum height=14mm, align=center},
+   costout/.style = {rectangle, rounded corners, draw=clinicalcol, very thick, fill=clinicalcol!8,
+                  text width=27mm, minimum height=14mm, align=center}]
+  \node[costbox] (pin)  {\textbf{People who need}\\ the service};
+  \node[costbox, right=of pin] (cov) {\textbf{Current coverage}\\ \& scale-up target};
+  \node[costbox, right=of cov] (freq){\textbf{Services}\\ per person / year};
+  \node[costbox, right=of freq] (uc) {\textbf{Indonesia unit}\\ cost};
+  \node[costbox, right=of uc] (ann) {\textbf{Annual cost}\\ baseline \& scenario};
+  \node[costout,  right=of ann] (res){\textbf{Additional \& discounted cost;} cost per person; cost per death prevented};
+  \draw[->,thick] (pin)--(cov); \draw[->,thick] (cov)--(freq); \draw[->,thick] (freq)--(uc);
+  \draw[->,thick] (uc)--(ann);  \draw[->,thick, clinicalcol] (ann)--(res);
+\end{tikzpicture}}
+\end{center}
+
+\vspace{2pt}
+<!-- \footnotesize The DCP paper supplies the \textbf{conceptual framework} --- unit costs, demographic/epidemiological estimates of the people in need, baseline coverage, and health-system delivery costs. This project \textbf{adapts} that framework to Indonesia and does not claim to reproduce the paper exactly. -->
+
+\footnotesize\textbf{What this tells policymakers:} the analysis estimates how much additional health-system spending is required to move from today's coverage toward universal, high-quality access—and relates that investment to the health gains achieved.
+
+\srcmethod{\textbf{Source:} intervention-based costing adapted from Watkins et al. (2020); unit costs and coverage from the input workbooks; demography from UN WPP 2024. \textbf{Method:} annual cost = people in need $\times$ coverage $\times$ annual service frequency $\times$ Indonesia-adjusted unit cost; additional cost = scenario minus baseline; equations in the appendix. \costcaveat}
+
+# What the interventions deliver, and at what cost
+
+## Scaling up clinical care sharply cuts premature cardiovascular deaths
 
 ```{r tbl-clin-ce, results='asis'}
 ft <- family_table(met_clin, clin_all_id, ce_row)
 if (nrow(ft$tb)) {
   k <- kbl(ft$tb, format="latex", booktabs=TRUE, escape=FALSE,
-      col.names=mkhdr(c("Clinical intervention","Deaths averted\n(cumulative)","CVD 40q30\n2050",
-                  "40q30 red.\n2050","Deaths red.\n2050","Cost per\ndeath averted")),
-      align="lrrrrr") |>
+      col.names=mkhdr(c("Clinical intervention","Deaths averted\n(cumulative)","Prob. of CVD death\nbefore age 70, 2050",
+                  "Reduction in that\nprobability, 2050","Deaths reduction\n2050","Cost per\ndeath averted",
+                  "Add'l cost/capita\nper yr, undisc.","Add'l cost/capita\nper yr, disc.")),
+      align="lrrrrrrr") |>
     kable_styling(latex_options=c("hold_position","scale_down"), font_size=8.5) |>
     column_spec(1, bold=TRUE) |> row_spec(0, bold=TRUE)
   if (!is.na(ft$agg_idx)) k <- k |> row_spec(ft$agg_idx, bold=TRUE, background="#EAF1FB")
@@ -636,21 +900,18 @@ if (nrow(ft$tb)) {
 } else cat("\\begin{center}\\large No clinical interventions selected for this run.\\end{center}")
 ```
 
-<!-- \vspace{1pt} -->
-<!-- \footnotesize Cost per death averted uses \textbf{discounted} incremental cost (`r fmt_pct(disc_rate*100,0)`/yr). Costs in market US\$ (price year `r price_year`); perspective: `r cost_perspective`. \scriptsize Source: clinical cost/value workbook. -->
+\srcmethod{\textbf{Source:} results contract (\texttt{09\_deck\_results.rds}) + clinical workbook; `r (HZ_START+1L)` population from model demography (UN WPP 2024). \textbf{Method:} cost per death averted $=$ discounted additional cost $\div$ deaths averted (`r fmt_pct(disc_rate*100,0)`/yr, `r price_year` US\$, `r cost_perspective`); the two per-capita columns $=$ each row's cumulative additional cost (undiscounted / discounted) $\div$ (25 $\times$ `r (HZ_START+1L)` national population), a simple average over the 25-year horizon. \costcaveat}
 
-\vspace{1pt}
-\footnotesize Cost per death averted is based on \textbf{discounted} incremental costs (`r fmt_pct(disc_rate*100,0)` per year) and assumes a linear scale-up from baseline coverage in `r HZ_START` to 80\% coverage by `r HZ_END`. Costs are reported in market US\$ (price year `r price_year`) from the `r cost_perspective` perspective.
-
-## Public health: impact and cost-effectiveness
+## Population policies avert deaths at very low cost
 
 ```{r tbl-ph-ce, results='asis'}
 ft <- family_table(met_ph, ph_all_id, ce_row)
 if (nrow(ft$tb)) {
   k <- kbl(ft$tb, format="latex", booktabs=TRUE, escape=FALSE,
-      col.names=mkhdr(c("Public-health policy","Deaths averted\n(cumulative)","CVD 40q30\n2050",
-                  "40q30 red.\n2050","Deaths red.\n2050","Cost per\ndeath averted")),
-      align="lrrrrr") |>
+      col.names=mkhdr(c("Public-health policy","Deaths averted\n(cumulative)","Prob. of CVD death\nbefore age 70, 2050",
+                  "Reduction in that\nprobability, 2050","Deaths reduction\n2050","Cost per\ndeath averted",
+                  "Add'l cost/capita\nper yr, undisc.","Add'l cost/capita\nper yr, disc.")),
+      align="lrrrrrrr") |>
     kable_styling(latex_options=c("hold_position","scale_down"), font_size=8.5) |>
     column_spec(1, bold=TRUE) |> row_spec(0, bold=TRUE)
   if (!is.na(ft$agg_idx)) k <- k |> row_spec(ft$agg_idx, bold=TRUE, background="#E7F4F1")
@@ -660,15 +921,12 @@ if (nrow(ft$tb)) {
 } else cat("\\begin{center}\\large No public-health policies selected for this run.\\end{center}")
 ```
 
-\vspace{1pt}
-\footnotesize Cumulative deaths averted during `r HZ_START`--`r HZ_END`, relative to the status-quo baseline. The tobacco package combines smoke-free policies, health warnings and mass-media campaigns, advertising bans, and cessation support. The sodium package combines food reformulation, front-of-pack nutrition labelling, healthy public food-procurement policies, and behavior-change communication. Each package is modeled as a single joint scenario.
-
-<!-- ; detailed component definitions are provided in the appendix. \scriptsize Source: public-health cost/value workbook. -->
+\srcmethod{\textbf{Source:} results contract (\texttt{09\_deck\_results.rds}) + public-health workbook; `r (HZ_START+1L)` population from model demography (UN WPP 2024). \textbf{Method:} cumulative deaths averted `r HZ_START`--`r HZ_END` vs baseline; tobacco and sodium packages each modelled as one joint run; the two per-capita columns $=$ each row's cumulative additional cost (undiscounted / discounted) $\div$ (25 $\times$ `r (HZ_START+1L)` national population). \costcaveat}
 
 
-# The combined package
+# Clinical and population action, combined
 
-## Clinical + public health: better together
+## Clinical care and prevention achieve more together than alone
 
 ```{r tbl-combined, results='asis'}
 pk <- intersect(c(clin_all_id, ph_all_id, joint_id), met_comb$scenario)
@@ -679,11 +937,13 @@ if (length(pk)) {
     qr   = fmt_pct(hv(s, "cvd_40q30_pct_reduction_2050"), 1),
     q50  = fmt_pct(hv(s, "cvd_40q30_2050"), 1),
     cost = fmt_usd_short(hv(s, "disc_incremental_cost")),
-    cpd  = fmt_usd(hv(s, "cost_per_death_averted")))))
+    cpd  = fmt_usd(hv(s, "cost_per_death_averted")),
+    pcu  = pc_undisc(met_comb, s),
+    pcd  = pc_disc(met_comb, s))))
   k <- kbl(tb, format="latex", booktabs=TRUE, escape=FALSE,
-      col.names=mkhdr(c("Package","Deaths averted\n(cumulative)","40q30 red.\n2050","CVD 40q30\n2050",
-                  "Total cost\n(PV, discounted)","Cost per\ndeath averted")),
-      align="lrrrrr") |>
+      col.names=mkhdr(c("Package","Deaths averted\n(cumulative)","Reduction in prob.\nof CVD death <70, 2050","Prob. of CVD death\nbefore age 70, 2050",
+                  "Discounted total\ncost","Cost per\ndeath averted","Add'l cost/capita\nper yr, undisc.","Add'l cost/capita\nper yr, disc.")),
+      align="lrrrrrrr") |>
     kable_styling(latex_options=c("hold_position","scale_down"), font_size=9) |>
     column_spec(1, bold=TRUE) |> row_spec(0, bold=TRUE)
   jidx <- which(pk == joint_id)
@@ -692,14 +952,11 @@ if (length(pk)) {
 } else cat("\\begin{center}\\large No package scenarios available for this run.\\end{center}")
 ```
 
-\vspace{2pt}
 ```{r combined-block, results='asis'}
 if (has_joint) {
   cat(sprintf(paste0(
-    "\\begin{combinedblock}{The combined package is modeled as one run --- not a sum}\n",
-    "\\footnotesize Because clinical and public-health effects overlap, the joint scenario is ",
-    "projected in a single run. It averts about \\textbf{%s deaths}, brings the %d CVD 40q30 down to ",
-    "\\textbf{%s} (from %s at baseline), at about \\textbf{%s per death averted}.\n",
+    "\\begin{combinedblock}{The combined package is modelled as one run --- not a sum}\n",
+    "\\footnotesize Because the two families' effects overlap, the joint scenario is projected in a single run: about \\textbf{%s deaths} averted and the %d probability of CVD death before age 70 cut to \\textbf{%s} (from %s), at about \\textbf{%s per death averted}.\n",
     "\\end{combinedblock}\n"),
     fmt_short(combo_da), HZ_END, fmt_pct(combo_q50,1), fmt_pct(base_q_2050,1), fmt_usd(combo_cpda)))
 } else {
@@ -709,9 +966,11 @@ if (has_joint) {
 }
 ```
 
-## CVD premature mortality: trajectory and neighbours
+\srcmethod{\textbf{Source:} results contract (\texttt{09\_deck\_results.rds}) + combined workbook; `r (HZ_START+1L)` population from model demography (UN WPP 2024). \textbf{Method:} joint package $=$ one projection applying both families (not their sum); the two per-capita columns $=$ each row's cumulative additional cost (undiscounted / discounted, `r fmt_pct(disc_rate*100,0)`/yr, `r price_year` US\$) $\div$ (25 $\times$ `r (HZ_START+1L)` national population). \costcaveat}
 
-```{r fig-40q30, fig.width=9.6, fig.height=4.7, out.width="\\linewidth"}
+## Indonesia's premature cardiovascular mortality can fall toward its neighbours
+
+```{r fig-40q30, fig.width=9.6, fig.height=4.2, out.width="\\linewidth"}
 # Remove the modeled status-quo baseline
 idn_scen_plot <- idn_scen[scenario != "baseline"]
 lab_scen <- idn_scen_plot[year == HZ_END]
@@ -777,13 +1036,13 @@ ggplot() +
   ) +
   scale_y_continuous(labels = function(x) paste0(x, "%")) +
   labs(
-    title = "CVD 40q30 in Indonesia: observed, projected, and neighbours",
-    subtitle = "Probability of dying from CVD between ages 30 and 70",
+    title = "Probability of death from CVD before age 70: observed, projected, and neighbours",
+    subtitle = "Chance of dying from CVD between exact ages 30 and 70",
     x = NULL,
-    y = "CVD 40q30",
+    y = "Probability of CVD death before age 70 (%)",
     caption = paste(
       "Indonesia observed history (solid, to 2023) and ASEAN comparators are WPP-scaled reference series.",
-      "\nModeled intervention scenarios are dashed for 2025–2050.",
+      "\nModelled intervention scenarios are dashed for 2025–2050.",
       "\nASEAN comparator trends use linear extrapolation for illustrative reference."
     )
   ) +
@@ -797,9 +1056,137 @@ ggplot() +
   )
 ```
 
-# What it means for Indonesia
+\srcmethod{\textbf{Source:} combined results workbook (annual probability-of-death sheet, R-reconciled values); ASEAN comparator series in \texttt{data/raw/}. \textbf{Method:} model scenarios (dashed) run `r HZ_START`--`r HZ_END` for the six modelled cardiovascular causes over exact ages 30--70; comparators are WPP-scaled reference series shown for context only.}
 
-## Policy implications
+# A stronger care cascade: the 70-30-30 to 70-70-70 strategy
+
+## The cascade scale-up is ambitious but staged
+
+\footnotesize Hypertension and type-2 diabetes are modelled with \textbf{diagnosed $\rightarrow$ treated $\rightarrow$ controlled} care cascades; \textbf{cholesterol} treatment coverage follows hypertension coverage. Coverage rises in two stages, then holds.
+
+\vspace{1pt}
+\begin{columns}[T]
+\begin{column}{0.5\textwidth}
+\begin{clinicalblock}{Two staged milestones}
+\footnotesize
+\begin{itemize}\itemsep1pt
+  \item \textbf{`r casc_ytar1` --- 70-30-30:} `r fmt_pct(casc_diag*100,0)` diagnosed, `r fmt_pct(casc_t30*100,0)` of those treated, `r fmt_pct(casc_c30*100,0)` of those controlled.
+  \item \textbf{`r casc_ytar2` --- 70-70-70:} `r fmt_pct(casc_diag*100,0)` diagnosed, `r fmt_pct(casc_t40*100,0)` treated, `r fmt_pct(casc_c40*100,0)` controlled; held through `r casc_y1`.
+  \item Linear scale-up from the observed baseline; coverage already above a milestone is \textbf{not scaled down}.
+\end{itemize}
+\end{clinicalblock}
+\end{column}
+\begin{column}{0.48\textwidth}
+\begin{combinedblock}{Shares of all people with the condition}
+\footnotesize
+\begin{tabular}{lcc}
+ & \textbf{`r casc_ytar1`} & \textbf{`r casc_ytar2`}\\
+\midrule
+Diagnosed  & `r fmt_pct(casc_diag*100,0)` & `r fmt_pct(casc_diag*100,0)`\\
+Treated    & `r fmt_pct(casc_diag*casc_t30*100,0)` & `r fmt_pct(casc_diag*casc_t40*100,0)`\\
+Controlled & `r fmt_pct(casc_diag*casc_t30*casc_c30*100,1)` & `r fmt_pct(casc_diag*casc_t40*casc_c40*100,1)`\\
+\end{tabular}\\[3pt]
+{\scriptsize treated $=70\%\times\{30,70\}\%$; controlled $=$ treated $\times\{30,70\}\%$.}
+\end{combinedblock}
+\end{column}
+\end{columns}
+
+\vspace{1pt}
+\footnotesize \textbf{Effective modelled coverage} $=$ controlled $+\tfrac{1}{2}\times$ treated-but-uncontrolled $=$ \textbf{`r fmt_pct(casc_eff30*100,2)`} (`r casc_ytar1`) and \textbf{`r fmt_pct(casc_eff40*100,2)`} (`r casc_ytar2`): full effect to controlled patients, half to treated-but-uncontrolled.
+
+\srcmethod{\textbf{Source:} cascade workbook (\texttt{Cascade\_Assumptions}, \texttt{Cascade\_Trajectory}); isolated runner; NCD-RisC coverage inputs. \textbf{Method:} nested targets on the diagnosed/treated/controlled shares; piecewise-linear scale-up, no backsliding.}
+
+## Indonesia's hypertension cascade can progress in two achievable stages
+
+```{r fig-htn-cascade, fig.width=9.4, fig.height=3.7, out.width="0.94\\linewidth"}
+htn_long <- melt(htn_sh[, .(year, Diagnosed = diagnosed, Treated = treated, Controlled = controlled)],
+                 id.vars = "year", variable.name = "stage", value.name = "share")
+htn_long <- htn_long[!is.na(share)]
+htn_long[, stage := factor(stage, levels = c("Diagnosed","Treated","Controlled"))]
+htn_long[, xlab := factor(year, levels = c(HZ_START, casc_ytar1, casc_ytar2),
+                          labels = c(paste0("Baseline\n(", HZ_START, ")"),
+                                     paste0(casc_ytar1, "\n(70-30-30)"),
+                                     paste0(casc_ytar2, "\n(70-70-70)")))]
+casc_blues <- c(Diagnosed = "#9ECAE1", Treated = "#4292C6", Controlled = "#08519C")
+ggplot(htn_long, aes(xlab, share, fill = stage)) +
+  geom_col(position = position_dodge2(width = 0.8, preserve = "single"), width = 0.8) +
+  geom_text(aes(label = paste0(formatC(share * 100, format = "f", digits = 1), "%")),
+            position = position_dodge2(width = 0.8, preserve = "single"),
+            vjust = -0.4, size = 3.0, fontface = "bold") +
+  scale_fill_manual(values = casc_blues) +
+  scale_y_continuous(labels = function(x) paste0(x * 100, "%"), limits = c(0, 0.80),
+                     expand = expansion(mult = c(0, 0.02))) +
+  labs(title = "Hypertension care cascade under the 70-30-30 to 70-70-70 scale-up",
+       subtitle = "Diagnosed, treated, and controlled shares of all people with hypertension (intervention scenario)",
+       x = NULL, y = "% of people with hypertension") +
+  theme_exec(11) +
+  theme(legend.position = "top", panel.grid.major.x = element_blank())
+```
+
+\srcmethod{\textbf{Source:} cascade \texttt{Cascade\_Trajectory} (sex-averaged) and \texttt{Cascade\_Assumptions}; scale-up begins `r HZ_START+1L`. \textbf{Method:} baseline (`r HZ_START`) shows only measured treated/controlled --- diagnosis is not modelled at baseline, so no diagnosed bar. Type-2 diabetes follows the same targets (baseline treated $\approx$ `r fmt_pct(dm_base$treated*100,1)`, controlled $\approx$ `r fmt_pct(dm_base$controlled*100,1)`).}
+
+## Stronger prevention lowers premature deaths at a rising but bounded cost
+
+```{r fig-casc-2panel, fig.width=9.6, fig.height=3.7, out.width="\\linewidth"}
+lab_q  <- c(baseline = "Baseline (current course)", cascade = "Intervention")
+qdat <- copy(casc_q)[, series := ifelse(scenario == "baseline", "Baseline (current course)", "Intervention")]
+qdat[, panel := "Probability of death from CVD before age 70 (%)"]
+setnames(qdat, "q", "value")
+cdat <- rbind(
+  casc_cost[, .(year, series = "Baseline (current course)", value = cum_base / 1e9)],
+  casc_cost[, .(year, series = "Intervention",              value = cum_scen / 1e9)])
+cdat[, panel := "Cumulative discounted health-system cost (US$ billions)"]
+two <- rbind(qdat[, .(year, series, value, panel)], cdat)
+two[, panel := factor(panel, levels = c("Probability of death from CVD before age 70 (%)",
+                                         "Cumulative discounted health-system cost (US$ billions)"))]
+casc_pal <- c("Baseline (current course)" = col_baseline, "Intervention" = "#D55E00")
+ends <- two[, .SD[year == max(year)], by = .(series, panel)]
+ggplot(two, aes(year, value, colour = series)) +
+  geom_line(linewidth = 1.15) +
+  ggrepel::geom_text_repel(data = ends, aes(label = series), size = 2.7, fontface = "bold",
+                           hjust = 0, nudge_x = 1.0, direction = "y", segment.colour = NA,
+                           max.overlaps = Inf, seed = 3, show.legend = FALSE) +
+  facet_wrap(~panel, scales = "free_y") +
+  scale_colour_manual(values = casc_pal) +
+  scale_x_continuous(limits = c(HZ_START, casc_y1 + 6), breaks = seq(HZ_START, casc_y1, 5)) +
+  labs(title = NULL, x = "Year", y = NULL) +
+  theme_exec(11) +
+  theme(legend.position = "none",
+        strip.text = element_text(face = "bold", colour = col_wbnavy, size = 10),
+        panel.grid.major.x = element_line(colour = "grey92", linewidth = 0.25))
+```
+
+\srcmethod{\textbf{Source:} cascade workbook --- annual probability-of-death sheet (R-reconciled) and \texttt{Annual\_Cost}, cumulatively summed and reconciled to \texttt{Budget\_Impact}. \textbf{Method:} probability over the six CVD causes, ages 30--70; cumulative discounted health-system cost (`r fmt_pct(casc_disc*100,0)`/yr to `r HZ_START`, `r casc_price` US\$) of the CVD primary-care and type-2 diabetes cascades. \costcaveat}
+
+## `r title_cascade_results`
+
+```{r tbl-cascade, results='asis'}
+snp <- lapply(casc_tab_years, casc_snapshot); names(snp) <- as.character(casc_tab_years)
+mm  <- function(x) formatC(x / 1e6, format = "f", digits = 3, big.mark = ",")   # deaths, millions
+bn  <- function(x) formatC(x / 1e9, format = "f", digits = 2)                    # cost, US$ billions
+casc_tb <- data.table(
+  Metric = c("\\quad Baseline (current course)", "\\quad Intervention",
+             "\\quad Baseline (current course)", "\\quad Intervention",
+             "Additional cost (US\\$ billion, discounted)", "Deaths prevented (million)"),
+  y1 = c(mm(snp[[1]]$d_base), mm(snp[[1]]$d_scen), bn(snp[[1]]$c_base), bn(snp[[1]]$c_scen), bn(snp[[1]]$c_add), mm(snp[[1]]$d_av)),
+  y2 = c(mm(snp[[2]]$d_base), mm(snp[[2]]$d_scen), bn(snp[[2]]$c_base), bn(snp[[2]]$c_scen), bn(snp[[2]]$c_add), mm(snp[[2]]$d_av)),
+  y3 = c(mm(snp[[3]]$d_base), mm(snp[[3]]$d_scen), bn(snp[[3]]$c_base), bn(snp[[3]]$c_scen), bn(snp[[3]]$c_add), mm(snp[[3]]$d_av)))
+kbl(casc_tb, format = "latex", booktabs = TRUE, escape = FALSE,
+    col.names = c("Cumulative from 2025 through year", as.character(casc_tab_years)),
+    align = "lrrr") |>
+  kable_styling(latex_options = c("hold_position"), font_size = 8.5) |>
+  column_spec(1, width = "6.6cm") |> column_spec(2:4, width = "2.2cm") |>
+  row_spec(0, bold = TRUE) |>
+  pack_rows("Projected deaths --- CVD (six causes) + type-2 diabetes (million)", 1, 2, bold = TRUE, latex_gap_space = "0.25em", escape = FALSE) |>
+  pack_rows("Projected health-system cost (US\\$ billion, discounted)", 3, 4, bold = TRUE, latex_gap_space = "0.25em", escape = FALSE) |>
+  pack_rows("Net effect of the strategy", 5, 6, bold = TRUE, latex_gap_space = "0.25em")
+```
+
+\srcmethod{\textbf{Source:} cascade \texttt{Annual\_Mortality} and \texttt{Annual\_Cost}/\texttt{Budget\_Impact}; scale-up begins `r HZ_START+1L`. \textbf{Method:} each column cumulative from `r HZ_START` through that year; deaths prevented $=$ baseline $-$ intervention (six CVD causes $+$ type-2 diabetes); additional cost $=$ intervention $-$ baseline (discounted `r fmt_pct(casc_disc*100,0)` to `r HZ_START`, `r casc_price` US\$). \costcaveat}
+
+# What this means for policy
+
+## Prevention and clinical care together offer the biggest, most affordable gains
 
 \begin{columns}[T]
 \begin{column}{0.5\textwidth}
@@ -817,26 +1204,28 @@ cat("  \\item \\textbf{Clinical scale-up delivers large, durable gains} in survi
   \item \textbf{Sequence for early wins.} Tobacco taxation and other prevention policies can start cutting risk quickly and cheaply, while clinical capacity scales up.
 ```{r impl-right, results='asis'}
 if (has_joint)
-  cat(sprintf("  \\item \\textbf{The 40q30 target is within reach.} The combined package bends Indonesia's premature-CVD-mortality curve down by about %s by %d.\n", fmt_pct(combo_qred,0), HZ_END))
+  cat(sprintf("  \\item \\textbf{The premature-mortality target is within reach.} The combined package bends Indonesia's probability of death from CVD before age 70 down by about %s by %d.\n", fmt_pct(combo_qred,0), HZ_END))
 ```
 \end{itemize}
 \end{column}
 \end{columns}
 
-\vspace{2pt}
-\footnotesize These are model findings; translating them into policy requires judgement on feasibility, financing and delivery. Model results quantify the \emph{potential}; they are not a delivery guarantee.
+\srcmethod{\textbf{Source:} results contract (\texttt{09\_deck\_results.rds}); cascade workbook. \textbf{Method:} interpretation of modelled deaths averted, premature-mortality reduction, and cost per death averted; policy translation needs judgement on feasibility, financing, and delivery. \costcaveat}
 
-## Limitations
+## What these results can and cannot tell us
 
 \begin{itemize}\footnotesize\itemsep3pt
-  \item Results depend on \textbf{modeled epidemiological estimates} (GBD) and calibration; real burden may differ.
+  \item Results depend on \textbf{modelled epidemiological estimates} (GBD) and calibration; the real burden may differ.
   \item \textbf{Effect sizes, future coverage, and unit costs are uncertain}; interventions are assumed to reach and sustain their targets.
-  \item The disease model is \textbf{simplified} (healthy $\to$ living-with-CVD $\to$ death; no remission; no comorbidity interactions).
-  \item Cost-effectiveness is expressed as \textbf{cost per death averted}; morbidity and productivity effects are not monetised here.
-  \item Projections are \textbf{scenarios, not forecasts or guarantees}; they show what is achievable if interventions are delivered as modeled.
+  \item The disease model is \textbf{simplified} (healthy $\to$ living with CVD $\to$ death; no recovery; no comorbidity interactions).
+  \item Value for money is expressed as \textbf{cost per death averted}; effects on illness (morbidity) and productivity are not valued in money here.
+  \item \textbf{Costing results are preliminary.} Unit costs, service use, and delivery assumptions require further validation against \textbf{BPJS and Ministry of Health} data before policy use.
+  \item Projections are \textbf{scenarios, not forecasts or guarantees}; they show what is achievable if interventions are delivered as modelled.
 \end{itemize}
 
-## Three things to remember
+\srcmethod{\textbf{Source:} Indonesia CVD model and its input workbooks (GBD 2023; UN WPP 2024; FAIR Choices effects; programme and policy unit costs). \textbf{Method:} qualitative statement of the assumptions and uncertainties that bound the quantitative results above.}
+
+## The case for action: two levers, affordable, and a reachable target
 
 \begin{columns}[T]
 \begin{column}{0.33\textwidth}
@@ -856,9 +1245,9 @@ cat(sprintf("\\begin{phblock}{2. Prevention is affordable}\n\\footnotesize Popul
 \begin{column}{0.33\textwidth}
 ```{r remember-3, results='asis'}
 if (has_joint) {
-  cat(sprintf("\\begin{clinicalblock}{3. A reachable target}\n\\footnotesize Premature CVD mortality (40q30) falls \\textbf{%s} by %d under the combined package.\n\\end{clinicalblock}\n", fmt_pct(combo_qred,0), HZ_END))
+  cat(sprintf("\\begin{clinicalblock}{3. A reachable target}\n\\footnotesize The probability of death from CVD before age 70 falls \\textbf{%s} by %d under the combined package.\n\\end{clinicalblock}\n", fmt_pct(combo_qred,0), HZ_END))
 } else {
-  cat(sprintf("\\begin{clinicalblock}{3. A reachable target}\n\\footnotesize All clinical interventions cut premature CVD mortality (40q30) by \\textbf{%s} by %d.\n\\end{clinicalblock}\n", fmt_pct(clin_qred,0), HZ_END))
+  cat(sprintf("\\begin{clinicalblock}{3. A reachable target}\n\\footnotesize All clinical interventions cut the probability of death from CVD before age 70 by \\textbf{%s} by %d.\n\\end{clinicalblock}\n", fmt_pct(clin_qred,0), HZ_END))
 }
 ```
 \end{column}
@@ -875,6 +1264,8 @@ if (has_joint) {
                      "of deaths through %d at a modest cost per death averted.\n\\end{center}\n"), HZ_END))
 }
 ```
+
+\srcmethod{\textbf{Source:} results contract (\texttt{09\_deck\_results.rds}). \textbf{Method:} deaths averted cumulative `r HZ_START`--`r HZ_END`; reduction in the probability of death from CVD before age 70 in `r HZ_END`; cost per death averted uses discounted additional cost. \costcaveat}
 
 # Technical appendix
 
@@ -897,13 +1288,12 @@ xwd[, IDesc := gsub("_", "\\\\_", scenario)]
 xw <- xwd[, .(Family, ID = IDesc, Label = scenario_label)]
 kbl(xw, format="latex", booktabs=TRUE, escape=FALSE,
     col.names=c("Family","Workbook scenario id","Executive label"), align="lll") |>
-  kable_styling(latex_options=c("hold_position","scale_down"), font_size=6) |>
-  column_spec(1, bold=TRUE) |> column_spec(2, monospace=TRUE) |>
-  row_spec(0, bold=TRUE)
+  kable_styling(latex_options=c("hold_position"), font_size=5.2) |>
+  column_spec(1, bold=TRUE, width="3.0cm") |> column_spec(2, monospace=TRUE, width="4.0cm") |>
+  column_spec(3, width="6.6cm") |> row_spec(0, bold=TRUE)
 ```
 
-\vspace{1pt}
-\tiny Packages are single joint runs of their child measures; child measures are omitted from the main tables to avoid double-counting. This crosswalk lists exactly the scenarios produced in the current run.
+\srcmethod{\textbf{Source:} combined workbook \texttt{Scenario\_Catalog} (binding active-scenario contract). \textbf{Method:} identity/labels/family read from the current run; excluded interventions never appear; packages are single joint runs of their children (omitted from main tables to avoid double-counting).}
 
 ## Appendix 2 --- Definitions, horizons and assumptions
 
@@ -912,27 +1302,50 @@ kbl(xw, format="latex", booktabs=TRUE, escape=FALSE,
 \begin{column}{0.5\textwidth}
 \textbf{Metrics}
 \begin{itemize}\scriptsize\itemsep2pt
-  \item \textbf{Deaths averted (cumulative)} $=\sum_{t=`r HZ_START`}^{`r HZ_END`}(\text{baseline deaths}_t-\text{scenario deaths}_t)$, across modeled CVD \& diabetes causes.
+  \item \textbf{Deaths averted (cumulative)} $=\sum_{t=`r HZ_START`}^{`r HZ_END`}(\text{baseline deaths}_t-\text{scenario deaths}_t)$, across modelled CVD \& diabetes causes.
   \item \textbf{\% reduction in deaths, `r HZ_END`} $=100\times(\text{baseline}-\text{scenario})/\text{baseline}$ in `r HZ_END`.
-  \item \textbf{CVD 40q30} = probability of dying of CVD between exact ages 30 and 70 (six CVD causes, both sexes, single-year life table).
-  \item \textbf{\% reduction in 40q30, `r HZ_END`}: analogous to deaths.
+  \item \textbf{Probability of death from CVD before age 70} $=$ probability of dying of CVD between exact ages 30 and 70 (six CVD causes, both sexes, single-year life table).
+  \item \textbf{\% reduction in that probability, `r HZ_END`}: analogous to deaths.
 \end{itemize}
 \end{column}
 \begin{column}{0.5\textwidth}
-\textbf{Costing \& cost-effectiveness}
+\textbf{Costing \& value for money}
 \begin{itemize}\scriptsize\itemsep2pt
   \item Horizon `r HZ_START`--`r HZ_END`; cost discount rate `r fmt_pct(disc_rate*100,0)`/yr; price year `r price_year`.
   \item Costs in \textbf{market US\$}; cost perspective: `r cost_perspective`.
-  \item \textbf{Cost per death averted} $=$ cumulative \textbf{discounted} incremental cost $\div$ cumulative \textbf{undiscounted} deaths averted.
+  \item \textbf{Cost per death averted} $=$ cumulative \textbf{discounted} additional (incremental) cost $\div$ cumulative \textbf{undiscounted} deaths averted.
   \item A ``Dominant'' scenario averts deaths while lowering cost; ``not defined'' means no deaths averted.
 \end{itemize}
 \end{column}
 \end{columns}
 
 \vspace{3pt}
-\scriptsize \textbf{Model.} Discrete-time state-transition model; single-year ages 0--95; six CVD causes (IHD, ischemic stroke, intracerebral haemorrhage, hypertensive heart disease, rheumatic heart disease, cardiomyopathy \& myocarditis) plus type-2 diabetes; calibrated to GBD 2023; demography and life expectancy from UN WPP 2024. \textbf{Data provenance:} every number is read from the current-run results contract (\texttt{output/09\_deck\_results.rds}) and the workbooks' literal CVD 40q30 series; scenario identity follows the \texttt{Scenario\_Catalog} contract (binding \texttt{include\_flag}). No Excel recalculation is used.
+\scriptsize \textbf{Model.} Discrete-time state-transition model; single-year ages 0--95; six CVD causes (IHD, ischemic stroke, intracerebral haemorrhage, hypertensive heart disease, rheumatic heart disease, cardiomyopathy \& myocarditis) plus type-2 diabetes; calibrated to GBD 2023; demography and life expectancy from UN WPP 2024. \textbf{Data provenance:} every ordinary-run number is read from the current-run results contract (\texttt{output/09\_deck\_results.rds}) and the workbooks' literal probability-of-death series; the cascade strategy is read from its isolated workbook; scenario identity follows the \texttt{Scenario\_Catalog} contract (binding \texttt{include\_flag}). No Excel recalculation is used.
 
-## Appendix 3 --- References
+## Appendix 3 --- How costs are calculated
+
+\footnotesize Intervention-based costing adapted from the DCP Cost Model of @Watkins2020ResourceRequirements, from a `r cost_perspective` perspective with annual projections. For intervention $i$, sex/age group $s$, year $t$:
+
+\vspace{-2pt}
+\begin{columns}[T]
+\begin{column}{0.52\textwidth}
+{\scriptsize
+\begin{align*}
+C_{i,s,t} &= PIN_{i,s,t}\times cov_{i,s,t}\times f_i\times uc_i\\[2pt]
+\Delta C_{s,t} &= C_{s,t}-C_{0,t}\\[2pt]
+PV(\Delta C_s) &= \sum_{t=`r HZ_START+1L`}^{`r HZ_END`}\frac{\Delta C_{s,t}}{(1+r)^{\,t-`r HZ_START`}}\\[2pt]
+\text{Cost per death prevented}_s &= \frac{PV(\Delta C_s)}{\sum_{t=`r HZ_START+1L`}^{`r HZ_END`}(D_{0,t}-D_{s,t})}
+\end{align*}}
+\end{column}
+\begin{column}{0.46\textwidth}
+\scriptsize
+$PIN$ = people in need (population $\times$ epidemiological need); $cov$ = coverage (baseline or scenario); $f_i$ = services per person per year; $uc_i$ = Indonesia-adjusted unit cost; subscript $0$ = baseline (current course), $s$ = scenario; $r$ = `r fmt_pct(disc_rate*100,0)`/yr discount rate; price year `r price_year`; currency market US\$; perspective `r cost_perspective`. Deaths $D$ remain \textbf{undiscounted} in the cost-per-death calculation. Downstream cost offsets are \textbf{excluded}.
+\end{column}
+\end{columns}
+
+\srcmethod{\textbf{Source:} adapted from Watkins et al. (2020); unit costs, coverage, and people-in-need from the input workbooks and \texttt{Annual\_Cost}; demography from UN WPP 2024. \textbf{Method:} annual costs by intervention $\times$ group $\times$ year, differenced against baseline, discounted to the `r HZ_START` base year. \costcaveat}
+
+## Appendix 4 --- References
 
 \scriptsize
 
