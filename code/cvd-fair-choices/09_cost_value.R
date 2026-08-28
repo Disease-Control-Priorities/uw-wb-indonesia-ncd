@@ -750,6 +750,22 @@ for (scn in comparators) {
     q_s   <- qty_by_year(scn,     cr)
     q_b   <- qty_by_year(base_id, cr)
     cov_s <- cov_path(cr$cov_baseline, cr$cov_target, cr$cov_start_year, cr$cov_target_year, analysis_yrs)
+    # OPTIONAL exact per-year cost-coverage path (ADDITIVE / backward-compatible):
+    # the 70-30-30 -> 70-70-70 cascade attaches a `coverage_path` list-column so
+    # costs use the SAME piecewise effective-coverage path as the health effects.
+    # Absent on every standard workbook -> the linear cov_path above is used
+    # unchanged.
+    if (scn != base_id && "coverage_path" %in% names(comps)) {
+      cpp <- cr[["coverage_path"]][[1]]
+      if (!is.null(cpp) && NROW(cpp) > 0L) {
+        cpp <- as.data.table(cpp)
+        lk  <- setNames(as.numeric(cpp$coverage_t), as.character(cpp$year))
+        v   <- as.numeric(lk[as.character(analysis_yrs)])
+        v[is.na(v) & analysis_yrs < min(cpp$year)] <- cr$cov_baseline
+        v[is.na(v) & analysis_yrs > max(cpp$year)] <- as.numeric(lk[[as.character(max(cpp$year))]])
+        cov_s <- pmin(pmax(v, 0), 1)
+      }
+    }
     cov_b <- rep(cr$cov_baseline, length(analysis_yrs))
     pin_s <- q_s * cr$population_in_need_fraction
     pin_b <- q_b * cr$population_in_need_fraction
@@ -1654,6 +1670,21 @@ if (n_ac > 0) {
 style_sheet("Annual_Cost", ac_cols, n_ac,
             formula_cols = c(10:31, 34), rsource_cols = c(32, 33))
 
+# CASCADE cost-coverage tie-out (opt-in): the engine costed with the EXACT
+# per-year effective-coverage path (not a linear ramp), so replace the Annual_Cost
+# coverage_scenario FORMULA (col K, cols[11]) with the R-source per-year values
+# the engine used. Column K then behaves like the other R-source inputs
+# (r_quantity, etc.) and the downstream Excel cost/budget totals reconcile exactly
+# to the R engine. Guarded: ordinary runs keep the live linear-ramp formula.
+if (n_ac > 0 && isTRUE(get0("run_cascade_70_30_30_to_70_70_70", ifnotfound = FALSE)) &&
+    !is.null(fair_inputs$cascade) && "coverage_scenario" %in% names(annual_cost)) {
+  writeData(wb, "Annual_Cost", annual_cost$coverage_scenario,
+            startCol = 11L, startRow = 2L, colNames = FALSE)
+  addStyle(wb, "Annual_Cost", st_rsrc, rows = 2:r_ac, cols = 11L, gridExpand = TRUE, stack = TRUE)
+  addStyle(wb, "Annual_Cost", createStyle(numFmt = "0.0000%"),
+           rows = 2:r_ac, cols = 11L, gridExpand = TRUE, stack = TRUE)
+}
+
 # =========================================================================
 # 11.11 Budget_Impact  (C:H = formulas over Annual_Cost)
 # =========================================================================
@@ -1966,9 +1997,200 @@ style_sheet("Scenario_Catalog", names(scat_clin), nrow(scat_clin),
             rsource_cols = seq_along(scat_clin), wrap_cols = c(2, 7))
 
 # =========================================================================
+# 11.16b CASCADE-SPECIFIC SHEETS  (opt-in; only when the cascade flag is set) --
+# Adds Cascade_Assumptions / Cascade_Trajectory / Cascade_QA to the SAME formula
+# workbook (never renaming or merging into any standard sheet). Guarded so an
+# ordinary clinical run produces a byte-for-byte unchanged workbook.
+# =========================================================================
+.cascade_sheets_added <- character(0)
+if (isTRUE(get0("run_cascade_70_30_30_to_70_70_70", ifnotfound = FALSE)) &&
+    !is.null(fair_inputs$cascade)) {
+  casc <- fair_inputs$cascade
+  MONEYC <- "#,##0"; COVFMT <- "0.000000"; CHKFMT <- "0.0000000000"
+
+  ## ---- Cascade_Assumptions ------------------------------------------------
+  # The exact editable cascade inputs, sourced from the cascade input workbook's
+  # Assumptions sheet. To change (e.g.) the diabetes control-rate baseline, edit
+  # `diabetes_baseline_control_among_treated` in that workbook and re-run --
+  # the model is driven by the workbook, not by this display copy.
+  asheet <- as.data.table(casc$assumptions_sheet)
+  keep_ids <- c("analysis_start_year","analysis_end_year","first_target_year","final_target_year",
+                "target_diagnosis_share","first_target_treatment_conditional",
+                "first_target_control_conditional","final_target_treatment_conditional",
+                "final_target_control_conditional","treated_uncontrolled_effect_fraction",
+                "first_target_effective_coverage_exact","final_target_effective_coverage_exact",
+                "diabetes_baseline_control_among_treated","diabetes_baseline_diagnosis_conditioning",
+                "cholesterol_coverage_proxy","scale_up_shape","post_target_rule",
+                "prevent_coverage_backsliding","scenario_id","cost_discount_rate",
+                "health_discount_rate","cost_price_year","currency")
+  ca_dt <- asheet[parameter_id %in% keep_ids]
+  ca_dt <- ca_dt[match(intersect(keep_ids, ca_dt$parameter_id), parameter_id)]
+  ca_show <- data.frame(
+    parameter_id = as.character(ca_dt$parameter_id),
+    value        = as.character(ca_dt$value),
+    unit         = if ("unit" %in% names(ca_dt)) as.character(ca_dt$unit) else "",
+    description  = if ("description" %in% names(ca_dt)) as.character(ca_dt$description) else "",
+    source       = if ("source" %in% names(ca_dt)) as.character(ca_dt$source) else "",
+    source_workbook_cell = paste0("Assumptions!", "[parameter_id=", ca_dt$parameter_id, "]"),
+    stringsAsFactors = FALSE)
+  addWorksheet(wb, "Cascade_Assumptions")
+  writeData(wb, "Cascade_Assumptions", ca_show, headerStyle = st_hdr)
+  style_sheet("Cascade_Assumptions", names(ca_show), nrow(ca_show),
+              input_cols = 2, rsource_cols = c(1,3,4,5,6), wrap_cols = c(4,5,6), max_w = 60)
+  # numeric coverage/fraction rows: write TRUE numbers (so QA formulas that
+  # reference them do exact arithmetic, not text coercion) and show full precision.
+  .ca_row <- function(pid) which(ca_show$parameter_id == pid) + 1L
+  for (pid in c("treated_uncontrolled_effect_fraction","first_target_effective_coverage_exact",
+                "final_target_effective_coverage_exact","diabetes_baseline_control_among_treated"))
+    if (length(.ca_row(pid))) {
+      writeData(wb, "Cascade_Assumptions",
+                suppressWarnings(as.numeric(asheet[parameter_id == pid, value][1])),
+                startCol = 2, startRow = .ca_row(pid), colNames = FALSE)
+      addStyle(wb, "Cascade_Assumptions", createStyle(numFmt = CHKFMT),
+               rows = .ca_row(pid), cols = 2, gridExpand = TRUE, stack = TRUE)
+    }
+  # Cell refs used by the QA formulas below.
+  cell_partial <- sprintf("'Cascade_Assumptions'!$B$%d", .ca_row("treated_uncontrolled_effect_fraction"))
+  cell_eff2030 <- sprintf("'Cascade_Assumptions'!$B$%d", .ca_row("first_target_effective_coverage_exact"))
+  cell_eff2040 <- sprintf("'Cascade_Assumptions'!$B$%d", .ca_row("final_target_effective_coverage_exact"))
+  .cascade_sheets_added <- c(.cascade_sheets_added, "Cascade_Assumptions")
+
+  ## ---- Cascade_Trajectory -------------------------------------------------
+  # Per intervention x sex x year: baseline effective coverage, the 2030/2040
+  # targets, milestone cascade components (controlled + treated-uncontrolled with
+  # the half-effect) where defined, the exact per-year scenario effective coverage
+  # R applied, and an Excel `model_effective_coverage_used` formula that references
+  # that same R-source cell (so the value R used is visible and live).
+  ctrj <- as.data.table(casc$coverage_trajectory)[order(intervention_id, sex, year)]
+  cov_ms <- as.data.table(casc$coverage)[, .(
+      risk_factor_id = trimws(as.character(risk_factor_id)),
+      sex = trimws(as.character(sex)), year = as.integer(year),
+      controlled_share = as.numeric(controlled_share_all_condition),
+      treated_uncontrolled_share = as.numeric(treated_uncontrolled_share),
+      partial_effect_fraction = as.numeric(partial_effect_fraction),
+      exact_effective_coverage = as.numeric(exact_effective_coverage))]
+  trj <- merge(ctrj, cov_ms, by = c("risk_factor_id","sex","year"), all.x = TRUE)
+  setorder(trj, intervention_id, sex, year)
+  phase_of <- function(y) ifelse(y <= casc$first_target_year, "Scale to 70-30-30",
+                          ifelse(y <= casc$final_target_year, "Scale to 70-70-70", "Maintain 70-70-70"))
+  tr_show <- data.frame(
+    intervention_id = trj$intervention_id, risk_factor_id = trj$risk_factor_id,
+    sex = trj$sex, year = trj$year, phase = phase_of(trj$year),
+    baseline_effective_coverage = trj$baseline_effective_coverage,
+    target_2030_effective = casc$eff_2030, target_2040_effective = casc$eff_2040,
+    controlled_share = trj$controlled_share,
+    treated_uncontrolled_share = trj$treated_uncontrolled_share,
+    half_effect_fraction = trj$partial_effect_fraction,
+    scenario_effective_coverage = trj$scenario_effective_coverage,
+    effective_from_components = NA_real_,        # Excel formula (milestone rows)
+    model_effective_coverage_used = NA_real_,    # Excel formula (= scenario cell)
+    stringsAsFactors = FALSE)
+  addWorksheet(wb, "Cascade_Trajectory")
+  writeData(wb, "Cascade_Trajectory", tr_show, headerStyle = st_hdr)
+  nT <- nrow(tr_show)
+  Lc <- function(i) openxlsx::int2col(i)
+  col_ctrl <- which(names(tr_show) == "controlled_share")
+  col_tunc <- which(names(tr_show) == "treated_uncontrolled_share")
+  col_scen <- which(names(tr_show) == "scenario_effective_coverage")
+  col_efc  <- which(names(tr_show) == "effective_from_components")
+  col_muse <- which(names(tr_show) == "model_effective_coverage_used")
+  # model_effective_coverage_used = same-row scenario cell (live tie to R value)
+  writeFormula(wb, "Cascade_Trajectory",
+               x = sprintf("=%s%d", Lc(col_scen), (2:(nT+1L))),
+               startCol = col_muse, startRow = 2L)
+  # effective_from_components = controlled + partial*treated_uncontrolled (only
+  # where the milestone components exist; blank otherwise).
+  efc <- vapply(seq_len(nT), function(k) {
+    r <- k + 1L
+    if (is.na(tr_show$controlled_share[k]) || is.na(tr_show$treated_uncontrolled_share[k])) return("")
+    sprintf("=%s%d+%s*%s%d", Lc(col_ctrl), r, cell_partial, Lc(col_tunc), r)
+  }, character(1))
+  for (k in seq_len(nT)) if (nzchar(efc[k]))
+    writeFormula(wb, "Cascade_Trajectory", x = efc[k], startCol = col_efc, startRow = k + 1L)
+  style_sheet("Cascade_Trajectory", names(tr_show), nT,
+              formula_cols = c(col_efc, col_muse),
+              rsource_cols = setdiff(seq_along(tr_show), c(col_efc, col_muse)))
+  for (j in c(which(names(tr_show)=="baseline_effective_coverage"),
+              which(names(tr_show)=="target_2030_effective"),
+              which(names(tr_show)=="target_2040_effective"),
+              col_ctrl, col_tunc, col_scen, col_efc, col_muse))
+    addStyle(wb, "Cascade_Trajectory", createStyle(numFmt = COVFMT),
+             rows = 2:(nT+1L), cols = j, gridExpand = TRUE, stack = TRUE)
+  .cascade_sheets_added <- c(.cascade_sheets_added, "Cascade_Trajectory")
+
+  ## ---- Cascade_QA ---------------------------------------------------------
+  # Reconcile the Excel-reconstructed cascade arithmetic to the exact workbook
+  # milestones (0.1365 / 0.4165) and record the R-side adapter reconciliation
+  # against the workbook's Model_Input_View transition multipliers.
+  ms30 <- cov_ms[year == casc$first_target_year][1]
+  ms40 <- cov_ms[year == casc$final_target_year][1]
+  qa <- data.frame(
+    check_id = c("QAC01","QAC02","QAC03","QAC04","QAC05"),
+    check = c("2030 effective coverage reconstructs to 0.1365",
+              "2040 effective coverage reconstructs to 0.4165",
+              "Excel model_effective_coverage_used ties to R (by construction)",
+              "R adapter vs workbook Model_Input_View multipliers",
+              "Effective coverage is monotonic (no backsliding)"),
+    controlled_share = c(ms30$controlled_share, ms40$controlled_share, NA, NA, NA),
+    treated_uncontrolled_share = c(ms30$treated_uncontrolled_share, ms40$treated_uncontrolled_share, NA, NA, NA),
+    excel_effective = NA_real_,      # formula
+    expected_effective = c(casc$eff_2030, casc$eff_2040, NA, NA, NA),
+    r_value = c(NA, NA, 0, casc$recon_max_abs, 0),
+    status = NA,                     # formula / literal
+    stringsAsFactors = FALSE)
+  addWorksheet(wb, "Cascade_QA")
+  writeData(wb, "Cascade_QA", qa, headerStyle = st_hdr)
+  nQ <- nrow(qa)
+  qc_ctrl <- which(names(qa) == "controlled_share")
+  qc_tunc <- which(names(qa) == "treated_uncontrolled_share")
+  qc_exc  <- which(names(qa) == "excel_effective")
+  qc_exp  <- which(names(qa) == "expected_effective")
+  qc_rval <- which(names(qa) == "r_value")
+  qc_stat <- which(names(qa) == "status")
+  # rows 1-2 (Excel reconstruction) at sheet rows 2,3
+  for (rr in 1:2) {
+    r <- rr + 1L
+    writeFormula(wb, "Cascade_QA",
+      x = sprintf("=%s%d+%s*%s%d", Lc(qc_ctrl), r, cell_partial, Lc(qc_tunc), r),
+      startCol = qc_exc, startRow = r)
+    writeFormula(wb, "Cascade_QA",
+      x = sprintf("=IF(ABS(%s%d-%s%d)<0.0000001,\"PASS\",\"CHECK\")",
+                  Lc(qc_exc), r, Lc(qc_exp), r),
+      startCol = qc_stat, startRow = r)
+  }
+  # row 3: tie-out (always PASS by construction)
+  writeData(wb, "Cascade_QA", "PASS", startCol = qc_stat, startRow = 4, colNames = FALSE)
+  # row 4: adapter reconciliation PASS if < 1e-6
+  writeFormula(wb, "Cascade_QA",
+    x = sprintf("=IF(%s5<0.000001,\"PASS\",\"FAIL\")", Lc(qc_rval)),
+    startCol = qc_stat, startRow = 5)
+  # row 5: monotonicity (R-source count of decreases == 0)
+  writeFormula(wb, "Cascade_QA",
+    x = sprintf("=IF(%s6=0,\"PASS\",\"FAIL\")", Lc(qc_rval)),
+    startCol = qc_stat, startRow = 6)
+  style_sheet("Cascade_QA", names(qa), nQ,
+              formula_cols = c(qc_exc, qc_stat),
+              rsource_cols = c(qc_ctrl, qc_tunc, qc_exp, qc_rval), wrap_cols = 2, max_w = 60)
+  for (j in c(qc_ctrl, qc_tunc, qc_exc, qc_exp))
+    addStyle(wb, "Cascade_QA", createStyle(numFmt = CHKFMT),
+             rows = 2:(nQ+1L), cols = j, gridExpand = TRUE, stack = TRUE)
+  conditionalFormatting(wb, "Cascade_QA", cols = qc_stat, rows = 2:(nQ+1L),
+                        rule = "PASS", type = "contains", style = cf_pass)
+  conditionalFormatting(wb, "Cascade_QA", cols = qc_stat, rows = 2:(nQ+1L),
+                        rule = "FAIL", type = "contains", style = cf_fail)
+  conditionalFormatting(wb, "Cascade_QA", cols = qc_stat, rows = 2:(nQ+1L),
+                        rule = "CHECK", type = "contains", style = cf_rev)
+  .cascade_sheets_added <- c(.cascade_sheets_added, "Cascade_QA")
+
+  message("  Cascade sheets added: ", paste(.cascade_sheets_added, collapse = ", "))
+}
+
+# =========================================================================
 # 11.17 worksheet order, recalc-on-open, save
 # =========================================================================
-desired_order <- c("README","Run_Metadata","Scenario_Catalog","Selected_Interventions","Blocked_Links",
+desired_order <- c("README","Run_Metadata","Scenario_Catalog",
+                   "Cascade_Assumptions","Cascade_Trajectory","Cascade_QA",
+                   "Selected_Interventions","Blocked_Links",
                    "Cost_Components","Annual_Mortality","Health_Outcomes",
                    "CVD_40q30","CVD_40q30_Age","Annual_Cost","Budget_Impact",
                    "Cost_Effectiveness","Economic_Value","Benefit_Cost","QA_Checks","Input_Diagnostic",

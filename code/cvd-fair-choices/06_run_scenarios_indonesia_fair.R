@@ -1758,6 +1758,34 @@ calculate_fair_workbook_impact <- function(intervention_rates, Country, effect_r
     cov_t[dt$year >  ty] <- tgt_cov
     cov_t <- pmin(pmax(cov_t, 0), 1)
 
+    # OPTIONAL explicit per-year coverage trajectory (ADDITIVE / backward-
+    # compatible). Standard FAIR workbook runs never supply it, so this block is
+    # skipped and the single linear ramp above is used unchanged -- byte-for-byte
+    # identical to prior behavior. The 70-30-30 -> 70-70-70 cascade adapter (Model
+    # 04) attaches a `coverage_path` list-column whose i-th element is a
+    # data.frame(year, coverage_t) giving the EXACT modeled effective-coverage
+    # trajectory (piecewise-linear with the 2030 kink and the no-backsliding rule
+    # already baked in). When present it replaces cov_t verbatim; base_cov (the
+    # row's baseline_coverage) still anchors the FAIR incremental-effect formula,
+    # so a fully specified 2025:2050 path reproduces the workbook Model_Input_View
+    # transition_multiplier to machine precision.
+    if ("coverage_path" %in% names(er)) {
+      cp <- er[["coverage_path"]][[i]]
+      if (!is.null(cp) && NROW(cp) > 0L) {
+        cp <- as.data.table(cp)
+        cov_lookup <- setNames(as.numeric(cp$coverage_t), as.character(cp$year))
+        got <- cov_lookup[as.character(dt$year)]
+        # Years outside the supplied path hold at the nearest specified end (a
+        # full 2025:2050 cascade path never hits this fallback).
+        if (anyNA(got)) {
+          yrs <- as.integer(cp$year)
+          got[is.na(got) & dt$year < min(yrs)] <- cov_lookup[[as.character(min(yrs))]]
+          got[is.na(got) & dt$year > max(yrs)] <- cov_lookup[[as.character(max(yrs))]]
+        }
+        cov_t <- pmin(pmax(as.numeric(got), 0), 1)
+      }
+    }
+
     # FAIR coverage-adjusted effect, then the affected fraction.
     e_adj <- apply_coverage_adjustment(effect_size = r$effect_value,
                                        coverage_t  = cov_t,
@@ -3330,6 +3358,23 @@ stopCluster(cl)
 successful <- sapply(results_list, function(x) !is.null(x))
 cat("\nSuccessful runs:", sum(successful), "out of", length(locs), "\n")
 cat("Failed countries:", paste(locs[!successful], collapse = ", "), "\n")
+
+# --- Cascade scenario-scope guard (opt-in; no-op unless the isolated 70-30-30 ->
+#     70-70-70 runner set the flag). Asserts every modeled row carries one of the
+#     two permitted scenario ids (baseline + the single cascade scenario). -------
+if (isTRUE(get0("run_cascade_70_30_30_to_70_70_70", ifnotfound = FALSE))) {
+  .cs_dt   <- Filter(function(x) is.data.frame(x), results_list)
+  .cs_scn  <- unique(unlist(lapply(.cs_dt, function(x) as.character(unique(x$scenario)))))
+  .cs_ok   <- c(if (exists("baseline_scenario_id")) baseline_scenario_id else "baseline",
+                if (exists("cascade_scenario_id"))  cascade_scenario_id  else "S_70_30_30_TO_70_70_70")
+  .cs_bad  <- setdiff(.cs_scn, .cs_ok)
+  if (length(.cs_bad))
+    stop("Cascade Model 06: unexpected scenario id(s) in results: ",
+         paste(.cs_bad, collapse = ", "), " (permitted only: ",
+         paste(.cs_ok, collapse = ", "), ").", call. = FALSE)
+  cat(sprintf("Cascade Model 06 scenario scope OK: {%s}\n", paste(sort(.cs_scn), collapse = ", ")))
+  rm(list = intersect(ls(), c(".cs_dt", ".cs_scn", ".cs_ok", ".cs_bad")))
+}
 
 # Combine all results (if not too large)
 #all_results <- rbindlist(results_list, fill = TRUE)

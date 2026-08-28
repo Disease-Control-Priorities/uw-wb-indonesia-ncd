@@ -62,7 +62,12 @@ suppressPackageStartupMessages({
 `%||%` <- function(a, b) if (is.null(a) || length(a) == 0) b else a
 
 # 0) Paths ----
-DIR_OUT      <- file.path(wd, "output")
+# Output root. Honor `wd_outp` when Model 00 (or an isolated runner such as the
+# 70-30-30 -> 70-70-70 cascade) supplies it, so every Model 08 read (Model 07
+# health outcomes) and write (VSL results, BCA parameters, summaries) lands in
+# the SAME directory the rest of that run uses. Default is byte-for-byte the old
+# behavior when `wd_outp` is absent.
+DIR_OUT      <- if (exists("wd_outp")) sub("/+$", "", wd_outp) else file.path(wd, "output")
 GNI_FILE     <- file.path(wd, "data", "raw",
                           "API_NY.GNP.PCAP.PP.KD_DS2_en_csv_v2_7203.csv")
 SSP_FILE     <- file.path(wd, "data", "raw",

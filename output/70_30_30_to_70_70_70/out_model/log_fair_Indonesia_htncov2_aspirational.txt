@@ -1,0 +1,59 @@
+
+==============================
+Country      : Indonesia 
+Target column: htncov2_aspirational 
+Time         : 2026-08-27 20:04:58.260794 
+==============================
+
+##########################################
+RUNNING SCENARIO: baseline 
+##########################################
+
+========================================
+STARTING PROJECTION FOR: Indonesia 
+Interventions:  
+========================================
+
+  HTN target: country-specific [ htncov2_aspirational ] = 0.5 
+
+=== Setting Initial Population States ===
+
+=== Running State Transition Model ===
+Projecting from 2017 to 2058...
+  Year 2027 
+  Year 2037 
+  Year 2047 
+  Year 2057 
+
+=== Projection Complete ===
+Final intervention label: baseline 
+
+
+##########################################
+RUNNING SCENARIO: S_70_30_30_TO_70_70_70 
+##########################################
+
+========================================
+STARTING PROJECTION FOR: Indonesia 
+Interventions: fair_wb 
+========================================
+
+  HTN target: country-specific [ htncov2_aspirational ] = 0.5 
+
+=== Applying FAIR-Choices (workbook) Package ===
+  - Calculating FAIR-Choices (workbook) package impact
+    Applied 12 workbook effect row(s) across cause(s): dm2, hhd, hstroke, ihd, istroke 
+
+=== Setting Initial Population States ===
+
+=== Running State Transition Model ===
+Projecting from 2017 to 2058...
+  Year 2027 
+  Year 2037 
+  Year 2047 
+  Year 2057 
+
+=== Projection Complete ===
+Final intervention label: FAIR 
+
+Saved: C:/Users/wrgar/OneDrive - UW/02Work/WorldBank-Indonesia/uw-wb-indonesia-ncd/output/70_30_30_to_70_70_70//out_model/model_output_Indonesia_htncov2_aspirational.rds 

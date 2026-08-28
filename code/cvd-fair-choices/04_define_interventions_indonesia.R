@@ -1892,9 +1892,434 @@ if (!exists("baseline_scenario_id"))
   list(scenarios = scen, inputs = fair_inputs)
 }
 
-.fair_built    <- .build_fair_catalogue(model_inputs_file, cause_map,
+#===========================================================================
+# 70-30-30 -> 70-70-70 CASCADE CATALOGUE  (opt-in; feeds Models 06 and 09) ----
+#---------------------------------------------------------------------------
+# Dedicated reader for the BESPOKE cascade workbook
+# (indonesia_70_30_30_to_70_70_70_inputs.xlsx). It emits fair_scenarios and
+# fair_inputs in EXACTLY the shapes Models 06 and 09 already consume, but for a
+# SINGLE scenario (baseline + S_70_30_30_TO_70_70_70). The two component
+# interventions (I_CVD_PRIMARY, I_T2D_TREATMENT) are retained only as traceable
+# effect-row components of that one scenario -- never emitted as separate
+# scenarios. It is called ONLY when run_cascade_70_30_30_to_70_70_70 is TRUE; the
+# ordinary run path (.build_fair_catalogue above) is untouched.
+#
+# Why a dedicated reader (not the FAIR reader): the cascade workbook's Coverage /
+# Coverage_Trajectory sheets are a milestone-cascade format (diagnosis x treatment
+# x control with a half-effect for treated-but-uncontrolled), NOT the FAIR
+# baseline_coverage/target_override contract. Effect_Sizes, Intervention_Cause_Map
+# and Cost_Components ARE in the standard FAIR schema, so their parsing/validation
+# mirror .build_fair_catalogue.
+#
+# EXACTNESS: the per-year effective-coverage path is taken VERBATIM from the
+# workbook's Coverage_Trajectory$scenario_effective_coverage (which already bakes
+# in the piecewise 2030/2040 milestones, the 0.5 treated-uncontrolled half effect,
+# the cholesterol-follows-hypertension rule and the no-backsliding rule). It is
+# attached as a per-row `coverage_path` list-column that Model 06's
+# calculate_fair_workbook_impact() consumes verbatim, so R reproduces the
+# workbook's own Model_Input_View$transition_multiplier to machine precision (an
+# in-function reconciliation asserts this). Never re-derives or rounds cascade %.
+.build_cascade_catalogue <- function(inputs_path,
+                                     cause_map,
+                                     strict              = FALSE,
+                                     baseline_id         = "baseline",
+                                     cascade_scenario_id = "S_70_30_30_TO_70_70_70",
+                                     cascade_family      = "cascade_70_30_30_to_70_70_70") {
+
+  if (!file.exists(inputs_path))
+    stop("Cascade: input workbook not found: ", inputs_path)
+
+  req_sheets <- c("Assumptions", "Dictionaries", "Intervention_Cause_Map",
+                  "Effect_Sizes", "Coverage", "Coverage_Trajectory",
+                  "Cost_Components", "Model_Input_View", "QA_Checks")
+  have <- readxl::excel_sheets(inputs_path)
+  miss <- setdiff(req_sheets, have)
+  if (length(miss))
+    stop("Cascade: workbook missing required sheet(s): ", paste(miss, collapse = ", "))
+
+  rd   <- function(sheet) as.data.table(readxl::read_excel(inputs_path, sheet = sheet))
+  numv <- function(x) suppressWarnings(as.numeric(x))
+  chrv <- function(x) trimws(as.character(x))
+
+  issues <- data.table(scope = character(), item_key = character(), field = character(),
+                       problem = character(), severity = character())
+  add_issue <- function(scope, item_key, field, problem, severity = "FAIL")
+    issues <<- rbind(issues, data.table(scope = scope, item_key = as.character(item_key),
+                                        field = field, problem = problem, severity = severity))
+
+  ## -- Assumptions (parameter_id -> value) ------------------------------------
+  asmp <- rd("Assumptions")
+  A    <- setNames(as.character(asmp$value), as.character(asmp$parameter_id))
+  getA <- function(id, default = NA) if (id %in% names(A)) A[[id]] else default
+
+  analysis_start_year <- as.integer(numv(getA("analysis_start_year", 2025)))
+  analysis_end_year   <- as.integer(numv(getA("analysis_end_year",   2050)))
+  first_target_year   <- as.integer(numv(getA("first_target_year",   2030)))
+  final_target_year   <- as.integer(numv(getA("final_target_year",   2040)))
+  cost_discount_rate  <- numv(getA("cost_discount_rate",   0.03))
+  health_discount_rate<- numv(getA("health_discount_rate", 0.03))
+  cost_price_year     <- as.integer(numv(getA("cost_price_year", 2023)))
+  eff_2030 <- numv(getA("first_target_effective_coverage_exact", NA_real_))
+  eff_2040 <- numv(getA("final_target_effective_coverage_exact", NA_real_))
+  partial_effect_fraction <- numv(getA("treated_uncontrolled_effect_fraction", 0.5))
+  prevent_backsliding <- as.integer(numv(getA("prevent_coverage_backsliding", 1)))
+  scen_id_wb  <- chrv(getA("scenario_id", cascade_scenario_id))
+  if (!is.na(scen_id_wb) && nzchar(scen_id_wb) && !identical(scen_id_wb, cascade_scenario_id))
+    add_issue("assumptions", "scenario_id", "scenario_id",
+              sprintf("workbook scenario_id '%s' != expected '%s'", scen_id_wb, cascade_scenario_id),
+              "REVIEW")
+  if (is.na(eff_2030) || is.na(eff_2040))
+    add_issue("assumptions", "effective_coverage", "value",
+              "first/final_target_effective_coverage_exact missing or non-numeric", "FAIL")
+
+  ## -- cause_id -> model cause short code (same table as the FAIR reader) ------
+  cause_id2code <- c(C_RHD = "rhd", C_IHD = "ihd", C_IS = "istroke",
+                     C_ICH = "hstroke", C_HHD = "hhd", C_CMP = "cmd", C_T2D = "dm2")
+  bad_codes <- setdiff(unname(cause_id2code), names(cause_map))
+  if (length(bad_codes))
+    stop("Cascade: cause translation maps to code(s) absent from Model 00 cause_map: ",
+         paste(bad_codes, collapse = ", "))
+  translate_transition <- function(from, to) {
+    from <- tolower(chrv(from)); to <- tolower(chrv(to))
+    out <- rep(NA_character_, length(from))
+    out[from == "well" & to == "sick"] <- "incidence"
+    out[from %in% c("sick", "sick_severe", "sick_hf") & grepl("^dead", to)] <- "case_fatality"
+    out
+  }
+  # Workbook sex labels ("Men"/"Women") -> model rate-table labels ("Male"/"Female").
+  sex_wb2model <- c(Men = "Male", Women = "Female",
+                    Male = "Male", Female = "Female", Both = "Both")
+
+  ## -- Read the contract sheets -----------------------------------------------
+  map <- rd("Intervention_Cause_Map")
+  eff <- rd("Effect_Sizes")
+  cst <- rd("Cost_Components")
+  miv <- rd("Model_Input_View")
+  ctr <- rd("Coverage_Trajectory")
+
+  map[, include_flag := .normalize_include_flag(
+        include_flag, sprintf("Intervention_Cause_Map (%s)", basename(inputs_path)))]
+  map_sel <- map[include_flag == 1L]
+
+  ## -- Effect parameters per link ---------------------------------------------
+  eff_k <- eff[, .(intervention_cause_key,
+                   effect_value      = numv(effect_value),
+                   affected_fraction = numv(affected_fraction),
+                   e_age_start       = numv(age_start),
+                   e_age_stop        = numv(age_stop),
+                   e_sex             = chrv(sex),
+                   effect_review     = chrv(review_status))]
+  eff_n <- eff[, .(n_eff = .N), by = intervention_cause_key]
+
+  ## -- Per-year effective-coverage trajectory (authoritative; verbatim) -------
+  ctr_k <- ctr[, .(intervention_id = chrv(intervention_id),
+                   risk_factor_id  = chrv(risk_factor_id),
+                   sex             = chrv(sex),
+                   year            = as.integer(year),
+                   baseline_effective_coverage = numv(baseline_effective_coverage),
+                   scenario_effective_coverage = numv(scenario_effective_coverage))]
+  # Monotonicity / range guard on the supplied trajectory (mirrors workbook QA06).
+  setorder(ctr_k, intervention_id, sex, year)
+  ctr_k[, d := scenario_effective_coverage - shift(scenario_effective_coverage),
+        by = .(intervention_id, sex)]
+  if (nrow(ctr_k[!is.na(d) & d < -1e-9]))
+    add_issue("coverage", "Coverage_Trajectory", "scenario_effective_coverage",
+              "coverage decreases in some year (violates no-backsliding)", "FAIL")
+  if (nrow(ctr_k[scenario_effective_coverage < -1e-9 | scenario_effective_coverage > 1 + 1e-9]))
+    add_issue("coverage", "Coverage_Trajectory", "scenario_effective_coverage",
+              "coverage outside [0,1]", "FAIL")
+  ctr_k[, d := NULL]
+
+  ## -- Assemble link table + per-link validation ------------------------------
+  L <- merge(map_sel[, .(intervention_cause_key, intervention_id, intervention_name,
+                         cause_id, model_name, cost_join_key, cost_scope,
+                         transition_from, transition_to)],
+             eff_k, by = "intervention_cause_key", all.x = TRUE)
+  L <- merge(L, eff_n, by = "intervention_cause_key", all.x = TRUE)
+  L[is.na(n_eff), n_eff := 0L]
+  L[, model_transition := translate_transition(transition_from, transition_to)]
+  L[, cause_code       := cause_id2code[cause_id]]
+  # Every included link must have a coverage trajectory for its intervention_id.
+  ints_with_traj <- unique(ctr_k$intervention_id)
+  L[, has_traj := intervention_id %in% ints_with_traj]
+  # Single-value coverage SUMMARY per link, for Model 09's Selected_Interventions
+  # display and its adjusted-effect-at-target summary column. The engine itself
+  # uses the exact per-year `coverage_path`; baseline_coverage is the sex-averaged
+  # 2025 effective coverage and target_coverage the 2040 milestone (full scale-up).
+  base_by_int <- ctr_k[year == min(year), .(bl = mean(baseline_effective_coverage)),
+                       by = intervention_id]
+  L <- merge(L, base_by_int, by = "intervention_id", all.x = TRUE)
+  L[, `:=`(baseline_coverage = bl,
+           target_coverage   = eff_2040,
+           start_year        = analysis_start_year,
+           target_year       = final_target_year,
+           coverage_review   = "OK (cascade trajectory)")]
+  L[, bl := NULL]
+
+  in01 <- function(x) !is.na(x) & x >= 0 & x <= 1
+  L[, problem := ""]
+  padd <- function(cond, msg) {
+    cond[is.na(cond)] <- FALSE
+    L[cond, problem := paste0(problem, ifelse(nchar(problem) > 0L, "; ", ""), msg)]
+  }
+  padd(L$n_eff != 1L,               "effect match != 1")
+  padd(!in01(L$effect_value),       "effect_value missing/out of [0,1]")
+  padd(!in01(L$affected_fraction),  "affected_fraction missing/out of [0,1]")
+  padd(is.na(L$model_transition),   "transition label not mapped to model")
+  padd(is.na(L$cause_code),         "cause_id absent from Model 00 cause_map")
+  padd(!L$has_traj,                 "no coverage trajectory for intervention_id")
+  L[, valid := problem == ""]
+  for (i in which(!L$valid))
+    add_issue("health_link", L$intervention_cause_key[i], "effect/coverage", L$problem[i], "FAIL")
+
+  ## -- Build the sex-split engine effect rows with exact coverage paths --------
+  # One row per (valid link x sex). Each carries the row's baseline effective
+  # coverage (FAIR anchor) and a `coverage_path` list-column = the exact per-year
+  # scenario_effective_coverage. Model 06 masks by sex (Male/Female) and applies
+  # the path verbatim.
+  build_engine_rows <- function(links) {
+    if (!nrow(links)) return(NULL)
+    out <- vector("list", 0L)
+    for (i in seq_len(nrow(links))) {
+      lk <- links[i]
+      for (sx_wb in c("Men", "Women")) {
+        cp <- ctr_k[intervention_id == lk$intervention_id & sex == sx_wb,
+                    .(year, coverage_t = scenario_effective_coverage)][order(year)]
+        if (!nrow(cp)) {
+          add_issue("health_link", lk$intervention_cause_key, "coverage_path",
+                    sprintf("no Coverage_Trajectory rows for %s/%s", lk$intervention_id, sx_wb), "FAIL")
+          next
+        }
+        base_cov <- ctr_k[intervention_id == lk$intervention_id & sex == sx_wb,
+                          baseline_effective_coverage][1]
+        out[[length(out) + 1L]] <- data.table(
+          intervention_id        = lk$intervention_id,
+          intervention_cause_key = lk$intervention_cause_key,
+          cause_code             = lk$cause_code,
+          model_transition       = lk$model_transition,
+          effect_value           = lk$effect_value,
+          affected_fraction      = lk$affected_fraction,
+          baseline_coverage      = base_cov,
+          target_coverage        = eff_2040,
+          start_year             = analysis_start_year,
+          target_year            = final_target_year,
+          age_start              = lk$e_age_start,
+          age_stop               = lk$e_age_stop,
+          sex                    = unname(sex_wb2model[[sx_wb]]),
+          coverage_path          = list(cp))     # per-row per-year trajectory
+      }
+    }
+    if (length(out)) rbindlist(out) else NULL
+  }
+
+  valid_links   <- L[valid == TRUE]
+  runnable_ints <- unique(valid_links$intervention_id)
+  blocked_ints  <- setdiff(unique(map_sel$intervention_id), runnable_ints)
+  engine_rows   <- build_engine_rows(valid_links)
+
+  ## -- Reconcile against the workbook's own Model_Input_View -------------------
+  # For each (link, sex, year) recompute the surviving transition multiplier with
+  # the SAME FAIR formula Model 06 uses and confirm it matches the workbook's
+  # transition_multiplier. Any mismatch is a hard FAIL (adapter would not
+  # reproduce the workbook).
+  if (nrow(miv)) {
+    mivx <- miv[, .(intervention_cause_key = chrv(intervention_cause_key),
+                    sex = chrv(sex), year = as.integer(year),
+                    effect_value = numv(effect_value),
+                    affected_fraction = numv(affected_fraction),
+                    base = numv(baseline_effective_coverage),
+                    cov  = numv(scenario_effective_coverage),
+                    tm_wb = numv(transition_multiplier))]
+    mivx[, e_adj := effect_value * (cov - base) / (1 - effect_value * base)]
+    mivx[, tm_me := 1 - affected_fraction * e_adj]
+    mivx[, dabs  := abs(tm_me - tm_wb)]
+    max_recon <- suppressWarnings(max(mivx$dabs, na.rm = TRUE))
+    if (is.finite(max_recon) && max_recon > 1e-6)
+      add_issue("reconciliation", "Model_Input_View", "transition_multiplier",
+                sprintf("adapter multiplier differs from workbook by up to %.3e", max_recon), "FAIL")
+  } else max_recon <- NA_real_
+
+  ## -- Cost components (standard FAIR schema; cascade coverage path) -----------
+  sel_int <- unique(map_sel$intervention_id)
+  C <- cst[, .(cost_record_id, cost_component_key, cost_option,
+               selected_for_base_case      = as.integer(numv(selected_for_base_case)),
+               intervention_id, cause_id, cost_join_key, cost_component,
+               population_in_need_measure  = tolower(chrv(population_in_need_measure)),
+               population_in_need_fraction = numv(population_in_need_fraction),
+               frequency_per_year          = numv(frequency_per_year),
+               c_age_start = numv(age_start), c_age_stop = numv(age_stop),
+               c_sex = chrv(sex),
+               unit_cost_usd = numv(unit_cost_usd),
+               price_year    = as.integer(numv(price_year)),
+               indonesia_adjusted_flag = as.integer(numv(indonesia_adjusted_flag)),
+               cost_review   = chrv(review_status))]
+  C <- C[intervention_id %in% sel_int]
+  C[, n_sel := sum(selected_for_base_case == 1L, na.rm = TRUE), by = cost_component_key]
+  sel_counts <- unique(C[, .(cost_component_key, n_sel)])
+  for (i in seq_len(nrow(sel_counts))) {
+    if (isTRUE(sel_counts$n_sel[i] > 1L))
+      add_issue("cost", sel_counts$cost_component_key[i], "selected_for_base_case",
+                "more than one base-case option selected", "FAIL")
+    if (isTRUE(sel_counts$n_sel[i] == 0L))
+      add_issue("cost", sel_counts$cost_component_key[i], "selected_for_base_case",
+                "no base-case cost option selected (component omitted from costing)", "REVIEW")
+  }
+  Cbase <- C[selected_for_base_case == 1L]
+  valid_cjk <- unique(chrv(map$cost_join_key))
+  Cbase[, cause_code := cause_id2code[cause_id]]
+
+  padc <- function(dt, cond, field, msg, severity) {
+    cond[is.na(cond)] <- FALSE
+    if (any(cond)) for (i in which(cond)) add_issue("cost", dt$cost_record_id[i], field, msg, severity)
+  }
+  padc(Cbase, is.na(Cbase$unit_cost_usd) | Cbase$unit_cost_usd < 0, "unit_cost_usd",
+       "missing or negative unit cost on a selected base-case row", "FAIL")
+  padc(Cbase, is.na(Cbase$frequency_per_year) | Cbase$frequency_per_year < 0, "frequency_per_year",
+       "missing or negative frequency", "FAIL")
+  padc(Cbase, is.na(Cbase$population_in_need_fraction) |
+         Cbase$population_in_need_fraction < 0 | Cbase$population_in_need_fraction > 1,
+       "population_in_need_fraction", "PIN fraction missing/out of [0,1]", "FAIL")
+  padc(Cbase, !(chrv(Cbase$cost_join_key) %in% valid_cjk), "cost_join_key",
+       "cost_join_key not present in Intervention_Cause_Map", "FAIL")
+  padc(Cbase, !(Cbase$population_in_need_measure %in% c("all", "prevalence", "incidence")),
+       "population_in_need_measure", "unsupported PIN measure", "FAIL")
+  padc(Cbase, Cbase$indonesia_adjusted_flag == 0L, "indonesia_adjusted_flag",
+       "cost not Indonesia-adjusted (flagged; not treated as ready)", "REVIEW")
+  padc(Cbase, !is.na(Cbase$price_year) & Cbase$price_year != cost_price_year, "price_year",
+       paste0("cost price year != reporting price year (", cost_price_year, ")"), "REVIEW")
+
+  scope_by_cjk <- unique(map[, .(cost_join_key = chrv(cost_join_key), cost_scope = chrv(cost_scope))])
+  scope_by_cjk <- scope_by_cjk[, .(cost_scope = cost_scope[1]), by = cost_join_key]
+  Cbase[, cost_join_key := chrv(cost_join_key)]
+  Cbase <- merge(Cbase, scope_by_cjk, by = "cost_join_key", all.x = TRUE)
+
+  # Cost coverage = the SAME cascade effective-coverage path (sex-averaged, since
+  # cost records are sex="Both"), so costs and health effects share one coverage
+  # concept. Baseline/target endpoints exposed for display; the per-year path is
+  # attached as a `coverage_path` list-column consumed by Model 09's cost loop.
+  ctr_avg <- ctr_k[, .(coverage_t = mean(scenario_effective_coverage),
+                       base_avg   = mean(baseline_effective_coverage)),
+                   by = .(intervention_id, year)][order(intervention_id, year)]
+  cov_int_u <- ctr_avg[, .(cov_baseline = base_avg[which.min(year)],
+                           cov_target   = eff_2040,
+                           cov_start_year = analysis_start_year,
+                           cov_target_year = final_target_year),
+                       by = intervention_id]
+  Cbase <- merge(Cbase, cov_int_u, by = "intervention_id", all.x = TRUE)
+  padc(Cbase, is.na(Cbase$cov_baseline), "coverage",
+       "no cascade coverage trajectory found for cost record", "FAIL")
+  cost_cov_path <- lapply(Cbase$intervention_id, function(iid)
+    ctr_avg[intervention_id == iid, .(year, coverage_t)][order(year)])
+  Cbase[, coverage_path := cost_cov_path]
+
+  ## -- Scenario catalogue (baseline + the single cascade scenario) ------------
+  scen <- list()
+  scen[[baseline_id]] <- list(scenario_id = baseline_id,
+                              scenario_label = "Baseline (no new intervention)",
+                              intervention_ids = character(0),
+                              interventions = character(0),
+                              fair_effect_rows = NULL,
+                              family = "baseline")
+  scen[[cascade_scenario_id]] <- list(
+    scenario_id      = cascade_scenario_id,
+    scenario_label   = "70-30-30 -> 70-70-70 hypertension/cholesterol + diabetes cascade",
+    intervention_ids = runnable_ints,
+    interventions    = "fair_wb",
+    fair_effect_rows = engine_rows,
+    family           = cascade_family,
+    scenario_role    = "combined",
+    scenario_level   = "combined",
+    parent_package_id = NA_character_,
+    component_intervention_ids = runnable_ints)
+
+  ## -- Assemble fair_inputs (consumed by Model 09) ----------------------------
+  fair_inputs <- list(
+    links          = L,
+    valid_links    = valid_links,
+    blocked_links  = L[valid == FALSE],
+    costs          = Cbase,
+    cost_all       = C,
+    validation     = issues,
+    cause_translation = data.table(cause_id = names(cause_id2code),
+                                   cause_code = unname(cause_id2code)),
+    runnable_interventions = runnable_ints,
+    blocked_interventions  = blocked_ints,
+    inputs_path    = inputs_path,
+    baseline_scenario_id = baseline_id,
+    # Cascade-specific bundle for Model 09's Cascade_* sheets (only present here).
+    cascade = list(
+      scenario_id = cascade_scenario_id, family = cascade_family,
+      analysis_start_year = analysis_start_year, analysis_end_year = analysis_end_year,
+      first_target_year = first_target_year, final_target_year = final_target_year,
+      eff_2030 = eff_2030, eff_2040 = eff_2040,
+      partial_effect_fraction = partial_effect_fraction,
+      prevent_coverage_backsliding = prevent_backsliding,
+      coverage_trajectory = ctr_k, coverage = rd("Coverage"),
+      model_input_view = miv, qa_checks = rd("QA_Checks"),
+      assumptions_sheet = asmp, recon_max_abs = max_recon),
+    assumptions    = list(
+      analysis_start_year     = analysis_start_year,
+      analysis_end_year       = analysis_end_year,
+      intervention_start_year = analysis_start_year,
+      coverage_target_year    = final_target_year,
+      target_coverage_default = eff_2040,
+      cost_discount_rate      = cost_discount_rate,
+      health_discount_rate    = health_discount_rate,
+      cost_price_year         = cost_price_year,
+      currency                = getA("currency", "USD"),
+      scale_up_shape          = getA("scale_up_shape", "piecewise_linear"),
+      downstream_cost_offsets = as.integer(numv(getA("downstream_cost_offsets", 0))),
+      rhd_surgery_frequency   = numv(getA("rhd_surgery_frequency", 1)),
+      economic_perspective    = getA("economic_perspective", "societal")))
+
+  ## -- Report + scope assertion ------------------------------------------------
+  n_fail <- sum(issues$severity == "FAIL")
+  n_rev  <- sum(issues$severity == "REVIEW")
+  cat("\n--- 70-30-30 -> 70-70-70 CASCADE catalogue --------------------------\n")
+  cat(sprintf("Workbook: %s\n", inputs_path))
+  cat(sprintf("Included links: %d | valid: %d | invalid: %d\n",
+              nrow(map_sel), nrow(valid_links), nrow(L[valid == FALSE])))
+  cat(sprintf("Component interventions (%d): %s\n",
+              length(runnable_ints), paste(runnable_ints, collapse = ", ")))
+  cat(sprintf("Engine effect rows (link x sex): %d\n",
+              if (is.null(engine_rows)) 0L else nrow(engine_rows)))
+  cat(sprintf("Effective coverage milestones: 2030 = %.10g | 2040 = %.10g\n", eff_2030, eff_2040))
+  cat(sprintf("Model_Input_View reconciliation max |diff|: %.3e\n", max_recon))
+  cat(sprintf("Selected base-case cost rows: %d\n", nrow(Cbase)))
+  cat(sprintf("Validation issues: %d FAIL, %d REVIEW\n", n_fail, n_rev))
+  if (nrow(issues)) { cat("Consolidated validation diagnostic:\n"); print(issues) }
+  cat(sprintf("Scenarios built (%d): %s\n", length(scen), paste(names(scen), collapse = ", ")))
+  cat("---------------------------------------------------------------------\n\n")
+
+  # After Model 04: the catalogue must contain ONLY baseline + the cascade scenario.
+  if (!setequal(names(scen), c(baseline_id, cascade_scenario_id)))
+    stop("Cascade: scenario catalogue must be exactly {", baseline_id, ", ",
+         cascade_scenario_id, "}; got {", paste(names(scen), collapse = ", "), "}.",
+         call. = FALSE)
+
+  if (strict && n_fail > 0L)
+    stop("Cascade: strict_model_input_validation = TRUE and ", n_fail,
+         " FAIL-level workbook issue(s) present (see diagnostic above).", call. = FALSE)
+  if (n_fail > 0L)
+    stop("Cascade: ", n_fail, " FAIL-level issue(s) in the cascade workbook (see ",
+         "diagnostic above); the cascade run requires a clean catalogue.", call. = FALSE)
+
+  list(scenarios = scen, inputs = fair_inputs)
+}
+
+# --- Choose the catalogue builder: cascade (opt-in) or ordinary FAIR Choices ---
+if (isTRUE(get0("run_cascade_70_30_30_to_70_70_70", ifnotfound = FALSE))) {
+  .fair_built  <- .build_cascade_catalogue(
+    model_inputs_file, cause_map,
+    strict              = strict_model_input_validation,
+    baseline_id         = baseline_scenario_id,
+    cascade_scenario_id = if (exists("cascade_scenario_id")) cascade_scenario_id else "S_70_30_30_TO_70_70_70",
+    cascade_family      = if (exists("cascade_family")) cascade_family else "cascade_70_30_30_to_70_70_70")
+} else {
+  .fair_built  <- .build_fair_catalogue(model_inputs_file, cause_map,
                                         strict      = strict_model_input_validation,
                                         baseline_id = baseline_scenario_id)
+}
 fair_scenarios <- .fair_built$scenarios
 fair_inputs    <- .fair_built$inputs
 rm(.fair_built)
