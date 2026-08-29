@@ -414,7 +414,7 @@ rm("adjustments","bgmx_fcst","dt_pop_unwpp","wpp.adj","rep","pop20")
 # Upload the handoff file with probablities 2025-2050 to replace the model's projections for Indonesia. 
 # This file should contain the necessary adjustments to align the model's outputs with the UNWPP 2024 projections
 
-dt_calibrated <- as.data.table(readRDS(paste0(wd_data,"transition_probabilities_indonesia_handoff.rds")))
+# dt_calibrated <- as.data.table(readRDS(paste0(wd_data,"transition_probabilities_indonesia_handoff.rds")))
 
 # # write 2% sample csv files b_rated and dt_calibrated
 # sample_b_rates <- b_rates[sample(.N, .N * 0.02)]
@@ -424,132 +424,144 @@ dt_calibrated <- as.data.table(readRDS(paste0(wd_data,"transition_probabilities_
 
 #replacing model parametesr in b_rates with the calibrated values from dt_calibrated for Indonesia from2025-2050
 
-#..............................................................................
-# Replace Indonesia baseline parameters with calibrated values, 2025–2050 ----
-#..............................................................................
+dt_calibrated <- as.data.table(readRDS(paste0(wd_data,"b_rates_full_period_reconciled_2017_2050_national_current38.rds")))
+# replace with exogenously calibrated table
+b_rates <- copy(dt_calibrated)
 
-setDT(b_rates)
-setDT(dt_calibrated)
+# Keep only Indonesia
+b_rates <- b_rates[location=="Indonesia",]
 
-# Translate calibration cause IDs to the model's internal cause codes.
-calibration_cause_map <- c(
-  C_IHD = "ihd",
-  C_IS  = "istroke",
-  C_ICH = "hstroke",
-  C_HHD = "hhd",
-  C_RHD = "rhd",
-  C_CMD = "cmd",
-  C_DM  = "dm2"
-)
+rm(dt_calibrated)
 
-dt_calibrated[, cause := unname(calibration_cause_map[cause_id])]
+# unique "age"        "sex"        "cause"      "year"       "location"  
+b_rates <- unique(b_rates, by = c("age", "sex", "cause","location","year"))
 
-# Fail if the handoff contains an unrecognized cause.
-unmapped_causes <- unique(
-  dt_calibrated[
-    location_name == "Indonesia" &
-      between(year, 2025L, 2050L) &
-      is.na(cause),
-    cause_id
-  ]
-)
-
-if (length(unmapped_causes) > 0L) {
-  stop(
-    "Model 05: unmapped cause_id values in the calibration handoff: ",
-    paste(unmapped_causes, collapse = ", "),
-    call. = FALSE
-  )
-}
-
-# Prepare one calibrated row per model key.
-calibrated_update <- dt_calibrated[
-  location_name == "Indonesia" &
-    between(year, 2025L, 2050L),
-  .(
-    location  = location_name,
-    year      = as.integer(year),
-    age       = as.integer(age),
-    sex       = as.character(sex),
-    cause,
-    BG.mx.all = background_mx_all_modelled_causes,
-    ALL.mx    = all_cause_mx,
-    BG.mx     = background_mx_for_cause,
-    IR,
-    CF,
-    Nx        = population,
-    pop       = population
-  )
-]
-
-calibration_keys <- c("location", "year", "age", "sex", "cause")
-
-# Each calibrated parameter set must be unique.
-duplicate_calibration_rows <- calibrated_update[
-  duplicated(calibrated_update, by = calibration_keys) |
-    duplicated(calibrated_update, by = calibration_keys, fromLast = TRUE)
-]
-
-if (nrow(duplicate_calibration_rows) > 0L) {
-  stop(
-    "Model 05: the calibration handoff contains duplicate rows for ",
-    "location-year-age-sex-cause.",
-    call. = FALSE
-  )
-}
-
-# Ensure every calibration row has a corresponding row in b_rates.
-unmatched_calibration_rows <- calibrated_update[
-  !b_rates,
-  on = calibration_keys
-]
-
-if (nrow(unmatched_calibration_rows) > 0L) {
-  stop(
-    "Model 05: ", nrow(unmatched_calibration_rows),
-    " calibrated Indonesia rows could not be matched to b_rates. ",
-    "Check location, year, age, sex, and cause identifiers.",
-    call. = FALSE
-  )
-}
-
-# Update by reference. Because calibrated_update contains only 2025–2050,
-# observations before 2025 cannot be modified.
-b_rates[
-  calibrated_update,
-  on = calibration_keys,
-  `:=`(
-    BG.mx.all = i.BG.mx.all,
-    ALL.mx    = i.ALL.mx,
-    BG.mx     = i.BG.mx,
-    IR        = i.IR,
-    CF        = i.CF,
-    Nx        = i.Nx,
-    pop       = i.pop
-  )
-]
-
-# Refresh diagnostic transition sums after replacing the parameters.
-b_rates[
-  location == "Indonesia" & between(year, 2025L, 2050L),
-  `:=`(
-    check_well = BG.mx + covid.mx + IR,
-    check_sick = BG.mx + covid.mx + CF
-  )
-]
-
-# Validate the updated transition probabilities.
-invalid_calibrated_rows <- b_rates[
-  location == "Indonesia" &
-    between(year, 2025L, 2050L) &
-    (
-      is.na(BG.mx) | is.na(BG.mx.all) | is.na(IR) | is.na(CF) |
-        IR < 0 | IR >= 1 |
-        CF < 0 | CF >= 1 |
-        check_well > 1 |
-        check_sick > 1
-    )
-]
+# #..............................................................................
+# # Replace Indonesia baseline parameters with calibrated values, 2025–2050 ----
+# #..............................................................................
+# 
+# setDT(b_rates)
+# setDT(dt_calibrated)
+# 
+# # Translate calibration cause IDs to the model's internal cause codes.
+# calibration_cause_map <- c(
+#   C_IHD = "ihd",
+#   C_IS  = "istroke",
+#   C_ICH = "hstroke",
+#   C_HHD = "hhd",
+#   C_RHD = "rhd",
+#   C_CMD = "cmd",
+#   C_DM  = "dm2"
+# )
+# 
+# dt_calibrated[, cause := unname(calibration_cause_map[cause_id])]
+# 
+# # Fail if the handoff contains an unrecognized cause.
+# unmapped_causes <- unique(
+#   dt_calibrated[
+#     location_name == "Indonesia" &
+#       between(year, 2025L, 2050L) &
+#       is.na(cause),
+#     cause_id
+#   ]
+# )
+# 
+# if (length(unmapped_causes) > 0L) {
+#   stop(
+#     "Model 05: unmapped cause_id values in the calibration handoff: ",
+#     paste(unmapped_causes, collapse = ", "),
+#     call. = FALSE
+#   )
+# }
+# 
+# # Prepare one calibrated row per model key.
+# calibrated_update <- dt_calibrated[
+#   location_name == "Indonesia" &
+#     between(year, 2025L, 2050L),
+#   .(
+#     location  = location_name,
+#     year      = as.integer(year),
+#     age       = as.integer(age),
+#     sex       = as.character(sex),
+#     cause,
+#     BG.mx.all = background_mx_all_modelled_causes,
+#     ALL.mx    = all_cause_mx,
+#     BG.mx     = background_mx_for_cause,
+#     IR,
+#     CF,
+#     Nx        = population,
+#     pop       = population
+#   )
+# ]
+# 
+# calibration_keys <- c("location", "year", "age", "sex", "cause")
+# 
+# # Each calibrated parameter set must be unique.
+# duplicate_calibration_rows <- calibrated_update[
+#   duplicated(calibrated_update, by = calibration_keys) |
+#     duplicated(calibrated_update, by = calibration_keys, fromLast = TRUE)
+# ]
+# 
+# if (nrow(duplicate_calibration_rows) > 0L) {
+#   stop(
+#     "Model 05: the calibration handoff contains duplicate rows for ",
+#     "location-year-age-sex-cause.",
+#     call. = FALSE
+#   )
+# }
+# 
+# # Ensure every calibration row has a corresponding row in b_rates.
+# unmatched_calibration_rows <- calibrated_update[
+#   !b_rates,
+#   on = calibration_keys
+# ]
+# 
+# if (nrow(unmatched_calibration_rows) > 0L) {
+#   stop(
+#     "Model 05: ", nrow(unmatched_calibration_rows),
+#     " calibrated Indonesia rows could not be matched to b_rates. ",
+#     "Check location, year, age, sex, and cause identifiers.",
+#     call. = FALSE
+#   )
+# }
+# 
+# # Update by reference. Because calibrated_update contains only 2025–2050,
+# # observations before 2025 cannot be modified.
+# b_rates[
+#   calibrated_update,
+#   on = calibration_keys,
+#   `:=`(
+#     BG.mx.all = i.BG.mx.all,
+#     ALL.mx    = i.ALL.mx,
+#     BG.mx     = i.BG.mx,
+#     IR        = i.IR,
+#     CF        = i.CF,
+#     Nx        = i.Nx,
+#     pop       = i.pop
+#   )
+# ]
+# 
+# # Refresh diagnostic transition sums after replacing the parameters.
+# b_rates[
+#   location == "Indonesia" & between(year, 2025L, 2050L),
+#   `:=`(
+#     check_well = BG.mx + covid.mx + IR,
+#     check_sick = BG.mx + covid.mx + CF
+#   )
+# ]
+# 
+# # Validate the updated transition probabilities.
+# invalid_calibrated_rows <- b_rates[
+#   location == "Indonesia" &
+#     between(year, 2025L, 2050L) &
+#     (
+#       is.na(BG.mx) | is.na(BG.mx.all) | is.na(IR) | is.na(CF) |
+#         IR < 0 | IR >= 1 |
+#         CF < 0 | CF >= 1 |
+#         check_well > 1 |
+#         check_sick > 1
+#     )
+# ]
 
 # if (nrow(invalid_calibrated_rows) > 0L) {
 #   stop(
@@ -569,13 +581,13 @@ invalid_calibrated_rows <- b_rates[
 #   )
 # )
 
-rm(
-  calibration_cause_map,
-  calibration_keys,
-  calibrated_update,
-  duplicate_calibration_rows,
-  invalid_calibrated_rows,
-  unmatched_calibration_rows,
-  unmapped_causes
-)
+# rm(
+#   calibration_cause_map,
+#   calibration_keys,
+#   calibrated_update,
+#   duplicate_calibration_rows,
+#   invalid_calibrated_rows,
+#   unmatched_calibration_rows,
+#   unmapped_causes
+# )
 

@@ -56,10 +56,14 @@ header-includes:
 ##      (\srcmethod macro, defined in header-includes); cost/CE slides also carry
 ##      the fixed BPJS/MOH validation caveat (\costcaveat).
 ##    * Average annual additional cost per capita (undiscounted & discounted) is
-##      added to the three CE slides: numerator = the contract's cumulative
-##      additional cost (= workbook Budget_Impact); denominator = 25 x the 2026
-##      national population, counted ONCE per location x year x age x sex from the
-##      baseline (current-course) demography in dt_output_dalys.rds (UN WPP 2024).
+##      added to the three CE slides. Model 09 precomputes it (simple mean over
+##      2026-2050 of each year's additional cost per capita, where the year's
+##      additional cost is divided by that year's national Indonesia population
+##      from out_model/model_output_Indonesia_htncov2_aspirational.rds) and carries
+##      it on the results contract (pc_undisc_val / pc_disc_val). The deck reads
+##      the precomputed value and never computes cost / population. The workbooks
+##      expose the SAME metric as live Excel per-capita formulae (Budget_Impact,
+##      Annual_Cost and a Cost_Effectiveness scenario summary).
 ##    * A separate 70-30-30 -> 70-70-70 cascade strategy sub-section (4 slides)
 ##      reads ONLY the ISOLATED cascade workbook under output/70_30_30_to_70_70_70/
 ##      (validated to contain exactly {baseline, S_70_30_30_TO_70_70_70}); it is
@@ -149,7 +153,6 @@ deck_file <- outp("09_deck_results.rds")
 wb_comb   <- outp("indonesia_model_cost_value_clinical_public_health_formulae.xlsx")
 wb_clin   <- outp("indonesia_model_cost_value_formulae.xlsx")
 wb_ph     <- outp("indonesia_cost_value_public_health_formulae.xlsx")
-dalys_file<- outp("dt_output_dalys.rds")   # authoritative model demography (per-capita denominator)
 csv_cmp   <- here("data", "raw", "03_asean_cvd_40q30_comparison.csv")
 
 ## Isolated 70-30-30 -> 70-70-70 cascade run (its OWN output dir; never merged with the
@@ -159,7 +162,7 @@ casc_wb <- if (nzchar(.casc_dir)) file.path(.casc_dir, "indonesia_70_30_30_to_70
   here("output", "70_30_30_to_70_70_70", "indonesia_70_30_30_to_70_70_70_cost_value_formulae.xlsx")
 
 .req_files <- c(results_contract = deck_file, combined_workbook = wb_comb,
-                model_demography = dalys_file, comparator = csv_cmp, cascade_workbook = casc_wb)
+                comparator = csv_cmp, cascade_workbook = casc_wb)
 .missing <- .req_files[!file.exists(.req_files)]
 if (length(.missing))
   stop("VALIDATION STOP -- required input file(s) not found:\n  ",
@@ -368,10 +371,11 @@ impact_row <- function(tab, sc) data.table(
   qr  = fmt_pct(hv(sc, "cvd_40q30_pct_reduction_2050", tab), 1),
   dr  = fmt_pct(hv(sc, "pct_reduction_deaths_2050", tab), 1))
 ## Average annual additional cost per capita for one scenario (undisc / disc):
-## cumulative additional cost / (25 x 2026 national population). `percap_den` is
-## built in the percapita chunk (evaluated before any table chunk runs).
-pc_undisc <- function(tab, sc) fmt_usd_pc(hv(sc, "incremental_cost", tab)      / percap_den)
-pc_disc   <- function(tab, sc) fmt_usd_pc(hv(sc, "disc_incremental_cost", tab) / percap_den)
+## precomputed by Model 09 and carried on the results contract (pc_undisc_val /
+## pc_disc_val = simple mean over 2026-2050 of the annual additional cost per
+## capita). No population denominator is applied in the deck; missing -> "--".
+pc_undisc <- function(tab, sc) fmt_usd_pc(hv(sc, "pc_undisc_val", tab))
+pc_disc   <- function(tab, sc) fmt_usd_pc(hv(sc, "pc_disc_val", tab))
 ce_row <- function(tab, sc) cbind(
   impact_row(tab, sc),
   data.table(cpd = fmt_usd(hv(sc, "cost_per_death_averted", tab)),
@@ -402,40 +406,28 @@ family_table <- function(tab, agg_id, row_fun) {
 
 ```{r percapita, include=FALSE}
 ## ---------------------------------------------------------------------------
-## 4. Average annual ADDITIONAL cost per capita (team request), for the three
-##    aggregate scenarios. Numerator = cumulative additional cost over the
-##    scale-up horizon (contract value = workbook Budget_Impact cumulative
-##    additional cost; 2025 additional cost is 0 by construction, so the
-##    horizon total equals the 2026-2050 sum). Denominator = 25 x 2026 national
-##    population, counted ONCE per location x year x age x sex from the model's
-##    authoritative demography, NOT the eligible/treated population.
+## 4. Average annual ADDITIONAL cost per capita (team request), per scenario. The
+##    value is precomputed by Model 09 and carried on the results contract
+##    (pc_undisc_val / pc_disc_val, already merged into met_clin/met_ph/met_comb):
+##    the simple mean over 2026-2050 of each year's additional cost per capita,
+##    where Model 09 divides each year's additional cost by that year's national
+##    Indonesia population from out_model/model_output_Indonesia_htncov2_aspirational.rds.
+##    The workbooks carry the SAME metric as LIVE per-capita formulae; the deck
+##    reads the precomputed contract value (no Excel recalc) and NEVER computes
+##    cost / population. Robust to whatever scenarios the run produced: values are
+##    keyed by scenario and default to "--" (via hv()) when a scenario has none.
 ## ---------------------------------------------------------------------------
-percap_years <- (HZ_START + 1L):HZ_END                       # 2026..2050
+percap_years <- (HZ_START + 1L):HZ_END                       # 2026..2050 display horizon
 val_stop(length(percap_years) == 25L,
          sprintf("expected 25 projection years (2026-%d); got %d", HZ_END, length(percap_years)))
 
-## Single defensible national population series = the baseline (current-course)
-## demographic projection, which is cause-invariant. Guard that claim.
-.dd     <- as.data.table(readRDS(dalys_file))
-.pk     <- c("location", "year", "age", "sex")
-.base26 <- .dd[scenario == "baseline" & location == "Indonesia" & year == (HZ_START + 1L)]
-val_stop(nrow(.base26) > 0, "model demography has no baseline Indonesia row for the 2026 population denominator")
-.spread <- .base26[, .(sp = max(population) - min(population)), by = .pk]
-val_stop(all(.spread$sp < 1),
-         "no single defensible 2026 national-population series: baseline population differs by >=1 person across causes within a location/year/age/sex cell")
-.pop_cells <- .base26[, .(population = mean(population)), by = .pk]   # collapse fp noise across causes
-pop_2026   <- .pop_cells[, sum(population)]
-val_stop(is.finite(pop_2026) && pop_2026 > 1e8, "2026 national population is missing or implausible")
-percap_den <- length(percap_years) * pop_2026
-rm(.dd)  # free the large demography table
-
-## Formatted "undiscounted / discounted" per-capita callout for one aggregate scenario.
+## Formatted "undiscounted / discounted" per-capita callout for one scenario.
 percap_vals <- function(tab, sc) {
-  undisc <- hv(sc, "incremental_cost", tab) / percap_den
-  disc   <- hv(sc, "disc_incremental_cost", tab) / percap_den
+  undisc <- hv(sc, "pc_undisc_val", tab)
+  disc   <- hv(sc, "pc_disc_val", tab)
   list(undisc = undisc, disc = disc,
-       txt = sprintf("\\textbf{Average annual additional cost per capita} (simple average over the %d-year scale-up, %d population denominator): \\textbf{%s} undiscounted, \\textbf{%s} discounted.",
-                     length(percap_years), (HZ_START + 1L), fmt_usd_pc(undisc), fmt_usd_pc(disc)))
+       txt = sprintf("\\textbf{Average annual additional cost per capita} (simple mean of the annual additional cost per capita, %d-%d): \\textbf{%s} undiscounted, \\textbf{%s} discounted.",
+                     (HZ_START + 1L), HZ_END, fmt_usd_pc(undisc), fmt_usd_pc(disc)))
 }
 ## Emit the per-capita callout as a compact tinted single line under a cost table.
 percap_callout <- function(tab, sc, famcol = "wbnavy") {
@@ -900,7 +892,7 @@ if (nrow(ft$tb)) {
 } else cat("\\begin{center}\\large No clinical interventions selected for this run.\\end{center}")
 ```
 
-\srcmethod{\textbf{Source:} results contract (\texttt{09\_deck\_results.rds}) + clinical workbook; `r (HZ_START+1L)` population from model demography (UN WPP 2024). \textbf{Method:} cost per death averted $=$ discounted additional cost $\div$ deaths averted (`r fmt_pct(disc_rate*100,0)`/yr, `r price_year` US\$, `r cost_perspective`); the two per-capita columns $=$ each row's cumulative additional cost (undiscounted / discounted) $\div$ (25 $\times$ `r (HZ_START+1L)` national population), a simple average over the 25-year horizon. \costcaveat}
+\srcmethod{\textbf{Source:} results contract (\texttt{09\_deck\_results.rds}); Model 09 divides each year's additional cost by that year's Indonesia population from \texttt{model\_output\_Indonesia\_htncov2\_aspirational.rds} (workbooks carry the same as live \texttt{Budget\_Impact} / \texttt{Cost\_Effectiveness} formulae). \textbf{Method:} cost per death averted $=$ discounted additional cost $\div$ deaths averted (`r fmt_pct(disc_rate*100,0)`/yr, `r price_year` US\$, `r cost_perspective`); the two per-capita columns are the simple mean of the annual additional cost per capita (undiscounted / discounted) over `r (HZ_START+1L)`--`r HZ_END`. \costcaveat}
 
 ## Population policies avert deaths at very low cost
 
@@ -921,7 +913,7 @@ if (nrow(ft$tb)) {
 } else cat("\\begin{center}\\large No public-health policies selected for this run.\\end{center}")
 ```
 
-\srcmethod{\textbf{Source:} results contract (\texttt{09\_deck\_results.rds}) + public-health workbook; `r (HZ_START+1L)` population from model demography (UN WPP 2024). \textbf{Method:} cumulative deaths averted `r HZ_START`--`r HZ_END` vs baseline; tobacco and sodium packages each modelled as one joint run; the two per-capita columns $=$ each row's cumulative additional cost (undiscounted / discounted) $\div$ (25 $\times$ `r (HZ_START+1L)` national population). \costcaveat}
+\srcmethod{\textbf{Source:} results contract (\texttt{09\_deck\_results.rds}); Model 09 divides each year's additional cost by that year's Indonesia population from \texttt{model\_output\_Indonesia\_htncov2\_aspirational.rds} (workbooks carry the same as live \texttt{Budget\_Impact} / \texttt{Cost\_Effectiveness} formulae). \textbf{Method:} cumulative deaths averted `r HZ_START`--`r HZ_END` vs baseline; tobacco and sodium packages each modelled as one joint run; the two per-capita columns are the simple mean of the annual additional cost per capita (undiscounted / discounted) over `r (HZ_START+1L)`--`r HZ_END`. \costcaveat}
 
 
 # Clinical and population action, combined
@@ -966,7 +958,7 @@ if (has_joint) {
 }
 ```
 
-\srcmethod{\textbf{Source:} results contract (\texttt{09\_deck\_results.rds}) + combined workbook; `r (HZ_START+1L)` population from model demography (UN WPP 2024). \textbf{Method:} joint package $=$ one projection applying both families (not their sum); the two per-capita columns $=$ each row's cumulative additional cost (undiscounted / discounted, `r fmt_pct(disc_rate*100,0)`/yr, `r price_year` US\$) $\div$ (25 $\times$ `r (HZ_START+1L)` national population). \costcaveat}
+\srcmethod{\textbf{Source:} results contract (\texttt{09\_deck\_results.rds}); Model 09 divides each year's additional cost by that year's Indonesia population from \texttt{model\_output\_Indonesia\_htncov2\_aspirational.rds} (workbooks carry the same as live \texttt{Budget\_Impact} / \texttt{Cost\_Effectiveness} formulae). \textbf{Method:} joint package $=$ one projection applying both families (not their sum); the two per-capita columns are the simple mean of the annual additional cost per capita (undiscounted / discounted, `r fmt_pct(disc_rate*100,0)`/yr, `r price_year` US\$) over `r (HZ_START+1L)`--`r HZ_END`. \costcaveat}
 
 ## Indonesia's premature cardiovascular mortality can fall toward its neighbours
 

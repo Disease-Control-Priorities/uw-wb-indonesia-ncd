@@ -592,6 +592,114 @@ if (length(.miss40))
 BCAP <- setNames(as.character(bca_params$value), bca_params$parameter_id)
 
 # ==========================================================================
+# Authoritative annual national population denominator (annual per-capita cost).
+#   Source: this run's out_model/model_output_Indonesia_htncov2_aspirational.rds
+#   (resolved under wd_outp -- never a machine-specific absolute path). We take
+#   the BASELINE (current-course) scenario -- the single demographic reference
+#   series applied identically to every scenario in a year -- and de-duplicate
+#   population across the cause / model-state dimensions before summing the
+#   unique age x sex cells per year. `pop` is invariant across cause within a
+#   scenario-year-age-sex cell; it differs only marginally (a survivor effect)
+#   across intervention scenarios, so the baseline series is the one defensible
+#   national denominator. Fails early if the file, the baseline scenario, or a
+#   required year cannot be uniquely resolved to one finite, positive value.
+# ==========================================================================
+.natpop_file <- file.path(wd_outp, "out_model", "model_output_Indonesia_htncov2_aspirational.rds")
+if (!file.exists(.natpop_file))
+  stop("Model 09: authoritative national-population source not found (", .natpop_file,
+       "). Annual per-capita costing requires the htncov2_aspirational Model 06 output.",
+       call. = FALSE)
+.natpop_raw <- as.data.table(readRDS(.natpop_file))
+.npreq <- c("scenario", "year", "age", "sex", "pop")
+.npmiss <- setdiff(.npreq, names(.natpop_raw))
+if (length(.npmiss))
+  stop("Model 09: national-population source missing column(s): ",
+       paste(.npmiss, collapse = ", "), " in ", basename(.natpop_file), call. = FALSE)
+if ("location" %in% names(.natpop_raw))                       # national rows only (guard multi-level)
+  .natpop_raw <- .natpop_raw[location == "Indonesia"]
+.npall <- .natpop_raw[scenario == base_id, .(year, age, sex, pop)]  # cause/state rows share one pop
+if (!nrow(.npall))
+  stop("Model 09: baseline scenario '", base_id, "' absent from ", basename(.natpop_file),
+       "; cannot build the national-population denominator.", call. = FALSE)
+# pop is invariant across cause/state within a year x age x sex cell up to
+# summation-order floating-point noise; require the spread < 1 person, then
+# collapse to one value per cell (mean) so the denominator is uniquely resolved.
+.npspread <- .npall[, .(sp = max(pop) - min(pop)), by = .(year, age, sex)]
+if (any(.npspread$sp >= 1))
+  stop("Model 09: national population is not uniquely resolved (",
+       nrow(.npspread[sp >= 1]), " age x sex x year cell(s) carry baseline pop differing by ",
+       ">=1 person across cause/state); cannot build one denominator per year.", call. = FALSE)
+.npbase <- .npall[, .(pop = mean(pop)), by = .(year, age, sex)]  # collapse fp noise across cause/state
+national_pop_dt <- .npbase[, .(national_population = sum(pop)), by = year][order(year)]
+if (any(!is.finite(national_pop_dt$national_population)) ||
+    any(national_pop_dt$national_population <= 0))
+  stop("Model 09: national population is non-finite or non-positive for year(s): ",
+       paste(national_pop_dt[!is.finite(national_population) | national_population <= 0]$year,
+             collapse = ", "), ".", call. = FALSE)
+# Reconciliation only (does NOT change the authoritative baseline series): the
+# spread across intervention scenarios should be a small survivor effect.
+.np_scn <- unique(.natpop_raw[, .(scenario, year, age, sex, pop)])[
+  , .(tot = sum(pop)), by = .(scenario, year)][
+  , .(spread_rel = (max(tot) - min(tot)) / max(tot)), by = year]
+.np_spread_max <- if (nrow(.np_scn)) max(.np_scn$spread_rel) else 0
+message(sprintf("  National-population denominator: baseline series from %s (%d-%d; %.2f%% max cross-scenario spread).",
+                basename(.natpop_file), min(national_pop_dt$year), max(national_pop_dt$year),
+                100 * .np_spread_max))
+rm(.natpop_raw, .npall, .npspread, .npbase, .np_scn)
+
+# Look up national population for a vector of years; errors on any missing /
+# non-finite / non-positive year (per-capita denominators must be well-defined).
+.national_population_for <- function(years) {
+  yy  <- as.integer(years)
+  idx <- match(yy, national_pop_dt$year)
+  if (anyNA(idx))
+    stop("Model 09: no national population for year(s): ",
+         paste(unique(yy[is.na(idx)]), collapse = ", "),
+         " (source ", basename(.natpop_file), ").", call. = FALSE)
+  v <- national_pop_dt$national_population[idx]
+  if (any(!is.finite(v)) || any(v <= 0))
+    stop("Model 09: national population non-finite/non-positive for year(s): ",
+         paste(unique(yy[!is.finite(v) | v <= 0]), collapse = ", "), ".", call. = FALSE)
+  v
+}
+# Attach national_population + the four annual cost-per-capita columns to a
+# Budget_Impact-like table (annual scenario x year costs). By construction the
+# same-year national population is identical for every scenario.
+.add_budget_percapita <- function(dt) {
+  if (!nrow(dt)) return(dt)
+  dt[, national_population := .national_population_for(year)]
+  dt[, baseline_cost_per_capita         := baseline_cost         / national_population]
+  dt[, scenario_cost_per_capita         := scenario_cost         / national_population]
+  dt[, incremental_cost_per_capita      := incremental_cost      / national_population]
+  dt[, disc_incremental_cost_per_capita := disc_incremental_cost / national_population]
+  dt[]
+}
+# Attach national_population + per-capita versions of the four component annual
+# cost columns to an Annual_Cost-like table. The denominator is ALWAYS the
+# national population for that year -- never the component's eligible/PIN count.
+.add_annualcost_percapita <- function(dt) {
+  if (!nrow(dt)) return(dt)
+  dt[, national_population := .national_population_for(year)]
+  dt[, annual_cost_baseline_per_capita    := annual_cost_baseline    / national_population]
+  dt[, annual_cost_scenario_per_capita    := annual_cost_scenario    / national_population]
+  dt[, annual_cost_incremental_per_capita := annual_cost_incremental / national_population]
+  dt[, disc_cost_incremental_per_capita   := disc_cost_incremental   / national_population]
+  dt[]
+}
+# Per-scenario summary per-capita for the deck contract: the simple mean, over
+# the analysis horizon EXCLUDING the first year (2025 -> 2026-2050), of the
+# annual incremental / discounted-incremental cost per capita on a Budget_Impact
+# table. This is the value the deck displays; the workbooks carry the same metric
+# as a live Cost_Effectiveness formula. Returns one row per scenario.
+.deck_percap_from_bi <- function(bi_dt) {
+  if (!nrow(bi_dt))
+    return(data.table(scenario = character(0), pc_undisc_val = numeric(0), pc_disc_val = numeric(0)))
+  y0 <- min(bi_dt$year)
+  bi_dt[year > y0, .(pc_undisc_val = mean(incremental_cost_per_capita),
+                     pc_disc_val   = mean(disc_incremental_cost_per_capita)), by = scenario]
+}
+
+# ==========================================================================
 # Active-scenario contract helpers (shared across all three workbooks).
 #
 # `Scenario_Catalog` describes exactly the current run's scenarios and is the
@@ -636,6 +744,7 @@ BCAP <- setNames(as.character(bca_params$value), bca_params$parameter_id)
 # untouched; this is an additional, non-BCA contract.
 deck_cea_list     <- list()
 deck_catalog_list <- list()
+deck_percap_list  <- list()   # per-family, per-scenario mean annual per-capita (deck contract)
 
 # ==========================================================================
 # CLINICAL (FAIR Choices) cost/value workbooks -- written only when clinical
@@ -796,6 +905,8 @@ if (nrow(annual_cost))
   setcolorder(annual_cost, c("scenario", "year", "intervention_id", "cause_code",
                              "cost_record_id", "cost_component_key", "cost_join_key",
                              "cost_scope", "population_in_need_measure"))
+# Annual per-capita component costs (national population denominator; Section 3).
+annual_cost <- .add_annualcost_percapita(annual_cost)
 
 ## --- 5. Budget impact (UNDISCOUNTED headline; discounted kept separate) -----
 if (nrow(annual_cost)) {
@@ -808,6 +919,8 @@ if (nrow(annual_cost)) {
   bi[, cumulative_incremental_cost := cumsum(incremental_cost), by = scenario]
   bi[, cumulative_disc_incremental_cost := cumsum(disc_incremental_cost), by = scenario]
 } else bi <- data.table()
+# National population + annual per-capita budget-impact columns (Section 3).
+bi <- .add_budget_percapita(bi)
 
 ## --- 6. Cost-effectiveness: USD per death averted --------------------------
 da_by_scn <- mort[scenario %in% comparators,
@@ -840,9 +953,16 @@ setcolorder(cea, c("scenario", "scenario_label", "deaths_averted", "cases_averte
                    "incremental_cost", "disc_incremental_cost",
                    "cost_per_death_averted", "dominance"))
 setorder(cea, -deaths_averted)
+# Summary annual per-capita (mean over 2026-2050) on the R-value Cost_Effectiveness.
+cea <- merge(cea, .deck_percap_from_bi(bi)[, .(scenario,
+              annual_cost_incremental_per_capita = pc_undisc_val,
+              disc_cost_incremental_per_capita   = pc_disc_val)],
+             by = "scenario", all.x = TRUE)
+setorder(cea, -deaths_averted)
 
 # Capture the clinical R-value CE table for the deck results contract.
 deck_cea_list[["clinical"]]     <- copy(cea)
+deck_percap_list[["clinical"]]  <- .deck_percap_from_bi(bi)   # mean annual per-capita for the deck
 deck_catalog_list[["clinical"]] <- .scenario_catalog_dt(fair_scenarios, "clinical",
                                                         base_id, produced)
 
@@ -966,6 +1086,45 @@ if (nrow(cea)) {
   add_qa("CEA reconciliation (detail -> summary ratio)", "consistent",
          if (rec_ok) "consistent" else "mismatch", if (rec_ok) "PASS" else "FAIL", rec_note)
 }
+# (10) national population denominator: one finite, positive value per analysis year
+.np_years_needed <- if (nrow(bi)) sort(unique(bi$year)) else analysis_yrs
+.np_ok <- tryCatch({ v <- .national_population_for(.np_years_needed); all(is.finite(v) & v > 0) },
+                   error = function(e) FALSE)
+add_qa("National population denominator valid for every analysis year", TRUE, .np_ok,
+       if (isTRUE(.np_ok)) "PASS" else "FAIL",
+       "One finite, positive Indonesia population per year from model_output_Indonesia_htncov2_aspirational.rds")
+# (11) national_population identical across scenarios within a year
+if (nrow(bi)) {
+  .np_nd <- bi[, .(nd = uniqueN(round(national_population, 6))), by = year][, max(nd)]
+  add_qa("National population identical across scenarios within year", 1, .np_nd,
+         if (.np_nd == 1) "PASS" else "FAIL", "Same denominator applied to every scenario in a year")
+}
+# (12) budget-impact per-capita reconciliation: per_capita x population == cost
+if (nrow(bi)) {
+  .pc_res <- bi[, max(abs(baseline_cost_per_capita         * national_population - baseline_cost),
+                      abs(scenario_cost_per_capita         * national_population - scenario_cost),
+                      abs(incremental_cost_per_capita      * national_population - incremental_cost),
+                      abs(disc_incremental_cost_per_capita * national_population - disc_incremental_cost))]
+  .pc_tol <- max(1e-3, 1e-9 * bi[, max(abs(scenario_cost))])
+  add_qa("Budget-impact per-capita reconciliation (per_capita x population = cost)", "~0",
+         signif(.pc_res, 3), if (.pc_res <= .pc_tol) "PASS" else "FAIL",
+         "baseline/scenario/incremental/discounted per-capita each reconcile to that year's cost")
+  .pc_bad <- bi[, sum(!is.finite(baseline_cost_per_capita) | !is.finite(scenario_cost_per_capita) |
+                       !is.finite(incremental_cost_per_capita) | !is.finite(disc_incremental_cost_per_capita))]
+  add_qa("No missing/non-finite budget-impact per-capita values", 0, .pc_bad,
+         if (.pc_bad == 0) "PASS" else "FAIL", "population positive & numerators finite -> per-capita finite")
+}
+# (13) Annual_Cost component per-capita reconciliation (national denominator)
+if (nrow(annual_cost)) {
+  .ac_res <- annual_cost[, max(abs(annual_cost_baseline_per_capita    * national_population - annual_cost_baseline),
+                               abs(annual_cost_scenario_per_capita    * national_population - annual_cost_scenario),
+                               abs(annual_cost_incremental_per_capita * national_population - annual_cost_incremental),
+                               abs(disc_cost_incremental_per_capita   * national_population - disc_cost_incremental))]
+  .ac_tol <- max(1e-3, 1e-9 * annual_cost[, max(abs(annual_cost_scenario))])
+  add_qa("Annual_Cost per-capita reconciliation (per_capita x population = cost)", "~0",
+         signif(.ac_res, 3), if (.ac_res <= .ac_tol) "PASS" else "FAIL",
+         "component annual per-capita costs use the national denominator, not the eligible/PIN count")
+}
 qa_dt <- rbindlist(qa)
 
 ## --- 9. Assemble supporting / metadata tables ------------------------------
@@ -1049,7 +1208,7 @@ readme <- data.table(section = c(
   "All-cause deaths are constant across cause, so they are taken ONCE per (scenario, year, age, sex) and reported in Background_Mortality (never summed per modeled cause).",
   "annual_cost = population_in_need x coverage(t) x frequency x unit_cost. PIN measure maps 'all'->eligible population, 'prevalence'->sick stock, 'incidence'->new cases.",
   "Components flagged 'shared-count-once' (cost_join_key ...__C_SHARED) are counted once at intervention level, never once per affected cause.",
-  "Budget impact reports UNDISCOUNTED baseline, scenario, incremental and cumulative incremental cost. Discounted costs are separate columns.",
+  "Budget impact reports UNDISCOUNTED baseline, scenario, incremental and cumulative incremental cost. Discounted costs are separate columns. national_population and the *_cost_per_capita columns give annual cost per capita = that year's cost / that year's national Indonesia population; national annual population is taken from out_model/model_output_Indonesia_htncov2_aspirational.rds (baseline series, de-duplicated across cause; Annual_Cost carries the matching per-component per-capita columns).",
   "USD per death averted = cumulative discounted incremental cost / cumulative (undiscounted) deaths averted over the horizon. Not a DALY-based ICER.",
   "Value of statistical life (VSL/VSLY) is reused from Model 08 only when its scenarios reconcile with this run; otherwise it is omitted (see Economic_Value).",
   "Header dark-blue; derived light-blue; unresolved/flagged pale-yellow; PASS green; FAIL/REVIEW red/orange.",
@@ -1104,6 +1263,7 @@ fmt_of <- function(col) {
   if (grepl("coverage|fraction|^cov_", cl))                         return("0.0%")
   if (grepl("unit_cost", cl))                                       return("#,##0.00")
   if (grepl("per_death", cl))                                       return("#,##0")
+  if (grepl("per_capita", cl) && !grepl("usd_per_capita", cl))      return("#,##0.00")
   if (grepl("cost|value|benefit|^pin_", cl))                        return("#,##0")
   if (grepl("death|case|population|averted|^well$|^sick$|dead|new_cases", cl)) return("#,##0")
   NA_character_
@@ -1304,6 +1464,7 @@ fmt_of2 <- function(col) {
   if (grepl("^cov_baseline$|^cov_target$", cl))                 return("0.0%")
   if (grepl("unit_cost|r_quantity", cl))                        return("#,##0.00")
   if (grepl("per_death", cl))                                   return("#,##0")
+  if (grepl("per_capita", cl) && !grepl("usd_per_capita", cl))  return("#,##0.00")
   if (grepl("cost|value|benefit|^pin_|net_benefit|budget", cl)) return("#,##0")
   if (grepl("death|case|population|averted|duplicate_count|key_count|distinct|residual|negative|_count$|^count$", cl)) return("#,##0")
   NA_character_
@@ -1498,7 +1659,7 @@ readme_f <- data.table(
     "Annual_Mortality carries the R health aggregates (cases, deaths, baseline); Annual_Cost carries the full-precision R population quantity before the PIN fraction. The 157k-row state trace stays in the companion R workbook.",
     "annual_cost = population_in_need x coverage(t) x frequency x unit_cost. PIN measure maps 'all'->eligible population, 'prevalence'->sick stock, 'incidence'->new cases.",
     "Components flagged 'shared-count-once' (cost_join_key ...__C_SHARED) are counted once at intervention level, never once per affected cause (see Annual_Cost shared_duplicate_count and QA).",
-    "Budget impact reports UNDISCOUNTED baseline, scenario, incremental and cumulative incremental cost. Discounted costs are separate columns.",
+    "Budget impact reports UNDISCOUNTED baseline, scenario, incremental and cumulative incremental cost. Discounted costs are separate columns. The four *_cost_per_capita columns are LIVE formulae (= that year's cost / national_population); national_population (grey R-source) is each year's national Indonesia population from out_model/model_output_Indonesia_htncov2_aspirational.rds (baseline series, de-duplicated across cause). Annual_Cost carries the matching per-component per-capita formulae, and Cost_Effectiveness carries the scenario mean annual incremental/discounted per-capita (2026-2050).",
     "USD per death averted = cumulative discounted incremental cost / cumulative (undiscounted) deaths averted over the horizon. Not a DALY-based ICER.",
     "Reference-Case benefit-cost analysis (2019 Robinson et al. Guidelines): Health_Outcomes (Model 07 averted deaths/YLL/YLD/DALY & life-years gained), Economic_Value (Model 08 VSL/VSLY source with LIVE VSL-transfer, floor, VSLY, discount and PV-benefit formulas) and Benefit_Cost (PV benefits, PV costs converted to the benefit basis, net benefit and BCR). Preferred VSL = MAX(160xGNIpc_US x (GNIpc_IDN/GNIpc_US)^1.5, 20xGNIpc_IDN); 100x/160x GNI sensitivities. PARTIAL mortality-benefit BCA -- not a full societal BCA, and distinct from Cost_Effectiveness (USD per death averted).",
     "QA_Checks recomputes each invariant in Excel and reconciles the Excel cost-effectiveness headline against the R engine values stored on Calculation_Assumptions; BCA checks cover the VSL floor, reference-case parameters, price-year basis and Benefit_Cost scenario coverage. PASS/FAIL/REVIEW are conditionally formatted.",
@@ -1612,7 +1773,9 @@ ac_cols <- c("scenario","year","intervention_id","cause_code","cost_record_id",
              "indonesia_adjusted_flag","price_year","discount_factor","disc_cost_baseline",
              "disc_cost_scenario","disc_cost_incremental","cov_target","cov_start_year",
              "cov_target_year","c_age_start","c_age_stop","c_sex","r_quantity_scenario",
-             "r_quantity_baseline","shared_duplicate_count")
+             "r_quantity_baseline","shared_duplicate_count",
+             "national_population","annual_cost_baseline_per_capita","annual_cost_scenario_per_capita",
+             "annual_cost_incremental_per_capita","disc_cost_incremental_per_capita")
 if (n_ac > 0) {
   q_s <- ifelse(annual_cost$population_in_need_fraction > 0,
                 annual_cost$pin_scenario / annual_cost$population_in_need_fraction, 0)
@@ -1630,6 +1793,9 @@ if (n_ac > 0) {
   ac$r_quantity_scenario <- q_s                          # AF
   ac$r_quantity_baseline  <- q_b                         # AG
   ac$shared_duplicate_count <- NA_real_                  # AH formula
+  # AI = R-source national population denominator; AJ..AM per-capita = live formulae
+  ac$national_population                <- annual_cost$national_population
+  for (cn in ac_cols[36:39]) ac[[cn]] <- NA_real_
   ac <- ac[, ac_cols]
 } else {
   ac <- as.data.frame(setNames(replicate(length(ac_cols), logical(0), simplify = FALSE), ac_cols))
@@ -1666,9 +1832,14 @@ if (n_ac > 0) {
   wf(34, function(r) sprintf(                                               # AH shared_duplicate_count
     "IF(H%d=\"shared-count-once\",COUNTIFS($A$2:$A$%d,A%d,$B$2:$B$%d,B%d,$E$2:$E$%d,E%d),1)",
     r, r_ac, r, r_ac, r, r_ac, r))
+  # AJ..AM component annual cost per capita = component cost / national_population (AI)
+  wf(36, function(r) sprintf("IF(AI%d=0,\"\",Q%d/AI%d)", r, r, r))         # annual_cost_baseline_per_capita
+  wf(37, function(r) sprintf("IF(AI%d=0,\"\",R%d/AI%d)", r, r, r))         # annual_cost_scenario_per_capita
+  wf(38, function(r) sprintf("IF(AI%d=0,\"\",S%d/AI%d)", r, r, r))         # annual_cost_incremental_per_capita
+  wf(39, function(r) sprintf("IF(AI%d=0,\"\",Y%d/AI%d)", r, r, r))         # disc_cost_incremental_per_capita
 }
 style_sheet("Annual_Cost", ac_cols, n_ac,
-            formula_cols = c(10:31, 34), rsource_cols = c(32, 33))
+            formula_cols = c(10:31, 34, 36:39), rsource_cols = c(32, 33, 35))
 
 # CASCADE cost-coverage tie-out (opt-in): the engine costed with the EXACT
 # per-year effective-coverage path (not a linear ramp), so replace the Annual_Cost
@@ -1689,11 +1860,15 @@ if (n_ac > 0 && isTRUE(get0("run_cascade_70_30_30_to_70_70_70", ifnotfound = FAL
 # 11.11 Budget_Impact  (C:H = formulas over Annual_Cost)
 # =========================================================================
 bud_cols <- c("scenario","year","baseline_cost","scenario_cost","incremental_cost",
-              "disc_incremental_cost","cumulative_incremental_cost","cumulative_disc_incremental_cost")
+              "disc_incremental_cost","cumulative_incremental_cost","cumulative_disc_incremental_cost",
+              "national_population","baseline_cost_per_capita","scenario_cost_per_capita",
+              "incremental_cost_per_capita","disc_incremental_cost_per_capita")
 if (n_bi > 0) {
   bud <- data.frame(scenario = bi$scenario, year = bi$year, stringsAsFactors = FALSE)
   for (cn in bud_cols[3:8]) bud[[cn]] <- NA_real_
-} else bud <- as.data.frame(setNames(replicate(8, logical(0), simplify = FALSE), bud_cols))
+  bud$national_population <- bi$national_population        # I = R-source denominator
+  for (cn in bud_cols[10:13]) bud[[cn]] <- NA_real_        # J..M per-capita = live formulae
+} else bud <- as.data.frame(setNames(replicate(length(bud_cols), logical(0), simplify = FALSE), bud_cols))
 addWorksheet(wb, "Budget_Impact")
 writeData(wb, "Budget_Impact", bud, headerStyle = st_hdr)
 if (n_bi > 0) {
@@ -1709,18 +1884,26 @@ if (n_bi > 0) {
                x = frows(function(r) sprintf("SUMIFS($E$2:E%d,$A$2:A%d,A%d)", r, r, r), R))                 # cumulative
   writeFormula(wb, "Budget_Impact", startCol = 8, startRow = 2,
                x = frows(function(r) sprintf("SUMIFS($F$2:F%d,$A$2:A%d,A%d)", r, r, r), R))                 # cumulative disc
+  # J..M annual cost per capita = same-year cost / national_population (col I), live formulae
+  writeFormula(wb, "Budget_Impact", startCol = 10, startRow = 2, x = frows(function(r) sprintf("IF(I%d=0,\"\",C%d/I%d)", r, r, r), R))
+  writeFormula(wb, "Budget_Impact", startCol = 11, startRow = 2, x = frows(function(r) sprintf("IF(I%d=0,\"\",D%d/I%d)", r, r, r), R))
+  writeFormula(wb, "Budget_Impact", startCol = 12, startRow = 2, x = frows(function(r) sprintf("IF(I%d=0,\"\",E%d/I%d)", r, r, r), R))
+  writeFormula(wb, "Budget_Impact", startCol = 13, startRow = 2, x = frows(function(r) sprintf("IF(I%d=0,\"\",F%d/I%d)", r, r, r), R))
 }
-style_sheet("Budget_Impact", bud_cols, n_bi, formula_cols = 3:8)
+style_sheet("Budget_Impact", bud_cols, n_bi, formula_cols = c(3:8, 10:13), rsource_cols = 9)
 
 # =========================================================================
 # 11.12 Cost_Effectiveness  (C:I = formulas)
 # =========================================================================
 ce_cols <- c("scenario","scenario_label","deaths_averted","cases_averted",
              "incremental_cost","disc_incremental_cost","cost_per_death_averted",
-             "dominance","reconciliation_status")
+             "dominance","reconciliation_status",
+             "annual_cost_incremental_per_capita","disc_cost_incremental_per_capita")
 ce <- data.frame(scenario = cea$scenario, scenario_label = cea$scenario_label, stringsAsFactors = FALSE)
 for (cn in ce_cols[3:7]) ce[[cn]] <- NA_real_
 ce$dominance <- NA_character_; ce$reconciliation_status <- NA_character_
+ce$annual_cost_incremental_per_capita <- NA_real_   # J = live formula
+ce$disc_cost_incremental_per_capita   <- NA_real_   # K = live formula
 addWorksheet(wb, "Cost_Effectiveness")
 writeData(wb, "Cost_Effectiveness", ce, headerStyle = st_hdr)
 R <- 2:r_ce
@@ -1742,7 +1925,13 @@ writeFormula(wb, "Cost_Effectiveness", startCol = 9, startRow = 2,
              x = frows(function(r) sprintf(
                "IF(AND(ABS(F%d-SUMIFS('Budget_Impact'!$F$2:$F$%d,'Budget_Impact'!$A$2:$A$%d,A%d))<='Calculation_Assumptions'!$B$11,ABS(C%d-SUMIFS('Annual_Mortality'!$H$2:$H$%d,'Annual_Mortality'!$A$2:$A$%d,A%d))<='Calculation_Assumptions'!$B$11),\"consistent\",\"mismatch\")",
                r, r_bi, r_bi, r, r, r_am, r_am, r), R))
-style_sheet("Cost_Effectiveness", ce_cols, n_ce, formula_cols = 3:9,
+# J/K summary annual per-capita = mean of Budget_Impact per-capita (L/M) over the
+# analysis horizon excluding the start year (>= analysis_start_year + 1).
+writeFormula(wb, "Cost_Effectiveness", startCol = 10, startRow = 2,
+             x = frows(function(r) sprintf("IFERROR(AVERAGEIFS('Budget_Impact'!$L$2:$L$%d,'Budget_Impact'!$A$2:$A$%d,A%d,'Budget_Impact'!$B$2:$B$%d,\">=\"&('Calculation_Assumptions'!$B$2+1)),\"\")", r_bi, r_bi, r, r_bi), R))
+writeFormula(wb, "Cost_Effectiveness", startCol = 11, startRow = 2,
+             x = frows(function(r) sprintf("IFERROR(AVERAGEIFS('Budget_Impact'!$M$2:$M$%d,'Budget_Impact'!$A$2:$A$%d,A%d,'Budget_Impact'!$B$2:$B$%d,\">=\"&('Calculation_Assumptions'!$B$2+1)),\"\")", r_bi, r_bi, r, r_bi), R))
+style_sheet("Cost_Effectiveness", ce_cols, n_ce, formula_cols = c(3:9, 10:11),
             wrap_cols = c(2, 8))
 # CEA reconciliation_status conditional format
 conditionalFormatting(wb, "Cost_Effectiveness", cols = 9, rows = 2:r_ce, rule = "consistent", type = "contains", style = cf_pass)
@@ -2309,6 +2498,7 @@ source_public_health_cost_value <- function() {
     }
   }
   annual_cost <- if (length(cost_rows)) rbindlist(cost_rows) else data.table()
+  annual_cost <- .add_annualcost_percapita(annual_cost)   # national per-capita component costs (Section 3)
 
   ## ---- budget impact ------------------------------------------------------
   if (nrow(annual_cost)) {
@@ -2321,6 +2511,7 @@ source_public_health_cost_value <- function() {
     bi[, cumulative_incremental_cost := cumsum(incremental_cost), by = scenario]
     bi[, cumulative_disc_incremental_cost := cumsum(disc_incremental_cost), by = scenario]
   } else bi <- data.table()
+  bi <- .add_budget_percapita(bi)                         # national + annual per-capita budget impact
 
   ## ---- cost-effectiveness -------------------------------------------------
   da <- mort[, .(deaths_averted = sum(base_deaths - cause_deaths, na.rm = TRUE),
@@ -2344,6 +2535,7 @@ source_public_health_cost_value <- function() {
 
   # Capture the public-health R-value CE table for the deck results contract.
   deck_cea_list[["public_health"]]     <<- copy(cea)
+  deck_percap_list[["public_health"]]  <<- .deck_percap_from_bi(bi)   # mean annual per-capita for the deck
   deck_catalog_list[["public_health"]] <<- .scenario_catalog_dt(phs, "public_health",
                                                                 base_id, produced)
 
@@ -2468,6 +2660,7 @@ source_public_health_cost_value <- function() {
     if (grepl("allocation_share", cl)) return("0.000")
     if (grepl("unit_cost|package_total_cost|allocated_child_cost", cl)) return("#,##0.0000")
     if (grepl("per_death|per_case", cl)) return("#,##0")
+    if (grepl("per_capita", cl) && !grepl("usd_per_capita", cl)) return("#,##0.00")
     if (grepl("cost|value|budget|pin_|_cost$", cl)) return("#,##0")
     if (grepl("death|case|population|averted|pop_|_count$|^count$|residual|distinct|negative|key_count", cl)) return("#,##0")
     NA_character_
@@ -2606,7 +2799,7 @@ source_public_health_cost_value <- function() {
     "immediate_after_full_implementation: effect tracks the exposure path. delayed_exponential_remaining_effect (tobacco): full target effect accrues as 1-(1-rate)^(years since start).",
     "annual_cost = population(t) x PIN fraction x implementation_fraction(t) x frequency x unit_cost. Public-wide policies use the deduplicated total population (once per age/sex/year, never per cause).",
     "Shared policy costs (cost_scope 'shared-count-once', ...__C_SHARED) are counted once per intervention/scenario/year, never once per affected cause.",
-    "Budget impact reports UNDISCOUNTED baseline, scenario, incremental and cumulative incremental cost; discounted incremental cost is a separate column.",
+    "Budget impact reports UNDISCOUNTED baseline, scenario, incremental and cumulative incremental cost; discounted incremental cost is a separate column. The four *_cost_per_capita columns are LIVE formulae (= that year's cost / national_population); national_population (grey R-source) is each year's national Indonesia population from out_model/model_output_Indonesia_htncov2_aspirational.rds (baseline series, de-duplicated across cause). Annual_Cost carries the matching per-component per-capita formulae, and Cost_Effectiveness carries the scenario mean annual incremental/discounted per-capita (2026-2050).",
     "USD per death averted = cumulative discounted incremental cost / cumulative (undiscounted) deaths averted. Not a DALY-based ICER; DALYs are deferred.",
     "Reference-Case benefit-cost analysis (2019 Robinson et al. Guidelines) on Health_Outcomes (Model 07), Economic_Value (Model 08 VSL/VSLY) and Benefit_Cost. Preferred VSL = MAX(160xGNIpc_US x (GNIpc_IDN/GNIpc_US)^1.5, 20xGNIpc_IDN); standardized 100x/160x GNI sensitivities. Benefits are PPP int$; costs are converted to that basis (cost_to_bca_currency_factor). PARTIAL mortality-benefit BCA -- not a full societal BCA.",
     "QA_Checks recomputes each invariant in Excel and reconciles the Excel cost-effectiveness headline against the R engine values on Calculation_Assumptions; BCA checks cover the VSL floor, reference-case parameters, price-year basis and Benefit_Cost scenario coverage. PASS/REVIEW/FAIL are conditionally formatted.",
@@ -2810,7 +3003,9 @@ source_public_health_cost_value <- function() {
                "pin_scenario","pin_baseline","annual_cost_baseline","annual_cost_scenario",
                "annual_cost_incremental","discount_factor","disc_cost_baseline","disc_cost_scenario",
                "disc_cost_incremental","indonesia_adjusted_flag","price_year","review_status",
-               "shared_duplicate_count")
+               "shared_duplicate_count",
+               "national_population","annual_cost_baseline_per_capita","annual_cost_scenario_per_capita",
+               "annual_cost_incremental_per_capita","disc_cost_incremental_per_capita")
   n_ac <- nrow(annual_cost); r_ac <- max(n_ac + 1L, 2L)
   if (n_ac > 0) {
     ac <- data.frame(scenario = annual_cost$scenario, year = annual_cost$year,
@@ -2826,6 +3021,9 @@ source_public_health_cost_value <- function() {
     ac$price_year <- annual_cost$price_year
     ac$review_status <- annual_cost$review_status
     ac$shared_duplicate_count <- NA_real_
+    # national population + annual per-capita component costs (R-source; Section 3)
+    ac$national_population <- annual_cost$national_population   # AB = R-source denominator
+    for (cn in ac_cols[29:32]) ac[[cn]] <- NA_real_             # AC..AF per-capita = live formulae
     ac <- ac[, ac_cols]
   } else ac <- as.data.frame(setNames(replicate(length(ac_cols), logical(0), simplify = FALSE), ac_cols))
   addWorksheet(wb, "Annual_Cost")
@@ -2844,16 +3042,25 @@ source_public_health_cost_value <- function() {
     wf(23, function(r) sprintf("S%d*T%d", r, r))                                          # disc_cost_incremental
     wf(27, function(r) sprintf("IF(G%d=\"shared-count-once\",COUNTIFS($A$2:$A$%d,A%d,$B$2:$B$%d,B%d,$D$2:$D$%d,D%d),1)",
                                r, r_ac, r, r_ac, r, r_ac, r))                             # shared_duplicate_count
+    # AC..AF component annual cost per capita = component cost / national_population (AB)
+    wf(29, function(r) sprintf("IF(AB%d=0,\"\",Q%d/AB%d)", r, r, r))                      # annual_cost_baseline_per_capita
+    wf(30, function(r) sprintf("IF(AB%d=0,\"\",R%d/AB%d)", r, r, r))                      # annual_cost_scenario_per_capita
+    wf(31, function(r) sprintf("IF(AB%d=0,\"\",S%d/AB%d)", r, r, r))                      # annual_cost_incremental_per_capita
+    wf(32, function(r) sprintf("IF(AB%d=0,\"\",W%d/AB%d)", r, r, r))                      # disc_cost_incremental_per_capita
   }
-  style_sheet("Annual_Cost", ac_cols, n_ac, formula_cols = c(14:23, 27), rsource_cols = c(9,10,11,12,13))
+  style_sheet("Annual_Cost", ac_cols, n_ac, formula_cols = c(14:23, 27, 29:32), rsource_cols = c(9,10,11,12,13, 28))
 
   ## ===== Budget_Impact ===================================================
   bud_cols <- c("scenario","year","baseline_cost","scenario_cost","incremental_cost",
-                "disc_incremental_cost","cumulative_incremental_cost","cumulative_disc_incremental_cost")
+                "disc_incremental_cost","cumulative_incremental_cost","cumulative_disc_incremental_cost",
+                "national_population","baseline_cost_per_capita","scenario_cost_per_capita",
+                "incremental_cost_per_capita","disc_incremental_cost_per_capita")
   n_bi <- nrow(bi); r_bi <- max(n_bi + 1L, 2L)
   if (n_bi > 0) { bud <- data.frame(scenario = bi$scenario, year = bi$year, stringsAsFactors = FALSE)
     for (cn in bud_cols[3:8]) bud[[cn]] <- NA_real_
-  } else bud <- as.data.frame(setNames(replicate(8, logical(0), simplify = FALSE), bud_cols))
+    bud$national_population <- bi$national_population        # I = R-source denominator
+    for (cn in bud_cols[10:13]) bud[[cn]] <- NA_real_        # J..M per-capita = live formulae
+  } else bud <- as.data.frame(setNames(replicate(length(bud_cols), logical(0), simplify = FALSE), bud_cols))
   addWorksheet(wb, "Budget_Impact")
   writeData(wb, "Budget_Impact", bud, headerStyle = st_hdr)
   if (n_bi > 0) {
@@ -2866,16 +3073,24 @@ source_public_health_cost_value <- function() {
     writeFormula(wb, "Budget_Impact", startCol = 6, startRow = 2, x = frows(function(r) sac("W", r), R))
     writeFormula(wb, "Budget_Impact", startCol = 7, startRow = 2, x = frows(function(r) sprintf("SUMIFS($E$2:E%d,$A$2:A%d,A%d)", r, r, r), R))
     writeFormula(wb, "Budget_Impact", startCol = 8, startRow = 2, x = frows(function(r) sprintf("SUMIFS($F$2:F%d,$A$2:A%d,A%d)", r, r, r), R))
+    # J..M annual cost per capita = same-year cost / national_population (col I), live formulae
+    writeFormula(wb, "Budget_Impact", startCol = 10, startRow = 2, x = frows(function(r) sprintf("IF(I%d=0,\"\",C%d/I%d)", r, r, r), R))
+    writeFormula(wb, "Budget_Impact", startCol = 11, startRow = 2, x = frows(function(r) sprintf("IF(I%d=0,\"\",D%d/I%d)", r, r, r), R))
+    writeFormula(wb, "Budget_Impact", startCol = 12, startRow = 2, x = frows(function(r) sprintf("IF(I%d=0,\"\",E%d/I%d)", r, r, r), R))
+    writeFormula(wb, "Budget_Impact", startCol = 13, startRow = 2, x = frows(function(r) sprintf("IF(I%d=0,\"\",F%d/I%d)", r, r, r), R))
   }
-  style_sheet("Budget_Impact", bud_cols, n_bi, formula_cols = 3:8)
+  style_sheet("Budget_Impact", bud_cols, n_bi, formula_cols = c(3:8, 10:13), rsource_cols = 9)
 
   ## ===== Cost_Effectiveness ==============================================
   ce_cols <- c("scenario","scenario_label","deaths_averted","cases_averted","incremental_cost",
-               "disc_incremental_cost","cost_per_death_averted","dominance","reconciliation_status")
+               "disc_incremental_cost","cost_per_death_averted","dominance","reconciliation_status",
+               "annual_cost_incremental_per_capita","disc_cost_incremental_per_capita")
   n_ce <- nrow(cea); r_ce <- max(n_ce + 1L, 2L)
   ce <- data.frame(scenario = cea$scenario, scenario_label = cea$scenario_label, stringsAsFactors = FALSE)
   for (cn in ce_cols[3:7]) ce[[cn]] <- NA_real_
   ce$dominance <- NA_character_; ce$reconciliation_status <- NA_character_
+  ce$annual_cost_incremental_per_capita <- NA_real_   # J = live formula
+  ce$disc_cost_incremental_per_capita   <- NA_real_   # K = live formula
   addWorksheet(wb, "Cost_Effectiveness")
   writeData(wb, "Cost_Effectiveness", ce, headerStyle = st_hdr)
   if (n_ce > 0) {
@@ -2896,8 +3111,13 @@ source_public_health_cost_value <- function() {
     writeFormula(wb, "Cost_Effectiveness", startCol = 9, startRow = 2, x = frows(function(r)
       sprintf("IF(AND(ABS(F%d-SUMIFS('Budget_Impact'!$F$2:$F$%d,'Budget_Impact'!$A$2:$A$%d,A%d))<=%s,ABS(C%d-SUMIFS('Annual_Mortality'!$I$2:$I$%d,'Annual_Mortality'!$A$2:$A$%d,A%d))<=%s),\"consistent\",\"mismatch\")",
               r, r_bi, r_bi, r, cA_tol, r, r_am, r_am, r, cA_tol), R))
+    # J/K summary annual per-capita = mean of Budget_Impact per-capita (L/M) over years >= start+1
+    writeFormula(wb, "Cost_Effectiveness", startCol = 10, startRow = 2, x = frows(function(r)
+      sprintf("IFERROR(AVERAGEIFS('Budget_Impact'!$L$2:$L$%d,'Budget_Impact'!$A$2:$A$%d,A%d,'Budget_Impact'!$B$2:$B$%d,\">=\"&(%s+1)),\"\")", r_bi, r_bi, r, r_bi, cA_start), R))
+    writeFormula(wb, "Cost_Effectiveness", startCol = 11, startRow = 2, x = frows(function(r)
+      sprintf("IFERROR(AVERAGEIFS('Budget_Impact'!$M$2:$M$%d,'Budget_Impact'!$A$2:$A$%d,A%d,'Budget_Impact'!$B$2:$B$%d,\">=\"&(%s+1)),\"\")", r_bi, r_bi, r, r_bi, cA_start), R))
   }
-  style_sheet("Cost_Effectiveness", ce_cols, n_ce, formula_cols = 3:9, wrap_cols = c(2, 8))
+  style_sheet("Cost_Effectiveness", ce_cols, n_ce, formula_cols = c(3:9, 10:11), wrap_cols = c(2, 8))
   conditionalFormatting(wb, "Cost_Effectiveness", cols = 9, rows = 2:r_ce, rule = "consistent", type = "contains", style = cf_pass)
   conditionalFormatting(wb, "Cost_Effectiveness", cols = 9, rows = 2:r_ce, rule = "mismatch",   type = "contains", style = cf_fail)
   conditionalFormatting(wb, "Cost_Effectiveness", cols = 8, rows = 2:r_ce, rule = "Dominated",  type = "contains", style = cf_rev)
@@ -3465,6 +3685,7 @@ source_combined_cost_value <- function() {
     annual_cost[, annual_cost_incremental := annual_cost_scenario - annual_cost_baseline]
     annual_cost[, disc_cost_incremental := annual_cost_incremental * discount_factor]
   }
+  annual_cost <- .add_annualcost_percapita(annual_cost)   # national per-capita component costs (Section 3)
 
   ## ---- budget impact + cost-effectiveness (R anchors) ---------------------
   if (nrow(annual_cost)) {
@@ -3477,6 +3698,7 @@ source_combined_cost_value <- function() {
     bi[, cumulative_incremental_cost := cumsum(incremental_cost), by = scenario]
     bi[, cumulative_disc_incremental_cost := cumsum(disc_incremental_cost), by = scenario]
   } else bi <- data.table()
+  bi <- .add_budget_percapita(bi)                         # national + annual per-capita budget impact
 
   da <- mort[, .(deaths_averted = sum(base_deaths - cause_deaths, na.rm = TRUE),
                  cases_averted  = sum(base_cases  - cases, na.rm = TRUE)), by = scenario]
@@ -3494,7 +3716,8 @@ source_combined_cost_value <- function() {
   setorder(cea, -deaths_averted)
 
   # Capture the combined (joint) R-value CE table for the deck results contract.
-  deck_cea_list[["combined"]] <<- copy(cea)
+  deck_cea_list[["combined"]]    <<- copy(cea)
+  deck_percap_list[["combined"]] <<- .deck_percap_from_bi(bi)   # mean annual per-capita for the deck
 
   # anchor scenario for Excel-vs-R reconciliation
   anchor_scn <- joint_id
@@ -3590,6 +3813,7 @@ source_combined_cost_value <- function() {
     if (grepl("percent_reduction", cl)) return("0.00")
     if (grepl("per_death|per_daly|per_case", cl)) return("#,##0")
     if (grepl("benefit_cost_ratio", cl)) return("0.00")
+    if (grepl("per_capita", cl) && !grepl("usd_per_capita", cl)) return("#,##0.00")
     if (grepl("cost|value|budget|pin_|_cost$|benefit|net_", cl)) return("#,##0")
     if (grepl("death|case|population|averted|pop_|q_scenario|q_baseline|_count$|residual|distinct|negative|life_years", cl)) return("#,##0")
     NA_character_
@@ -3701,7 +3925,7 @@ source_combined_cost_value <- function() {
     "Grey cells are R source values; light-blue cells are LIVE Excel formulas; pale-yellow cells on Calculation_Assumptions are editable controls. The joint scenario is highlighted (orange) on Summary. Calculation_Map lists the dependency chain.",
     "See Summary and Scenario_Catalog. Family-specific input/audit sheets are prefixed CL_ (clinical) and PH_ (public-health) where the two source schemas differ.",
     "'all_clinical_public_health' is produced by a SINGLE Model 06 projection that applies the clinical (fair_wb) and public-health (ph_wb) engines once each to the same baseline-rate copy -- it is NEVER the arithmetic sum of the separate 'all' and 'all_public_health' outputs.",
-    "Joint cost = clinical components (clinical costing rule) + public-health components (per-capita policy rule), BOTH computed against the joint scenario's own Model 06 population/state. family provenance is retained on every Annual_Cost row and keys are collision-safe (family|cost_record_id).",
+    "Joint cost = clinical components (clinical costing rule) + public-health components (per-capita policy rule), BOTH computed against the joint scenario's own Model 06 population/state. family provenance is retained on every Annual_Cost row and keys are collision-safe (family|cost_record_id). Budget_Impact carries the four *_cost_per_capita columns as LIVE formulae (= that year's cost / national_population); national_population (grey R-source) is each year's national Indonesia population from out_model/model_output_Indonesia_htncov2_aspirational.rds (baseline series, de-duplicated across cause). Annual_Cost carries the matching per-component per-capita formulae, and Cost_Effectiveness carries the scenario mean annual incremental/discounted per-capita (2026-2050).",
     "CVD_40q30 / CVD_40q30_Age give the period probability of dying from the six CVD causes between exact ages 30 and 70 (percent on a 0-100 scale). The life table (m_x, q_x, l_x, l_{x+1}) is live Excel formula; cvd_40q30 reconciles to the Model 07 R value.",
     "Reference-Case VSL/VSLY benefit-cost (Robinson et al. 2019) on Health_Outcomes / Economic_Value / Benefit_Cost; PARTIAL mortality-benefit BCA.",
     "header dark-blue; formula light-blue; R-source grey; editable-input pale-yellow; QA green/red/orange."))
@@ -3786,7 +4010,9 @@ source_combined_cost_value <- function() {
                "covimpl_scenario","covimpl_baseline","discount_factor","pin_scenario","pin_baseline",
                "annual_cost_baseline","annual_cost_scenario","annual_cost_incremental",
                "disc_cost_incremental","indonesia_adjusted_flag","price_year","review_status",
-               "shared_duplicate_count")
+               "shared_duplicate_count",
+               "national_population","annual_cost_baseline_per_capita","annual_cost_scenario_per_capita",
+               "annual_cost_incremental_per_capita","disc_cost_incremental_per_capita")
   n_ac <- nrow(annual_cost); r_ac <- max(n_ac + 1L, 2L)
   if (n_ac > 0) {
     ac <- as.data.frame(annual_cost[, .(scenario, family, year, intervention_id, cost_record_id,
@@ -3799,6 +4025,9 @@ source_combined_cost_value <- function() {
     ac$price_year <- annual_cost$price_year
     ac$review_status <- annual_cost$review_status
     ac$shared_duplicate_count <- NA_real_
+    # AC = R-source national population denominator; AD..AG per-capita = live formulae
+    ac$national_population <- annual_cost$national_population
+    for (cn in ac_cols[30:33]) ac[[cn]] <- NA_real_
     ac <- ac[, ac_cols]
   } else ac <- as.data.frame(setNames(replicate(length(ac_cols), logical(0), simplify = FALSE), ac_cols))
   addWorksheet(wb, "Annual_Cost")
@@ -3814,16 +4043,25 @@ source_combined_cost_value <- function() {
     wf(24, function(r) sprintf("W%d*R%d", r, r))                              # disc_cost_incremental
     wf(28, function(r) sprintf("IF(I%d=\"shared-count-once\",COUNTIFS($A$2:$A$%d,A%d,$C$2:$C$%d,C%d,$E$2:$E$%d,E%d,$B$2:$B$%d,B%d),1)",
                                r, r_ac, r, r_ac, r, r_ac, r, r_ac, r))        # shared_duplicate_count
+    # AD..AG component annual cost per capita = component cost / national_population (AC)
+    wf(30, function(r) sprintf("IF(AC%d=0,\"\",U%d/AC%d)", r, r, r))          # annual_cost_baseline_per_capita
+    wf(31, function(r) sprintf("IF(AC%d=0,\"\",V%d/AC%d)", r, r, r))          # annual_cost_scenario_per_capita
+    wf(32, function(r) sprintf("IF(AC%d=0,\"\",W%d/AC%d)", r, r, r))          # annual_cost_incremental_per_capita
+    wf(33, function(r) sprintf("IF(AC%d=0,\"\",X%d/AC%d)", r, r, r))          # disc_cost_incremental_per_capita
   }
-  style_sheet("Annual_Cost", ac_cols, n_ac, formula_cols = c(18:24, 28), rsource_cols = 11:17)
+  style_sheet("Annual_Cost", ac_cols, n_ac, formula_cols = c(18:24, 28, 30:33), rsource_cols = c(11:17, 29))
 
   ## ===== Budget_Impact ====================================================
   bud_cols <- c("scenario","year","baseline_cost","scenario_cost","incremental_cost",
-                "disc_incremental_cost","cumulative_incremental_cost","cumulative_disc_incremental_cost")
+                "disc_incremental_cost","cumulative_incremental_cost","cumulative_disc_incremental_cost",
+                "national_population","baseline_cost_per_capita","scenario_cost_per_capita",
+                "incremental_cost_per_capita","disc_incremental_cost_per_capita")
   n_bi <- nrow(bi); r_bi <- max(n_bi + 1L, 2L)
   if (n_bi > 0) { bud <- data.frame(scenario = bi$scenario, year = bi$year, stringsAsFactors = FALSE)
     for (cn in bud_cols[3:8]) bud[[cn]] <- NA_real_
-  } else bud <- as.data.frame(setNames(replicate(8, logical(0), simplify = FALSE), bud_cols))
+    bud$national_population <- bi$national_population        # I = R-source denominator
+    for (cn in bud_cols[10:13]) bud[[cn]] <- NA_real_        # J..M per-capita = live formulae
+  } else bud <- as.data.frame(setNames(replicate(length(bud_cols), logical(0), simplify = FALSE), bud_cols))
   addWorksheet(wb, "Budget_Impact")
   writeData(wb, "Budget_Impact", bud, headerStyle = st_hdr)
   if (n_bi > 0) {
@@ -3836,16 +4074,24 @@ source_combined_cost_value <- function() {
     writeFormula(wb, "Budget_Impact", startCol = 6, startRow = 2, x = frows(function(r) sac("X", r), R))
     writeFormula(wb, "Budget_Impact", startCol = 7, startRow = 2, x = frows(function(r) sprintf("SUMIFS($E$2:E%d,$A$2:A%d,A%d)", r, r, r), R))
     writeFormula(wb, "Budget_Impact", startCol = 8, startRow = 2, x = frows(function(r) sprintf("SUMIFS($F$2:F%d,$A$2:A%d,A%d)", r, r, r), R))
+    # J..M annual cost per capita = same-year cost / national_population (col I), live formulae
+    writeFormula(wb, "Budget_Impact", startCol = 10, startRow = 2, x = frows(function(r) sprintf("IF(I%d=0,\"\",C%d/I%d)", r, r, r), R))
+    writeFormula(wb, "Budget_Impact", startCol = 11, startRow = 2, x = frows(function(r) sprintf("IF(I%d=0,\"\",D%d/I%d)", r, r, r), R))
+    writeFormula(wb, "Budget_Impact", startCol = 12, startRow = 2, x = frows(function(r) sprintf("IF(I%d=0,\"\",E%d/I%d)", r, r, r), R))
+    writeFormula(wb, "Budget_Impact", startCol = 13, startRow = 2, x = frows(function(r) sprintf("IF(I%d=0,\"\",F%d/I%d)", r, r, r), R))
   }
-  style_sheet("Budget_Impact", bud_cols, n_bi, formula_cols = 3:8)
+  style_sheet("Budget_Impact", bud_cols, n_bi, formula_cols = c(3:8, 10:13), rsource_cols = 9)
 
   ## ===== Cost_Effectiveness ===============================================
   ce_cols <- c("scenario","scenario_label","deaths_averted","cases_averted","incremental_cost",
-               "disc_incremental_cost","cost_per_death_averted","dominance","reconciliation_status")
+               "disc_incremental_cost","cost_per_death_averted","dominance","reconciliation_status",
+               "annual_cost_incremental_per_capita","disc_cost_incremental_per_capita")
   n_ce <- nrow(cea); r_ce <- max(n_ce + 1L, 2L)
   ce <- data.frame(scenario = cea$scenario, scenario_label = cea$scenario_label, stringsAsFactors = FALSE)
   for (cn in ce_cols[3:7]) ce[[cn]] <- NA_real_
   ce$dominance <- NA_character_; ce$reconciliation_status <- NA_character_
+  ce$annual_cost_incremental_per_capita <- NA_real_   # J = live formula
+  ce$disc_cost_incremental_per_capita   <- NA_real_   # K = live formula
   addWorksheet(wb, "Cost_Effectiveness")
   writeData(wb, "Cost_Effectiveness", ce, headerStyle = st_hdr)
   if (n_ce > 0) {
@@ -3866,8 +4112,13 @@ source_combined_cost_value <- function() {
     writeFormula(wb, "Cost_Effectiveness", startCol = 9, startRow = 2, x = frows(function(r)
       sprintf("IF(AND(ABS(F%d-SUMIFS('Budget_Impact'!$F$2:$F$%d,'Budget_Impact'!$A$2:$A$%d,A%d))<=%s,ABS(C%d-SUMIFS('Annual_Mortality'!$I$2:$I$%d,'Annual_Mortality'!$A$2:$A$%d,A%d))<=%s),\"consistent\",\"mismatch\")",
               r, r_bi, r_bi, r, cA_tol, r, r_am, r_am, r, cA_tol), R))
+    # J/K summary annual per-capita = mean of Budget_Impact per-capita (L/M) over years >= start+1
+    writeFormula(wb, "Cost_Effectiveness", startCol = 10, startRow = 2, x = frows(function(r)
+      sprintf("IFERROR(AVERAGEIFS('Budget_Impact'!$L$2:$L$%d,'Budget_Impact'!$A$2:$A$%d,A%d,'Budget_Impact'!$B$2:$B$%d,\">=\"&(%s+1)),\"\")", r_bi, r_bi, r, r_bi, cA_start), R))
+    writeFormula(wb, "Cost_Effectiveness", startCol = 11, startRow = 2, x = frows(function(r)
+      sprintf("IFERROR(AVERAGEIFS('Budget_Impact'!$M$2:$M$%d,'Budget_Impact'!$A$2:$A$%d,A%d,'Budget_Impact'!$B$2:$B$%d,\">=\"&(%s+1)),\"\")", r_bi, r_bi, r, r_bi, cA_start), R))
   }
-  style_sheet("Cost_Effectiveness", ce_cols, n_ce, formula_cols = 3:9, wrap_cols = c(2, 8))
+  style_sheet("Cost_Effectiveness", ce_cols, n_ce, formula_cols = c(3:9, 10:11), wrap_cols = c(2, 8))
   conditionalFormatting(wb, "Cost_Effectiveness", cols = 9, rows = 2:r_ce, rule = "consistent", type = "contains", style = cf_pass)
   conditionalFormatting(wb, "Cost_Effectiveness", cols = 9, rows = 2:r_ce, rule = "mismatch",   type = "contains", style = cf_fail)
 
@@ -4136,6 +4387,12 @@ if (length(deck_cea_list)) {
     out <- merge(meta, cea[, ..keep], by = "scenario", all.x = TRUE)
     out <- merge(out, d2050, by = "scenario", all.x = TRUE)
     out <- merge(out, q2050, by = "scenario", all.x = TRUE)
+    # Mean annual per-capita additional cost (2026-2050) the deck displays. Read
+    # from the workbook's live per-capita formulae is impossible without an Excel
+    # recalc, so the SAME R value is carried here (workbook formulae reconcile to it).
+    pcp <- deck_percap_list[[wbkey]]
+    if (!is.null(pcp) && nrow(pcp)) out <- merge(out, pcp, by = "scenario", all.x = TRUE)
+    else { out[, pc_undisc_val := NA_real_]; out[, pc_disc_val := NA_real_] }
     out[, workbook := wbkey]
     # Uniform cost-effectiveness status / dominance labelling.
     out[, ce_status := "USD per death averted"]
