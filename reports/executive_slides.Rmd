@@ -1,7 +1,7 @@
 ---
 title: "Reducing Cardiovascular Disease in Indonesia"
 subtitle: "Health Impact, Costs, and Cost-Effectiveness of Clinical and Public-Health Interventions, 2025--2050"
-author: "World Bank $\\cdot$ University of Washington"
+author: "Disease Control Priorities"
 institute: "Briefing for the Ministry of Health, Republic of Indonesia"
 date: "`r format(Sys.Date(), '%B %Y')`"
 output:
@@ -55,19 +55,29 @@ header-includes:
 ##    * Every analytical slide carries a muted italic Source/Method footnote
 ##      (\srcmethod macro, defined in header-includes); cost/CE slides also carry
 ##      the fixed BPJS/MOH validation caveat (\costcaveat).
-##    * Average annual additional cost per capita (undiscounted & discounted) is
-##      added to the three CE slides. Model 09 precomputes it (simple mean over
-##      2026-2050 of each year's additional cost per capita, where the year's
-##      additional cost is divided by that year's national Indonesia population
-##      from out_model/model_output_Indonesia_htncov2_aspirational.rds) and carries
-##      it on the results contract (pc_undisc_val / pc_disc_val). The deck reads
-##      the precomputed value and never computes cost / population. The workbooks
-##      expose the SAME metric as live Excel per-capita formulae (Budget_Impact,
-##      Annual_Cost and a Cost_Effectiveness scenario summary).
-##    * A separate 70-30-30 -> 70-70-70 cascade strategy sub-section (4 slides)
-##      reads ONLY the ISOLATED cascade workbook under output/70_30_30_to_70_70_70/
-##      (validated to contain exactly {baseline, S_70_30_30_TO_70_70_70}); it is
-##      NEVER merged into the ordinary results contract.
+##    * Each of the three CE slides shows TWO discounted per-capita cost measures,
+##      each drawn from / reconstructed from that family's OWN cost workbook
+##      (Budget_Impact population is authoritative; the combined workbook is never
+##      a shortcut for the clinical or public-health tables):
+##        (1) Average annual additional cost per capita, 2026-2050
+##              = cumulative DISCOUNTED additional cost 2026-2050
+##                / (25 x 2026 population)              [parentheses essential]
+##        (2) Additional cost per capita in 2050 at target coverage
+##              = discounted additional cost in 2050 / 2050 population.
+##      The clinical workbook is Excel-recalculated (cached) and read directly; the
+##      public-health and combined formula workbooks are UNcached, so their annual
+##      discounted additional cost is reproduced in R from the SAME Annual_Cost
+##      inputs the workbook formulae use and reconciled to the run's contract total.
+##      No Excel COM is required.
+##    * The national cascade sub-section additionally reports the year-specific
+##      annual additional cost per capita (cascade workbook, Budget_Impact).
+##    * A two-panel stacked clinical budget-impact figure (2025-2050) decomposes
+##      cumulative discounted total and per-capita cost by clinical intervention,
+##      read from the clinical workbook Annual_Cost and QA-reconciled by year.
+##    * The isolated 70-30-30 -> 70-70-70 cascade strategy is read ONLY from its
+##      cascade workbook (national under output/70_30_30_to_70_70_70/; SUBNATIONAL
+##      38-province under output/70_30_30_to_70_70_70_subnational/); never merged
+##      into the ordinary results contract.
 ##    * A high-level DCP costing-methods slide + an appendix of the adapted
 ##      equations cite Watkins et al. (2020).
 ## =====================================================================
@@ -119,6 +129,17 @@ fmt_usd   <- function(x) ifelse(is.na(x), "--", paste0("US\\$", formatC(round(x)
 fmt_usd_short <- function(x) ifelse(is.na(x), "--", paste0("US\\$", fmt_short(x)))
 ## Per-capita US$ to 2 decimals (LaTeX-safe: escaped $).
 fmt_usd_pc <- function(x) ifelse(is.na(x), "--", paste0("US\\$", formatC(x, format = "f", digits = 2, big.mark = ",")))
+## Per-capita US$ with ADAPTIVE precision so small public-health costs never show as
+## $0.00: >=1 -> 2dp; >=0.1 -> 2dp; >=0.01 -> 3dp; else 4dp. Keeps big values clean
+## while preserving 2+ significant figures for cents-scale policy costs.
+fmt_usd_pc2 <- function(x) {
+  vapply(x, function(v) {
+    if (is.na(v)) return("--")
+    a <- abs(v)
+    d <- if (a >= 0.1 || a == 0) 2L else if (a >= 0.01) 3L else 4L
+    paste0("US\\$", formatC(v, format = "f", digits = d, big.mark = ","))
+  }, character(1))
+}
 ## Title-safe (plain-text, NO % or $ so it survives pandoc -> \frametitle):
 ## express a count in the most readable unit ("3.5 million", "1.13 million").
 fmt_title_num <- function(x, acc = 0.1) {
@@ -137,6 +158,65 @@ mkhdr <- function(v) kableExtra::linebreak(v, align = "c")
 `%+na%` <- function(a, b) if (is.null(a) || length(a) == 0L || is.na(a[1])) b else a[1]
 ```
 
+```{r xlsx-companion-setup, include=FALSE}
+## =====================================================================
+##  COMPANION EXCEL WORKBOOK  (reports/executive_slides.xlsx)
+##  --------------------------------------------------------------------
+##  A companion workbook is built programmatically AS THIS DECK KNITS.
+##  Every figure/plot and every table that appears on a slide is captured
+##  -- in slide order -- via reg_fig()/reg_tbl() at the exact point the
+##  slide builds it, so the workbook reuses the SAME data objects and the
+##  SAME plots the slides render. The workbook is assembled and written by
+##  the final `build-xlsx-workbook` chunk at the end of the document.
+##
+##  Registration is INERT for the rendered deck:
+##    * reg_tbl() returns its data invisibly -> emits nothing on the slide
+##      (safe inside results='asis' chunks);
+##    * reg_fig() saves the plot to PNG and RETURNS the ggplot, so the
+##      figure chunk still auto-prints the identical figure to the deck.
+##  A failure inside either helper is swallowed (the deck must still build).
+## =====================================================================
+.xlsx_enabled <- TRUE
+.xlsx_items   <- list()
+.xlsx_fig_dir <- file.path(tempdir(), "executive_slides_xlsx_figs")
+dir.create(.xlsx_fig_dir, showWarnings = FALSE, recursive = TRUE)
+
+## Register a table. `data` is the SAME object passed to kbl(); `col_names`
+## the SAME display headers used on the slide (raw -- may carry LaTeX markup
+## or embedded "\n"; both are cleaned to plain text at write time).
+reg_tbl <- function(id, title, data, col_names = NULL, note = NULL) {
+  if (!isTRUE(.xlsx_enabled)) return(invisible(data))
+  try({
+    .xlsx_items[[length(.xlsx_items) + 1L]] <<- list(
+      kind = "table", id = id, title = as.character(title),
+      data = as.data.frame(data, stringsAsFactors = FALSE),
+      col_names = if (is.null(col_names)) NULL else as.character(col_names),
+      note = note)
+  }, silent = TRUE)
+  invisible(data)
+}
+
+## Register a figure. Saves the ggplot to PNG at the slide's own dimensions
+## and RETURNS the plot so the chunk auto-prints it into the deck unchanged.
+reg_fig <- function(plot, id, title, width, height, dpi = 200, note = NULL) {
+  if (!isTRUE(.xlsx_enabled)) return(plot)
+  path <- file.path(.xlsx_fig_dir, paste0(id, ".png"))
+  ok <- tryCatch({
+    suppressWarnings(suppressMessages(
+      ggplot2::ggsave(path, plot = plot, width = width, height = height,
+                      units = "in", dpi = dpi, device = "png", bg = "white")))
+    TRUE
+  }, error = function(e) FALSE)
+  try({
+    .xlsx_items[[length(.xlsx_items) + 1L]] <<- list(
+      kind = "figure", id = id, title = as.character(title),
+      path = if (isTRUE(ok)) path else NA_character_,
+      width = width, height = height, note = note)
+  }, silent = TRUE)
+  plot
+}
+```
+
 ```{r load-data, include=FALSE}
 ## ---------------------------------------------------------------------------
 ## 1. Resolve current-run inputs (project-relative) and check existence.
@@ -153,6 +233,10 @@ deck_file <- outp("09_deck_results.rds")
 wb_comb   <- outp("indonesia_model_cost_value_clinical_public_health_formulae.xlsx")
 wb_clin   <- outp("indonesia_model_cost_value_formulae.xlsx")
 wb_ph     <- outp("indonesia_cost_value_public_health_formulae.xlsx")
+## Cached R-value companion to the clinical formula workbook: holds the SAME Model-09
+## values as literals. Used for the clinical Budget_Impact when the formula workbook is
+## written uncached (openxlsx default) so its computed cost cells read back as NA.
+wb_clin_cached <- outp("indonesia_model_cost_value.xlsx")
 csv_cmp   <- here("data", "raw", "03_asean_cvd_40q30_comparison.csv")
 
 ## Isolated 70-30-30 -> 70-70-70 cascade run (its OWN output dir; never merged with the
@@ -161,8 +245,19 @@ csv_cmp   <- here("data", "raw", "03_asean_cvd_40q30_comparison.csv")
 casc_wb <- if (nzchar(.casc_dir)) file.path(.casc_dir, "indonesia_70_30_30_to_70_70_70_cost_value_formulae.xlsx") else
   here("output", "70_30_30_to_70_70_70", "indonesia_70_30_30_to_70_70_70_cost_value_formulae.xlsx")
 
-.req_files <- c(results_contract = deck_file, combined_workbook = wb_comb,
-                comparator = csv_cmp, cascade_workbook = casc_wb)
+## Isolated SUBNATIONAL 70-30-30 -> 70-70-70 cascade run (38 provinces; its OWN output dir).
+## The expected deliverable is the province-level formula workbook; overridable for testing.
+.subnat_dir <- Sys.getenv("EXEC_DECK_SUBNAT_DIR", unset = "")
+subnat_wb <- if (nzchar(.subnat_dir))
+  file.path(.subnat_dir, "indonesia_70_30_30_to_70_70_70_cost_value_formulae_subnational.xlsx") else
+  here("output", "70_30_30_to_70_70_70_subnational",
+       "indonesia_70_30_30_to_70_70_70_cost_value_formulae_subnational.xlsx")
+
+.req_files <- c(results_contract = deck_file, clinical_workbook = wb_clin,
+                clinical_workbook_cached = wb_clin_cached,
+                public_health_workbook = wb_ph, combined_workbook = wb_comb,
+                comparator = csv_cmp, cascade_workbook = casc_wb,
+                subnational_workbook = subnat_wb)
 .missing <- .req_files[!file.exists(.req_files)]
 if (length(.missing))
   stop("VALIDATION STOP -- required input file(s) not found:\n  ",
@@ -208,7 +303,7 @@ exec_label_override <- c(
   I_CVD_PRIMARY = "Primary CVD prevention", I_T2D_TREATMENT = "Type-2 diabetes treatment",
   I_IHD_SECONDARY = "Heart-attack secondary prevention", I_HF_CHRONIC = "Chronic heart-failure care",
   I_HF_ACUTE = "Acute heart-failure care", I_STROKE_SECONDARY = "Stroke secondary prevention",
-  I_RHD_SECONDARY = "RHD secondary prevention",
+  I_RHD_SECONDARY = "RHD secondary prevention", I_RHD_SURGERY = "RHD surgery",
   all = "All clinical (combined)",
   I_PH_TOBACCO_TAX = "Tobacco tax", I_PH_TOBACCO_POLICY = "Tobacco policy package",
   I_PH_SALT_POLICY = "Sodium policy package", I_PH_TFA_POLICY = "Trans-fat elimination",
@@ -362,6 +457,165 @@ scen_pal <- setNames(
   scen_levels)
 ```
 
+```{r national-cost-recon, include=FALSE}
+## ---------------------------------------------------------------------------
+## National per-capita cost measures - reconstructed from EACH family's OWN cost
+## workbook, keyed by scenario (never the combined workbook as a shortcut).
+##
+## The two discounted measures shown in every national CE table are:
+##   (1) Average annual additional cost per capita, 2026-2050 (discounted)
+##         = [ cumulative DISCOUNTED additional cost over 2026-2050 ]
+##           / ( 25 x 2026 population )            <-- parentheses are essential
+##   (2) Additional cost per capita in 2050 at target coverage (discounted)
+##         = discounted additional cost in 2050 / 2050 population
+## Population is the workbook's own national_population (Budget_Impact), identical
+## across scenarios by year; 2026 and 2050 are authoritative.
+##
+## Because openxlsx writes formula cells UNcached, the clinical workbook's
+## Budget_Impact is fully Excel-recalculated (cached) and read directly, while the
+## public-health and combined formula workbooks are uncached: their annual
+## discounted additional cost is reproduced from the SAME authoritative Annual_Cost
+## inputs the workbook formulae use, then reconciled to the run's contract total
+## (disc_incremental_cost) to a tight relative tolerance. No Excel COM is required.
+## ---------------------------------------------------------------------------
+.ca_num <- function(path, id) {
+  ca <- rd(path, "Calculation_Assumptions")
+  v  <- suppressWarnings(as.numeric(ca[parameter_id == id, value][1])); v
+}
+
+## Cached clinical Budget_Impact resolver. The clinical formula workbook's Budget_Impact
+## holds computed (formula) cost cells that are populated only when the workbook has been
+## Excel-recalculated; when it is written uncached (openxlsx default) they read back as NA.
+## In that case fall back to the companion R-value workbook, which stores the SAME Model-09
+## R-engine values as literals, so the clinical family's discounted per-capita measures
+## remain available without Excel COM.
+read_clin_bi <- function() {
+  bi <- rd(wb_clin, "Budget_Impact")
+  if (!"disc_incremental_cost" %in% names(bi) || all(is.na(bi$disc_incremental_cost)))
+    bi <- rd(wb_clin_cached, "Budget_Impact")
+  bi
+}
+## Cached clinical Annual_Cost resolver (same fallback rationale as read_clin_bi). The
+## R-value companion carries de-duplicated rows and no shared_duplicate_count column, so
+## a missing/uncached count is treated as 1 (each component counted once, unweighted).
+read_clin_ac <- function() {
+  ac <- rd(wb_clin, "Annual_Cost")
+  if (!"disc_cost_incremental" %in% names(ac) || all(is.na(ac$disc_cost_incremental)))
+    ac <- rd(wb_clin_cached, "Annual_Cost")
+  if (!"shared_duplicate_count" %in% names(ac) || all(is.na(ac$shared_duplicate_count)))
+    ac[, shared_duplicate_count := 1]
+  ac
+}
+
+## Annual discounted additional cost + national population, by (scenario, year).
+build_annual_cost <- function(fam) {
+  if (fam == "clinical") {
+    ## Cached clinical Budget_Impact (formula workbook if recalculated, else R-value companion).
+    bi <- read_clin_bi()
+    need <- c("scenario","year","disc_incremental_cost","national_population","cumulative_disc_incremental_cost")
+    val_stop(all(need %in% names(bi)), "clinical Budget_Impact missing required column(s)")
+    ## Reconcile the annual series to the workbook's cumulative field, and confirm the
+    ## 2026-2050 numerator equals cumulative[2050] - disc[2025] (2025 IS in the cumulative).
+    .rc <- bi[, .(a = cumsum(disc_incremental_cost),
+                  c = cumulative_disc_incremental_cost), by = scenario]
+    val_stop(max(abs(.rc$a - .rc$c)) < 1,
+             "clinical annual discounted cost does not reconcile to the cumulative field")
+    .n1 <- bi[year %in% (HZ_START + 1L):HZ_END, .(num = sum(disc_incremental_cost)), by = scenario]
+    .n2 <- bi[year == HZ_END, .(scenario, cum = cumulative_disc_incremental_cost)][
+             bi[year == HZ_START, .(scenario, d25 = disc_incremental_cost)], on = "scenario"]
+    .nn <- merge(.n1, .n2, by = "scenario")
+    val_stop(max(abs(.nn$num - (.nn$cum - .nn$d25))) < 1,
+             "clinical 2026-2050 numerator does not equal cumulative[2050] - 2025 value")
+    out <- bi[, .(scenario, year, disc = disc_incremental_cost, pop = national_population)]
+  } else if (fam == "public_health") {
+    ## Uncached: reproduce annual policy-implementation cost from Annual_Cost inputs.
+    r  <- .ca_num(wb_ph, "cost_discount_rate");  y0 <- .ca_num(wb_ph, "analysis_start_year")
+    ps <- .ca_num(wb_ph, "policy_start_year");   rp <- .ca_num(wb_ph, "policy_cost_ramp_years")
+    b0 <- .ca_num(wb_ph, "baseline_implementation_fraction")
+    val_stop(all(is.finite(c(r, y0, ps, rp))), "public-health cost assumptions (rate/start/ramp) missing")
+    if (!is.finite(b0)) b0 <- 0
+    ac <- rd(wb_ph, "Annual_Cost")
+    need <- c("scenario","year","pop_scenario","population_in_need_fraction","frequency_per_year","unit_cost_usd")
+    val_stop(all(need %in% names(ac)), "public-health Annual_Cost missing required input column(s)")
+    imf <- function(t) { f <- (t - (ps - 1)) / rp; f[t < ps] <- 0; pmin(pmax(f, 0), 1) }
+    ac[, disc := pop_scenario * population_in_need_fraction * frequency_per_year * unit_cost_usd *
+                 (imf(year) - b0) * (1 / (1 + r)^(year - y0))]
+    a  <- ac[, .(disc = sum(disc)), by = .(scenario, year)]
+    bi <- rd(wb_ph, "Budget_Impact")
+    val_stop("national_population" %in% names(bi), "public-health Budget_Impact missing national_population")
+    out <- merge(a, bi[, .(scenario, year, pop = national_population)], by = c("scenario","year"))
+  } else if (fam == "combined") {
+    ## Uncached: reproduce annual additional cost from Annual_Cost inputs.
+    r  <- .ca_num(wb_comb, "cost_discount_rate"); y0 <- .ca_num(wb_comb, "analysis_start_year")
+    val_stop(all(is.finite(c(r, y0))), "combined cost assumptions (rate/start) missing")
+    ac <- rd(wb_comb, "Annual_Cost")
+    need <- c("scenario","year","pin_fraction","frequency_per_year","unit_cost_usd",
+              "q_scenario","q_baseline","covimpl_scenario","covimpl_baseline")
+    val_stop(all(need %in% names(ac)), "combined Annual_Cost missing required input column(s)")
+    ac[, disc := pin_fraction * frequency_per_year * unit_cost_usd *
+                 (q_scenario * covimpl_scenario - q_baseline * covimpl_baseline) *
+                 (1 / (1 + r)^(year - y0))]
+    a  <- ac[, .(disc = sum(disc)), by = .(scenario, year)]
+    bi <- rd(wb_comb, "Budget_Impact")
+    val_stop("national_population" %in% names(bi), "combined Budget_Impact missing national_population")
+    out <- merge(a, bi[, .(scenario, year, pop = national_population)], by = c("scenario","year"))
+  } else stop("unknown family: ", fam)
+  setorder(out, scenario, year)
+  ## --- Structural validation ---------------------------------------------
+  yrs <- sort(unique(out$year))
+  val_stop(setequal(yrs, HZ_START:HZ_END),
+           sprintf("%s cost workbook year coverage is not %d-%d", fam, HZ_START, HZ_END))
+  ## national population identical across scenarios each year (single denominator)
+  val_stop(nrow(out[, .(nu = uniqueN(pop)), by = year][nu > 1]) == 0,
+           sprintf("%s national_population differs across scenarios within a year", fam))
+  ## reconcile reconstructed full-horizon total to the run's contract total
+  ct <- res[workbook == fam, .(scenario, contract = disc_incremental_cost)]
+  rc <- merge(out[, .(tot = sum(disc)), by = scenario], ct, by = "scenario")
+  rc[, rel := abs(tot - contract) / pmax(abs(contract), 1)]
+  val_stop(nrow(rc) > 0 && max(rc$rel) < 1e-4,
+           sprintf("%s reconstructed discounted cost does not reconcile to the contract total (max rel.diff %.2g)",
+                   fam, if (nrow(rc)) max(rc$rel) else NA_real_))
+  out[]
+}
+annual_cost_tabs <- list(
+  clinical      = build_annual_cost("clinical"),
+  public_health = build_annual_cost("public_health"),
+  combined      = build_annual_cost("combined"))
+
+## The two discounted per-capita measures for one (family, scenario).
+DISPLAY_YEARS <- (HZ_START + 1L):HZ_END                 # 2026..2050
+val_stop(length(DISPLAY_YEARS) == 25L,
+         sprintf("expected exactly 25 years 2026-%d; got %d", HZ_END, length(DISPLAY_YEARS)))
+pc_avg_annual <- function(fam, sc) {                    # measure (1)
+  d <- annual_cost_tabs[[fam]][scenario == sc]
+  if (!nrow(d)) return(NA_real_)
+  num   <- d[year %in% DISPLAY_YEARS, sum(disc)]
+  pop26 <- d[year == HZ_START + 1L, pop][1]
+  if (!is.finite(num) || !is.finite(pop26) || pop26 <= 0) return(NA_real_)
+  num / (25 * pop26)
+}
+pc_year2050 <- function(fam, sc) {                      # measure (2)
+  d <- annual_cost_tabs[[fam]][scenario == sc]
+  if (!nrow(d)) return(NA_real_)
+  disc50 <- d[year == HZ_END, disc][1]; pop50 <- d[year == HZ_END, pop][1]
+  if (!is.finite(disc50) || !is.finite(pop50) || pop50 <= 0) return(NA_real_)
+  disc50 / pop50
+}
+## Independent validation: measure (2) for the clinical family must equal the
+## clinical workbook's own cached disc_incremental_cost_per_capita in 2050.
+{ .bi <- read_clin_bi()
+  if ("disc_incremental_cost_per_capita" %in% names(.bi)) {
+    .chk <- .bi[year == HZ_END, .(scenario, stored = disc_incremental_cost_per_capita)]
+    .cmp <- merge(.chk, data.table(scenario = .chk$scenario,
+                                   rebuilt = vapply(.chk$scenario, function(s) pc_year2050("clinical", s), numeric(1))),
+                  by = "scenario")
+    val_stop(max(abs(.cmp$stored - .cmp$rebuilt)) < 1e-6,
+             "clinical 2050 per-capita reconstruction disagrees with the workbook's stored value") }
+}
+## Map contract workbook key -> the annual-cost family key (same names here).
+fam_of <- function(tab) tab[1, workbook]
+```
+
 ```{r results-builders, include=FALSE}
 ## Row builders for the impact / cost-effectiveness display tables (BCA-free).
 impact_row <- function(tab, sc) data.table(
@@ -370,17 +624,19 @@ impact_row <- function(tab, sc) data.table(
   q50 = fmt_pct(hv(sc, "cvd_40q30_2050", tab), 1),
   qr  = fmt_pct(hv(sc, "cvd_40q30_pct_reduction_2050", tab), 1),
   dr  = fmt_pct(hv(sc, "pct_reduction_deaths_2050", tab), 1))
-## Average annual additional cost per capita for one scenario (undisc / disc):
-## precomputed by Model 09 and carried on the results contract (pc_undisc_val /
-## pc_disc_val = simple mean over 2026-2050 of the annual additional cost per
-## capita). No population denominator is applied in the deck; missing -> "--".
-pc_undisc <- function(tab, sc) fmt_usd_pc(hv(sc, "pc_undisc_val", tab))
-pc_disc   <- function(tab, sc) fmt_usd_pc(hv(sc, "pc_disc_val", tab))
+## The two DISCOUNTED per-capita measures for one scenario, reconstructed from the
+## family's own cost workbook (see the national-cost-recon chunk):
+##   pc1 = average annual additional cost per capita, 2026-2050
+##       = cumulative discounted additional cost 2026-2050 / (25 x 2026 population)
+##   pc2 = discounted additional cost per capita in 2050 / 2050 population
+## Adaptive precision keeps cents-scale public-health costs from rounding to zero.
+pc1 <- function(tab, sc) fmt_usd_pc2(pc_avg_annual(fam_of(tab), sc))
+pc2 <- function(tab, sc) fmt_usd_pc2(pc_year2050(fam_of(tab), sc))
 ce_row <- function(tab, sc) cbind(
   impact_row(tab, sc),
-  data.table(cpd = fmt_usd(hv(sc, "cost_per_death_averted", tab)),
-             pcu = pc_undisc(tab, sc),
-             pcd = pc_disc(tab, sc)))
+  data.table(cpd  = fmt_usd(hv(sc, "cost_per_death_averted", tab)),
+             pc1c = pc1(tab, sc),
+             pc2c = pc2(tab, sc)))
 
 ## Build a display table for a family's top-level rows, capped for space.
 ## Returns list(tb, agg_row_idx, n_omitted, omitted_labels).
@@ -404,38 +660,143 @@ family_table <- function(tab, agg_id, row_fun) {
 }
 ```
 
-```{r percapita, include=FALSE}
+```{r national-cost-recon-undisc, include=FALSE}
 ## ---------------------------------------------------------------------------
-## 4. Average annual ADDITIONAL cost per capita (team request), per scenario. The
-##    value is precomputed by Model 09 and carried on the results contract
-##    (pc_undisc_val / pc_disc_val, already merged into met_clin/met_ph/met_comb):
-##    the simple mean over 2026-2050 of each year's additional cost per capita,
-##    where Model 09 divides each year's additional cost by that year's national
-##    Indonesia population from out_model/model_output_Indonesia_htncov2_aspirational.rds.
-##    The workbooks carry the SAME metric as LIVE per-capita formulae; the deck
-##    reads the precomputed contract value (no Excel recalc) and NEVER computes
-##    cost / population. Robust to whatever scenarios the run produced: values are
-##    keyed by scenario and default to "--" (via hv()) when a scenario has none.
+## UNDISCOUNTED national cost measures - an exact parallel to national-cost-recon,
+## reconstructed from EACH family's OWN cost workbook, keyed by scenario. This
+## block leaves every discounted helper/object untouched and only ADDS the
+## undiscounted analogues (suffix _undisc). Every workbook-specific rule is
+## preserved: the same population denominators, coverage/implementation
+## quantities, scenario identity, and shared-component de-duplication as the
+## discounted path -- the ONLY change is that the per-year discount factor is
+## omitted from the annual cost. Because the formula workbooks write ALL computed
+## cost cells (discounted AND undiscounted) uncached, the reconstruction reads the
+## same authoritative INPUT columns the workbook formulae use:
+##   * clinical      -> the cached companion Budget_Impact stores incremental_cost
+##                      (annual undiscounted) + cumulative_incremental_cost as literals.
+##   * public-health -> annual undiscounted policy-implementation cost from Annual_Cost
+##                      inputs (drop the 1/(1+r)^(t-y0) factor from the discounted build).
+##   * combined      -> annual undiscounted additional cost from Annual_Cost inputs
+##                      (same drop-the-discount-factor reconstruction).
+## Each reconstruction is reconciled to the run's contract UNDISCOUNTED total
+## (res$incremental_cost) to a tight relative tolerance -- the undiscounted twin of
+## the discounted reconciliation. No Excel COM is required.
 ## ---------------------------------------------------------------------------
-percap_years <- (HZ_START + 1L):HZ_END                       # 2026..2050 display horizon
-val_stop(length(percap_years) == 25L,
-         sprintf("expected 25 projection years (2026-%d); got %d", HZ_END, length(percap_years)))
+build_annual_cost_undisc <- function(fam) {
+  if (fam == "clinical") {
+    ## Cached clinical Budget_Impact stores undiscounted incremental_cost as literals.
+    bi <- read_clin_bi()
+    need <- c("scenario","year","incremental_cost","national_population","cumulative_incremental_cost")
+    val_stop(all(need %in% names(bi)), "clinical Budget_Impact missing required undiscounted column(s)")
+    .rc <- bi[, .(a = cumsum(incremental_cost), c = cumulative_incremental_cost), by = scenario]
+    val_stop(max(abs(.rc$a - .rc$c)) < 1,
+             "clinical annual undiscounted cost does not reconcile to the cumulative field")
+    out <- bi[, .(scenario, year, undisc = incremental_cost, pop = national_population)]
+  } else if (fam == "public_health") {
+    ## Uncached: reproduce annual UNDISCOUNTED policy-implementation cost from Annual_Cost inputs.
+    ps <- .ca_num(wb_ph, "policy_start_year");   rp <- .ca_num(wb_ph, "policy_cost_ramp_years")
+    b0 <- .ca_num(wb_ph, "baseline_implementation_fraction")
+    val_stop(all(is.finite(c(ps, rp))), "public-health cost assumptions (start/ramp) missing")
+    if (!is.finite(b0)) b0 <- 0
+    ac <- rd(wb_ph, "Annual_Cost")
+    need <- c("scenario","year","pop_scenario","population_in_need_fraction","frequency_per_year","unit_cost_usd")
+    val_stop(all(need %in% names(ac)), "public-health Annual_Cost missing required input column(s)")
+    imf <- function(t) { f <- (t - (ps - 1)) / rp; f[t < ps] <- 0; pmin(pmax(f, 0), 1) }
+    ac[, undisc := pop_scenario * population_in_need_fraction * frequency_per_year * unit_cost_usd *
+                   (imf(year) - b0)]
+    a  <- ac[, .(undisc = sum(undisc)), by = .(scenario, year)]
+    bi <- rd(wb_ph, "Budget_Impact")
+    val_stop("national_population" %in% names(bi), "public-health Budget_Impact missing national_population")
+    out <- merge(a, bi[, .(scenario, year, pop = national_population)], by = c("scenario","year"))
+  } else if (fam == "combined") {
+    ## Uncached: reproduce annual UNDISCOUNTED additional cost from Annual_Cost inputs.
+    ac <- rd(wb_comb, "Annual_Cost")
+    need <- c("scenario","year","pin_fraction","frequency_per_year","unit_cost_usd",
+              "q_scenario","q_baseline","covimpl_scenario","covimpl_baseline")
+    val_stop(all(need %in% names(ac)), "combined Annual_Cost missing required input column(s)")
+    ac[, undisc := pin_fraction * frequency_per_year * unit_cost_usd *
+                   (q_scenario * covimpl_scenario - q_baseline * covimpl_baseline)]
+    a  <- ac[, .(undisc = sum(undisc)), by = .(scenario, year)]
+    bi <- rd(wb_comb, "Budget_Impact")
+    val_stop("national_population" %in% names(bi), "combined Budget_Impact missing national_population")
+    out <- merge(a, bi[, .(scenario, year, pop = national_population)], by = c("scenario","year"))
+  } else stop("unknown family: ", fam)
+  setorder(out, scenario, year)
+  ## --- Structural validation (mirrors the discounted build) ---------------
+  yrs <- sort(unique(out$year))
+  val_stop(setequal(yrs, HZ_START:HZ_END),
+           sprintf("%s undiscounted cost workbook year coverage is not %d-%d", fam, HZ_START, HZ_END))
+  val_stop(nrow(out[, .(nu = uniqueN(pop)), by = year][nu > 1]) == 0,
+           sprintf("%s national_population differs across scenarios within a year (undiscounted)", fam))
+  ## reconcile reconstructed full-horizon total to the run's contract UNDISCOUNTED total
+  ct <- res[workbook == fam, .(scenario, contract = incremental_cost)][is.finite(contract)]
+  rc <- merge(out[, .(tot = sum(undisc)), by = scenario], ct, by = "scenario")
+  rc[, rel := abs(tot - contract) / pmax(abs(contract), 1)]
+  val_stop(nrow(rc) > 0 && max(rc$rel) < 1e-4,
+           sprintf("%s reconstructed undiscounted cost does not reconcile to the contract total (max rel.diff %.2g)",
+                   fam, if (nrow(rc)) max(rc$rel) else NA_real_))
+  out[]
+}
+annual_cost_tabs_undisc <- list(
+  clinical      = build_annual_cost_undisc("clinical"),
+  public_health = build_annual_cost_undisc("public_health"),
+  combined      = build_annual_cost_undisc("combined"))
 
-## Formatted "undiscounted / discounted" per-capita callout for one scenario.
-percap_vals <- function(tab, sc) {
-  undisc <- hv(sc, "pc_undisc_val", tab)
-  disc   <- hv(sc, "pc_disc_val", tab)
-  list(undisc = undisc, disc = disc,
-       txt = sprintf("\\textbf{Average annual additional cost per capita} (simple mean of the annual additional cost per capita, %d-%d): \\textbf{%s} undiscounted, \\textbf{%s} discounted.",
-                     (HZ_START + 1L), HZ_END, fmt_usd_pc(undisc), fmt_usd_pc(disc)))
+## The two UNDISCOUNTED per-capita measures for one (family, scenario).
+pc_avg_annual_undisc <- function(fam, sc) {                 # measure (1), undiscounted
+  d <- annual_cost_tabs_undisc[[fam]][scenario == sc]
+  if (!nrow(d)) return(NA_real_)
+  num   <- d[year %in% DISPLAY_YEARS, sum(undisc)]
+  pop26 <- d[year == HZ_START + 1L, pop][1]
+  if (!is.finite(num) || !is.finite(pop26) || pop26 <= 0) return(NA_real_)
+  num / (25 * pop26)
 }
-## Emit the per-capita callout as a compact tinted single line under a cost table.
-percap_callout <- function(tab, sc, famcol = "wbnavy") {
-  v <- percap_vals(tab, sc)
-  if (!is.finite(v$undisc) || !is.finite(v$disc)) return(invisible())
-  cat(sprintf("\n\n\\vspace{2pt}\\noindent\\colorbox{%s!8}{\\parbox{\\dimexpr\\linewidth-2\\fboxsep}{\\footnotesize %s}}\n",
-              famcol, v$txt))
+pc_year2050_undisc <- function(fam, sc) {                   # measure (2), undiscounted
+  d <- annual_cost_tabs_undisc[[fam]][scenario == sc]
+  if (!nrow(d)) return(NA_real_)
+  u50 <- d[year == HZ_END, undisc][1]; pop50 <- d[year == HZ_END, pop][1]
+  if (!is.finite(u50) || !is.finite(pop50) || pop50 <= 0) return(NA_real_)
+  u50 / pop50
 }
+## Independent validation: measure (2) UNDISCOUNTED for the clinical family must equal
+## the clinical workbook's own cached incremental_cost_per_capita in 2050.
+{ .bi <- read_clin_bi()
+  if ("incremental_cost_per_capita" %in% names(.bi)) {
+    .chk <- .bi[year == HZ_END, .(scenario, stored = incremental_cost_per_capita)][is.finite(stored)]
+    if (nrow(.chk)) {
+      .cmp <- data.table(scenario = .chk$scenario, stored = .chk$stored,
+                         rebuilt = vapply(.chk$scenario, function(s) pc_year2050_undisc("clinical", s), numeric(1)))
+      val_stop(max(abs(.cmp$stored - .cmp$rebuilt)) < 1e-6,
+               "clinical 2050 undiscounted per-capita reconstruction disagrees with the workbook's stored value") }
+  }
+}
+```
+
+```{r results-builders-undisc, include=FALSE}
+## UNDISCOUNTED row builders / scalars -- exact twins of the discounted ones in
+## results-builders, differing ONLY in the monetary measures (health is identical):
+##   * cost per death averted (undiscounted) = UNDISCOUNTED additional cost
+##       (res$incremental_cost) / the SAME cumulative undiscounted deaths averted.
+##   * pc1u = average annual UNDISCOUNTED additional cost per capita, 2026-2050
+##       = cumulative undiscounted additional cost 2026-2050 / (25 x 2026 population)
+##   * pc2u = undiscounted additional cost per capita in 2050 / 2050 population.
+pc1u <- function(tab, sc) fmt_usd_pc2(pc_avg_annual_undisc(fam_of(tab), sc))
+pc2u <- function(tab, sc) fmt_usd_pc2(pc_year2050_undisc(fam_of(tab), sc))
+cpda_undisc <- function(sc, tab) {
+  ic <- hv(sc, "incremental_cost", tab); da <- hv(sc, "deaths_averted", tab)
+  if (is.finite(ic) && is.finite(da) && da > 0) ic / da else NA_real_
+}
+ce_row_undisc <- function(tab, sc) cbind(
+  impact_row(tab, sc),
+  data.table(cpd  = fmt_usd(cpda_undisc(sc, tab)),
+             pc1c = pc1u(tab, sc),
+             pc2c = pc2u(tab, sc)))
+
+## Undiscounted headline scalars (health scalars are unchanged and reused as-is).
+combo_cpda_undisc <- if (has_joint) cpda_undisc(joint_id, met_comb) else NA_real_
+combo_cost_undisc <- if (has_joint) hv(joint_id, "incremental_cost", met_comb) else NA_real_
+clin_cpda_undisc  <- cpda_undisc(clin_all_id, met_clin)
+ph_cpda_undisc    <- cpda_undisc(ph_all_id, met_ph)
 ```
 
 ```{r cascade-data, include=FALSE}
@@ -453,6 +814,51 @@ cread <- function(s) as.data.table(openxlsx::read.xlsx(casc_wb, sheet = s))
 need_cols <- function(dt, cols, sheet)
   val_stop(all(cols %in% names(dt)),
            sprintf("cascade sheet '%s' missing column(s): %s", sheet, paste(setdiff(cols, names(dt)), collapse = ", ")))
+
+## Cached-value fallback for UNcached formula cells. The cascade FORMULA workbook is the
+## structural + methodological source of truth, but openxlsx writes formula cells UNcached:
+## its computed cost / cost-effectiveness columns read back as NA (Excel would populate them
+## only on open). When a required numeric column is entirely non-finite, fall back to the
+## companion literal-value workbook (indonesia_70_30_30_to_70_70_70_cost_value.xlsx) for ONLY
+## that sheet's numbers; every structural sheet is still read from the formula workbook. The
+## companion is used only after both workbooks are validated to describe the SAME run.
+casc_wb_cached <- sub("_formulae\\.xlsx$", ".xlsx", casc_wb)
+.casc_same_run <- FALSE
+ensure_casc_same_run <- function() {
+  if (.casc_same_run) return(invisible(TRUE))
+  val_stop(file.exists(casc_wb_cached),
+           sprintf("cascade formula workbook has uncached cost cells and its literal-value companion is missing: %s",
+                   basename(casc_wb_cached)))
+  ## (i) identical Annual_Cost row keys => same scenarios / interventions / years / cost keys.
+  keyc <- c("scenario","year","cost_record_id","cost_component_key","cost_join_key")
+  kf <- cread("Annual_Cost"); kc <- as.data.table(openxlsx::read.xlsx(casc_wb_cached, sheet = "Annual_Cost"))
+  val_stop(all(keyc %in% names(kf)) && all(keyc %in% names(kc)),
+           "cannot verify cascade formula/cached same-run: an Annual_Cost key column is missing")
+  kfk <- sort(do.call(paste, c(kf[, ..keyc], sep = "")))
+  kck <- sort(do.call(paste, c(kc[, ..keyc], sep = "")))
+  val_stop(length(kfk) == length(kck) && all(kfk == kck),
+           "cascade cached-value workbook does not match the formula workbook (different scenarios / interventions / years / cost keys)")
+  ## (ii) matching run provenance metadata.
+  mf <- cread("Run_Metadata"); mc <- as.data.table(openxlsx::read.xlsx(casc_wb_cached, sheet = "Run_Metadata"))
+  for (it in c("Input workbook","Scenarios costed","Model / pipeline","Location")) {
+    vf <- mf[item == it, value]; vc <- mc[item == it, value]
+    val_stop(length(vf) && length(vc) && identical(vf[1], vc[1]),
+             sprintf("cascade formula vs cached workbook disagree on Run_Metadata '%s' (different run)", it))
+  }
+  .casc_same_run <<- TRUE
+  invisible(TRUE)
+}
+## Read a cascade sheet preferring the formula workbook; if any required numeric column is
+## absent or entirely non-finite there (uncached formulas), take the sheet from the validated
+## literal-value companion instead.
+cread_num <- function(sheet, num_cols) {
+  d <- cread(sheet)
+  ok <- all(num_cols %in% names(d)) &&
+        all(vapply(num_cols, function(cc) any(is.finite(d[[cc]])), logical(1)))
+  if (ok) return(d)
+  ensure_casc_same_run()
+  as.data.table(openxlsx::read.xlsx(casc_wb_cached, sheet = sheet))
+}
 
 ## (a) Exactly the two expected scenarios (baseline + the cascade scenario).
 CASC_SCEN <- "S_70_30_30_TO_70_70_70"
@@ -516,14 +922,29 @@ val_stop(all(is.finite(casc_q$q)) && setequal(casc_q$year, casc_y0:casc_y1),
          "cascade probability-of-death series has gaps or non-finite values")
 
 ## (e) Cumulative DISCOUNTED cost levels (baseline vs intervention), de-duplicated.
-c_ac <- cread("Annual_Cost")
-need_cols(c_ac, c("year","disc_cost_baseline","disc_cost_scenario","disc_cost_incremental","shared_duplicate_count"), "Annual_Cost")
+c_ac <- cread_num("Annual_Cost", c("disc_cost_baseline","disc_cost_scenario","disc_cost_incremental"))
+need_cols(c_ac, c("year","disc_cost_baseline","disc_cost_scenario","disc_cost_incremental"), "Annual_Cost")
+## Count each shared component once. The formula workbook carries an explicit
+## shared_duplicate_count; the literal-value companion omits it (its rows are already the
+## de-duplicated set -- each component appears exactly once per year), so a missing/NA count
+## is treated as 1. Any residual double-count is still caught by the Budget_Impact
+## reconciliation guard below.
+if (!"shared_duplicate_count" %in% names(c_ac) || all(is.na(c_ac$shared_duplicate_count)))
+  c_ac[, shared_duplicate_count := 1]
 c_ac[, w := 1 / pmax(shared_duplicate_count, 1)]              # count shared components once
 casc_cost <- c_ac[, .(base = sum(disc_cost_baseline * w), scen = sum(disc_cost_scenario * w),
                       inc  = sum(disc_cost_incremental * w)), by = year][order(year)]
 casc_cost[, `:=`(cum_base = cumsum(base), cum_scen = cumsum(scen), cum_inc = cumsum(inc))]
-c_bi <- cread("Budget_Impact"); need_cols(c_bi, c("year","cumulative_disc_incremental_cost"), "Budget_Impact")
-casc_cost <- merge(casc_cost, c_bi[, .(year, bi_cum = cumulative_disc_incremental_cost)], by = "year")
+c_bi <- cread_num("Budget_Impact", c("cumulative_disc_incremental_cost","disc_incremental_cost"))
+need_cols(c_bi, c("year","cumulative_disc_incremental_cost","disc_incremental_cost","national_population"), "Budget_Impact")
+casc_cost <- merge(casc_cost, c_bi[, .(year, bi_cum = cumulative_disc_incremental_cost,
+                                       bi_disc_annual = disc_incremental_cost,
+                                       bi_pop = national_population)], by = "year")
+## ANNUAL (year-specific, NOT cumulative) additional cost per capita = that year's
+## discounted additional cost / that year's national population (both authoritative
+## Budget_Impact fields). Distinct from the 2026-2050 average shown in the CE tables.
+casc_cost[, pc_annual := bi_disc_annual / bi_pop]
+val_stop(all(is.finite(casc_cost$pc_annual)), "cascade annual per-capita cost is non-finite")
 ## Guard: our de-duplicated level difference must reconcile to the authoritative budget sheet.
 val_stop(max(abs((casc_cost$cum_scen - casc_cost$cum_base) - casc_cost$bi_cum)) < 1,
          "cascade cost levels (Annual_Cost) do not reconcile to Budget_Impact cumulative additional cost")
@@ -537,7 +958,7 @@ casc_deaths[, `:=`(cum_base = cumsum(base), cum_scen = cumsum(scen))]
 casc_deaths[, cum_averted := cum_base - cum_scen]
 
 ## (g) Headline metrics from the workbook Cost_Effectiveness (single source of truth).
-c_ce <- cread("Cost_Effectiveness"); need_cols(c_ce, c("scenario","deaths_averted","disc_incremental_cost","cost_per_death_averted"), "Cost_Effectiveness")
+c_ce <- cread_num("Cost_Effectiveness", c("deaths_averted","disc_incremental_cost","cost_per_death_averted")); need_cols(c_ce, c("scenario","deaths_averted","disc_incremental_cost","cost_per_death_averted"), "Cost_Effectiveness")
 c_ce <- c_ce[scenario == CASC_SCEN]
 val_stop(nrow(c_ce) == 1L, "cascade Cost_Effectiveness must have exactly the cascade scenario")
 casc_da   <- c_ce$deaths_averted[1]
@@ -555,7 +976,57 @@ casc_snapshot <- function(y) list(
   d_base = casc_deaths[year == y, cum_base], d_scen = casc_deaths[year == y, cum_scen],
   d_av   = casc_deaths[year == y, cum_averted],
   c_base = casc_cost[year == y, cum_base],   c_scen = casc_cost[year == y, cum_scen],
-  c_add  = casc_cost[year == y, bi_cum])
+  c_add  = casc_cost[year == y, bi_cum],
+  pc_ann = casc_cost[year == y, pc_annual])   # year-specific annual additional cost per capita
+```
+
+```{r cascade-data-undisc, include=FALSE}
+## ---------------------------------------------------------------------------
+## UNDISCOUNTED cascade cost levels -- an exact parallel to the (e)/(g) blocks of
+## cascade-data, ADDED alongside the discounted objects (never replacing them).
+## The cascade FORMULA workbook is the structural source of truth but writes its
+## computed cost cells uncached, so cread_num() transparently takes the numbers
+## from the validated literal-value companion (same-run guarded). The undiscounted
+## build reuses the SAME de-duplication rule (count each shared component once) and
+## the SAME authoritative Budget_Impact fields as the discounted build; the ONLY
+## difference is that it sums the undiscounted annual_cost_* columns instead of the
+## discounted disc_cost_* columns, and reconciles to the workbook's UNDISCOUNTED
+## cumulative_incremental_cost / Cost_Effectiveness incremental_cost.
+c_ac_u <- cread_num("Annual_Cost", c("annual_cost_baseline","annual_cost_scenario","annual_cost_incremental"))
+need_cols(c_ac_u, c("year","annual_cost_baseline","annual_cost_scenario","annual_cost_incremental"), "Annual_Cost")
+if (!"shared_duplicate_count" %in% names(c_ac_u) || all(is.na(c_ac_u$shared_duplicate_count)))
+  c_ac_u[, shared_duplicate_count := 1]
+c_ac_u[, w := 1 / pmax(shared_duplicate_count, 1)]           # count shared components once
+casc_cost_u <- c_ac_u[, .(base = sum(annual_cost_baseline * w), scen = sum(annual_cost_scenario * w),
+                          inc  = sum(annual_cost_incremental * w)), by = year][order(year)]
+casc_cost_u[, `:=`(cum_base = cumsum(base), cum_scen = cumsum(scen), cum_inc = cumsum(inc))]
+c_bi_u <- cread_num("Budget_Impact", c("cumulative_incremental_cost","incremental_cost"))
+need_cols(c_bi_u, c("year","cumulative_incremental_cost","incremental_cost","national_population"), "Budget_Impact")
+casc_cost_u <- merge(casc_cost_u, c_bi_u[, .(year, bi_cum = cumulative_incremental_cost,
+                                             bi_ann = incremental_cost, bi_pop = national_population)], by = "year")
+## ANNUAL (year-specific, NOT cumulative) undiscounted additional cost per capita.
+casc_cost_u[, pc_annual := bi_ann / bi_pop]
+val_stop(all(is.finite(casc_cost_u$pc_annual)), "cascade annual undiscounted per-capita cost is non-finite")
+## de-duplicated level difference must reconcile to the authoritative UNDISCOUNTED budget sheet.
+val_stop(max(abs((casc_cost_u$cum_scen - casc_cost_u$cum_base) - casc_cost_u$bi_cum)) < 1,
+         "cascade undiscounted cost levels do not reconcile to Budget_Impact cumulative additional cost")
+
+## Undiscounted headline metrics from the workbook Cost_Effectiveness (single source of truth).
+c_ce_u <- cread_num("Cost_Effectiveness", c("deaths_averted","incremental_cost"))
+c_ce_u <- c_ce_u[scenario == CASC_SCEN]
+val_stop(nrow(c_ce_u) == 1L, "cascade undiscounted Cost_Effectiveness must have exactly the cascade scenario")
+casc_cost_tot_undisc <- c_ce_u$incremental_cost[1]
+casc_cpda_undisc <- if (is.finite(casc_da) && casc_da > 0) casc_cost_tot_undisc / casc_da else NA_real_
+val_stop(abs(casc_cost_u[year == casc_y1, bi_cum] - casc_cost_tot_undisc) < 1e4,
+         "cascade cumulative undiscounted additional cost does not reconcile to Cost_Effectiveness")
+
+## Undiscounted cumulative snapshots for the results table (2030 / 2040 / 2050).
+casc_snapshot_undisc <- function(y) list(
+  d_base = casc_deaths[year == y, cum_base], d_scen = casc_deaths[year == y, cum_scen],
+  d_av   = casc_deaths[year == y, cum_averted],
+  c_base = casc_cost_u[year == y, cum_base], c_scen = casc_cost_u[year == y, cum_scen],
+  c_add  = casc_cost_u[year == y, bi_cum],
+  pc_ann = casc_cost_u[year == y, pc_annual])   # year-specific annual undiscounted additional cost per capita
 ```
 
 ```{r deck-titles, include=FALSE}
@@ -567,6 +1038,277 @@ title_exec <- if (has_joint)
 title_cascade_results <- sprintf(
   "A stronger cascade could prevent about %s deaths by %d",
   fmt_title_num(casc_da), casc_y1)
+
+## UNDISCOUNTED-counterpart takeaway titles (plain text; no %/$). Each states the
+## finding and makes the undiscounted basis explicit; monetary detail lives in the
+## slide body/labels, never in the frame title.
+title_exec_undisc <- if (has_joint)
+  sprintf("Without discounting, combining care and prevention still averts about %s deaths by %d",
+          fmt_title_num(combo_da), HZ_END) else
+  "Without discounting, clinical care and prevention each still cut premature cardiovascular deaths"
+title_cascade_results_undisc <- sprintf(
+  "On an undiscounted basis, a stronger cascade still prevents about %s deaths by %d",
+  fmt_title_num(casc_da), casc_y1)
+```
+
+```{r subnat-data, include=FALSE}
+## ===========================================================================
+## ISOLATED SUBNATIONAL (38-province) 70-30-30 -> 70-70-70 cascade analysis.
+## Read ONLY from the province-level cascade workbook; never merged with any other
+## results. Formula-only fields are reproduced from cached authoritative inputs
+## (validated on the fully-cached national cascade workbook); population is the
+## workbook's own province_population.
+## ===========================================================================
+sread <- function(s) as.data.table(openxlsx::read.xlsx(subnat_wb, sheet = s))
+.ssh  <- openxlsx::getSheetNames(subnat_wb)
+.sreq <- c("Run_Metadata","Cascade_Assumptions","Scenario_Catalog","Cascade_Trajectory",
+           "Annual_Mortality","Health_Outcomes","CVD_40q30","Annual_Cost","Budget_Impact",
+           "Cost_Effectiveness","Province_Reconciliation")
+val_stop(all(.sreq %in% .ssh),
+         sprintf("subnational workbook missing sheet(s): %s", paste(setdiff(.sreq, .ssh), collapse = ", ")))
+sneed <- function(dt, cols, sheet)
+  val_stop(all(cols %in% names(dt)),
+           sprintf("subnational sheet '%s' missing column(s): %s", sheet, paste(setdiff(cols, names(dt)), collapse = ", ")))
+
+## Exactly the baseline + cascade scenario.
+SUB_SCEN <- "S_70_30_30_TO_70_70_70"
+s_cat <- sread("Scenario_Catalog"); sneed(s_cat, "scenario", "Scenario_Catalog")
+val_stop(setequal(s_cat$scenario, c("baseline", SUB_SCEN)),
+         sprintf("subnational Scenario_Catalog must be exactly {baseline, %s}", SUB_SCEN))
+
+## Assumptions + metadata.
+s_as <- sread("Cascade_Assumptions"); sneed(s_as, c("parameter_id","value"), "Cascade_Assumptions")
+sgetn <- function(id) suppressWarnings(as.numeric(s_as[parameter_id == id, value][1]))
+sub_disc  <- sgetn("cost_discount_rate"); sub_y0 <- as.integer(sgetn("analysis_start_year"))
+sub_price <- as.integer(sgetn("cost_price_year"))
+sub_ytar1 <- as.integer(sgetn("first_target_year")); sub_ytar2 <- as.integer(sgetn("final_target_year"))
+sub_eff30 <- sgetn("first_target_effective_coverage_exact")
+sub_eff40 <- sgetn("final_target_effective_coverage_exact")
+val_stop(all(is.finite(c(sub_disc, sub_y0, sub_ytar1, sub_ytar2))), "subnational assumptions missing")
+s_rmd <- sread("Run_Metadata")
+sub_persp <- { v <- s_rmd[item == "Economic perspective", value]; ltx(gsub("_", " ", if (length(v)) v[1] else "health system")) }
+
+## ---- Province roster + BPS(province_code) -> ISO-3166-2 crosswalk -----------
+## The offline boundary set (rnaturalearth admin-1) predates the 5 post-2012
+## provinces (North Kalimantan; the four new Papua provinces); each is mapped onto
+## its PARENT polygon, of which it is an exact geographic subset. Counts are summed
+## and rates are population-weighted onto the parent, so the parent region is
+## reconstituted exactly. All 38 provinces are shown individually in the Pareto bar.
+s_ce <- sread("Cost_Effectiveness"); sneed(s_ce, c("location","province_code"), "Cost_Effectiveness")
+prov_meta <- unique(s_ce[, .(location, province_code = as.character(province_code))])
+val_stop(uniqueN(prov_meta$location) == 38L && nrow(prov_meta) == 38L,
+         sprintf("expected exactly 38 unique provinces; got %d rows / %d locations",
+                 nrow(prov_meta), uniqueN(prov_meta$location)))
+bps2iso <- c(
+  "11"="ID-AC","12"="ID-SU","13"="ID-SB","14"="ID-RI","15"="ID-JA","16"="ID-SS","17"="ID-BE",
+  "18"="ID-LA","19"="ID-BB","21"="ID-KR","31"="ID-JK","32"="ID-JB","33"="ID-JT","34"="ID-YO",
+  "35"="ID-JI","36"="ID-BT","51"="ID-BA","52"="ID-NB","53"="ID-NT","61"="ID-KB","62"="ID-KT",
+  "63"="ID-KS","64"="ID-KI","65"="ID-KI","71"="ID-SA","72"="ID-ST","73"="ID-SN","74"="ID-SG",
+  "75"="ID-GO","76"="ID-SR","81"="ID-MA","82"="ID-MU","91"="ID-PA","92"="ID-PB","93"="ID-PA",
+  "94"="ID-PA","95"="ID-PA","96"="ID-PB")
+prov_meta[, iso := bps2iso[province_code]]
+val_stop(!any(is.na(prov_meta$iso)),
+         sprintf("province(s) without a boundary mapping: %s", paste(prov_meta[is.na(iso), location], collapse = ", ")))
+n_merged_prov <- nrow(prov_meta[, .N, by = iso][N > 1][, .(iso)])   # parent polygons receiving >1 province
+n_new_prov    <- sum(prov_meta$province_code %in% c("65","93","94","95","96"))
+
+## Province population by year (authoritative; cached) for weighting/denominators.
+s_bi <- sread("Budget_Impact"); sneed(s_bi, c("location","year","province_population"), "Budget_Impact")
+prov_pop <- s_bi[, .(location, year, pop = province_population)]
+
+## ---- (5a) Cumulative deaths averted by province, 2025-2050 (6 CVD + T2D) ----
+s_ho <- sread("Health_Outcomes"); sneed(s_ho, c("location","scenario","year","modeled_deaths","baseline_deaths"), "Health_Outcomes")
+da_prov <- s_ho[scenario == SUB_SCEN, .(da = sum(baseline_deaths - modeled_deaths)), by = location]
+val_stop(nrow(da_prov) == 38L && all(is.finite(da_prov$da)), "subnational deaths averted incomplete")
+setorder(da_prov, -da)
+da_prov[, cum_share := cumsum(da) / sum(da) * 100]
+da_prov[, location := factor(location, levels = location)]        # sorted order for the Pareto
+sub_da_total <- sum(da_prov$da)
+## Reconcile baseline-death aggregation to the workbook's Province_Reconciliation.
+s_pr <- sread("Province_Reconciliation"); sneed(s_pr, c("metric","province_sum","national","rel_diff","status"), "Province_Reconciliation")
+.prd <- s_pr[grepl("baseline_modeled_deaths", metric)]
+sub_recon_reldiff <- if (nrow(.prd)) suppressWarnings(as.numeric(.prd$rel_diff[1])) * 100 else NA_real_
+sub_recon_status  <- if (nrow(.prd)) .prd$status[1] else NA_character_
+
+## ---- (5b) CVD primary-care effective coverage, 2025 & 2040 (sex-pooled) -----
+s_tr <- sread("Cascade_Trajectory")
+sneed(s_tr, c("location","intervention_id","sex","year","scenario_effective_coverage"), "Cascade_Trajectory")
+cvp <- s_tr[intervention_id == "I_CVD_PRIMARY" & year %in% c(HZ_START, sub_ytar2)]
+## Verify the two sexes are identical at the 70-70-70 target year (so the pooled mean is exact there).
+.sxchk <- dcast(cvp[year == sub_ytar2], location ~ sex, value.var = "scenario_effective_coverage")
+val_stop(max(abs(.sxchk[[2]] - .sxchk[[3]])) < 1e-9,
+         "subnational CVD coverage: the two sexes are not identical at the target year")
+cov_prov <- cvp[, .(cov = mean(scenario_effective_coverage)), by = .(location, year)]  # equal adult-population weights
+
+## ---- (5c) % reduction in CVD deaths (six CVD causes; exclude T2D), 2030/2040 -
+s_am <- sread("Annual_Mortality"); sneed(s_am, c("location","scenario","year","cause","cause_deaths","base_deaths"), "Annual_Mortality")
+CVD_CAUSES <- c("cmd","hhd","hstroke","ihd","istroke","rhd")   # six modelled CVD causes (no dm2)
+val_stop(all(CVD_CAUSES %in% unique(s_am$cause)), "subnational Annual_Mortality missing a CVD cause code")
+cvd_red <- s_am[scenario == SUB_SCEN & cause %in% CVD_CAUSES & year %in% c(sub_ytar1, sub_ytar2),
+                .(base = sum(base_deaths), scen = sum(cause_deaths)), by = .(location, year)]
+cvd_red[, pctred := (base - scen) / base * 100]
+
+## ---- (5d) % reduction in probability of CVD death before age 70, 2030/2040 --
+s_q <- sread("CVD_40q30"); sneed(s_q, c("location","scenario","year","cvd_40q30_r"), "CVD_40q30")
+qb <- s_q[scenario == "baseline",  .(location, year, base_r = cvd_40q30_r)]
+qs <- s_q[scenario == SUB_SCEN,    .(location, year, scen_r = cvd_40q30_r)]
+q40 <- merge(qb, qs, by = c("location","year"))
+val_stop(all(is.finite(q40$base_r)) && all(is.finite(q40$scen_r)) && all(q40$base_r > 0),
+         "subnational probability-of-death series has gaps or non-positive baseline")
+q40[, pctred := (base_r - scen_r) / base_r * 100]
+q40 <- q40[year %in% c(sub_ytar1, sub_ytar2)]
+
+## ---- (5e) Annual DISCOUNTED additional cost per capita, 2030 & 2040 ---------
+## Reproduce annual discounted additional cost from cached Annual_Cost inputs
+## (formula validated to machine precision on the national cascade workbook).
+s_ac <- sread("Annual_Cost")
+sneed(s_ac, c("location","scenario","year","frequency_per_year","unit_cost_usd","population_in_need_fraction",
+              "r_quantity_scenario","r_quantity_baseline"), "Annual_Cost")
+s_ac[, disc := frequency_per_year * unit_cost_usd * population_in_need_fraction *
+       (r_quantity_scenario * coverage_scenario - r_quantity_baseline * coverage_baseline) *
+       (1 / (1 + sub_disc)^(year - sub_y0))]
+cost_prov <- s_ac[, .(disc = sum(disc)), by = .(location, year)]
+cost_prov <- merge(cost_prov, prov_pop, by = c("location","year"))
+cost_prov[, pc := disc / pop]
+cost_prov <- cost_prov[year %in% c(sub_ytar1, sub_ytar2)]
+val_stop(all(is.finite(cost_prov$pc)), "subnational per-capita cost has non-finite values")
+
+## Each map-year dataset must cover all 38 provinces exactly once before plotting.
+chk38 <- function(dt, yrs, what) for (y in yrs) {
+  n <- uniqueN(dt[year == y, location])
+  val_stop(n == 38L && !any(duplicated(dt[year == y, location])),
+           sprintf("%s: year %d has %d unique provinces (expected 38)", what, y, n))
+}
+chk38(cov_prov,  c(HZ_START, sub_ytar2), "coverage map")
+chk38(cvd_red,   c(sub_ytar1, sub_ytar2), "CVD-death reduction map")
+chk38(q40,       c(sub_ytar1, sub_ytar2), "probability-of-death reduction map")
+chk38(cost_prov, c(sub_ytar1, sub_ytar2), "per-capita cost map")
+
+## ---- Boundary geometry (offline: rnaturalearth admin-1) + join validation ---
+val_stop(requireNamespace("sf", quietly = TRUE) && requireNamespace("rnaturalearth", quietly = TRUE),
+         "packages 'sf' and 'rnaturalearth' are required for the subnational maps")
+suppressWarnings(suppressMessages({ library(sf); library(rnaturalearth) }))
+idn_sf <- rnaturalearth::ne_states(country = "Indonesia", returnclass = "sf")
+idn_sf <- idn_sf[, c("iso_3166_2", "name")]; names(idn_sf)[1] <- "iso"
+val_stop(all(prov_meta$iso %in% idn_sf$iso),
+         sprintf("boundary geometry is missing polygon(s) for iso: %s",
+                 paste(setdiff(unique(prov_meta$iso), idn_sf$iso), collapse = ", ")))
+n_polygons <- nrow(idn_sf)
+
+## Aggregation helpers province -> boundary polygon (iso).
+sum_to_iso <- function(dt, valcol) {           # counts: sum
+  d <- merge(dt, prov_meta[, .(location, iso)], by = "location")
+  d[, .(value = sum(get(valcol))), by = iso]
+}
+popw_to_iso <- function(dt, valcol, yr) {      # rates: population-weighted mean at year yr
+  w <- prov_pop[year == yr, .(location, pop)]
+  d <- merge(dt, prov_meta[, .(location, iso)], by = "location")
+  d <- merge(d, w, by = "location")
+  d[, .(value = sum(get(valcol) * pop) / sum(pop)), by = iso]
+}
+ratio_to_iso <- function(dt) {                 # per-capita cost: sum(cost)/sum(pop)
+  d <- merge(dt, prov_meta[, .(location, iso)], by = "location")
+  d[, .(value = sum(disc) / sum(pop)), by = iso]
+}
+## Attach values (one row per iso) to geometry, returning an sf for one panel/year.
+map_sf <- function(iso_dt) {
+  iso_df <- as.data.frame(iso_dt)                     # plain frame -> use merge.sf, not data.table
+  m <- merge(idn_sf, iso_df, by = "iso", all.x = TRUE)
+  val_stop(!any(is.na(m$value)), "a boundary polygon received no value in a subnational map")
+  m
+}
+## Build a faceted two-year sf: bind per-year sf with a 'panel' label.
+maps_two_year <- function(dt_by_year, years, panel_labs, agg = c("sum","popw","ratio"), valcol = "value") {
+  agg <- match.arg(agg)
+  out <- lapply(seq_along(years), function(i) {
+    yr <- years[i]
+    dyr <- dt_by_year[year == yr]
+    iso_dt <- switch(agg,
+                     sum   = sum_to_iso(dyr, valcol),
+                     popw  = popw_to_iso(dyr, valcol, yr),
+                     ratio = ratio_to_iso(dyr))
+    s <- map_sf(iso_dt); s$panel <- panel_labs[i]; s
+  })
+  do.call(rbind, out)
+}
+## Common map theme.
+theme_map_exec <- function(base = 10) {
+  theme_void(base_size = base) +
+    theme(legend.position = "bottom",
+          legend.title = element_text(size = base - 2, colour = col_wbnavy),
+          legend.text  = element_text(size = base - 3),
+          legend.key.height = unit(0.28, "cm"), legend.key.width = unit(0.95, "cm"),
+          strip.text = element_text(face = "bold", colour = col_wbnavy, size = base),
+          plot.margin = margin(2, 2, 2, 2))
+}
+## Sequential ramps (colour-blind friendly).
+ramp_blue <- c("#F7FBFF","#DEEBF7","#9ECAE1","#4292C6","#08519C","#08306B")
+ramp_grn  <- c("#F7FCF5","#C7E9C0","#74C476","#31A354","#006D2C")
+ramp_org  <- c("#FFF5EB","#FEE6CE","#FDAE6B","#F16913","#D94801","#7F2704")
+
+## Standard caveat pieces reused on every subnational slide (built once).
+sub_caveat <- paste0(
+  "\\textbf{Preliminary---validate before use:} provincial baseline cascade estimates and ",
+  "province-adjusted costs require validation by Indonesia's Ministry of Health and BPJS.")
+sub_hetero <- paste0(
+  "Provincial CVD treatment coverage is a crude anchor from observed CVD mortality and the modelled ",
+  "coverage-effect relationship (extreme values capped); provincial diabetes coverage is scaled in proportion.")
+sub_geo_note <- sprintf(
+  "Boundaries: offline admin-1 polygons; the %d post-2012 provinces appear within their parent region (an exact geographic subset).",
+  n_new_prov)
+
+## ---- Dynamic plain-text takeaway titles (no % or $ for \frametitle) ---------
+sub_n50 <- which(da_prov$cum_share >= 50)[1]                 # provinces to reach half the gains
+title_sub_pareto <- sprintf(
+  "About half of averted deaths come from just %d of Indonesia's 38 provinces", sub_n50)
+title_sub_cov <- sprintf(
+  "CVD primary-care coverage rises toward a common target in every province by %d", sub_ytar2)
+.q40max <- q40[year == sub_ytar2][which.max(pctred)]
+title_sub_40q30 <- sprintf(
+  "Premature cardiovascular mortality falls in every province by %d", sub_ytar2)
+title_sub_cvddeath <- "Cardiovascular deaths fall most where the baseline gaps and burden are largest"
+.costmax <- cost_prov[year == sub_ytar2][which.max(pc)]
+title_sub_cost <- "The provincial financing requirement grows as coverage scales up"
+
+## ---- Common positive-anchored scale limits for the subnational choropleths -----
+## Continuous colour bars must start at the minimum strictly-positive displayed value
+## (no detached 0%/US$0 tick). Zeros/negatives are squished to the low end (see each
+## map's oob=scales::squish) rather than dropped to NA/grey. Guards the degenerate
+## all-non-positive / single-value cases. Applied to ALL subnational 70-70-70 maps.
+pos_scale_lims <- function(v) {
+  f <- v[is.finite(v)]
+  if (!length(f)) return(c(0, 1))
+  p  <- f[f > 0]
+  lo <- if (length(p)) min(p) else min(f)
+  hi <- max(f)
+  if (!is.finite(hi) || hi <= lo) hi <- lo + abs(lo) * 1e-6 + 1e-9
+  c(lo, hi)
+}
+```
+
+```{r subnat-data-undisc, include=FALSE}
+## ---------------------------------------------------------------------------
+## UNDISCOUNTED subnational annual additional cost per capita -- an exact parallel
+## to block (5e) of subnat-data, ADDED alongside the discounted objects. The
+## discounted per-row cost s_ac$disc is already reproduced from the cached
+## Annual_Cost inputs (formula validated to machine precision on the national
+## cascade workbook); the undiscounted twin is the SAME reconstruction with the
+## 1/(1+r)^(t-y0) discount factor omitted -- nothing else changes (same population
+## denominator province_population, same coverage/quantity inputs, same de-dup).
+s_ac[, undisc := frequency_per_year * unit_cost_usd * population_in_need_fraction *
+       (r_quantity_scenario * coverage_scenario - r_quantity_baseline * coverage_baseline)]
+## Internal identity: the undiscounted series is exactly the discounted one without
+## the discount factor (fail loud if the reconstruction drifted).
+.nz_u <- s_ac[abs(undisc) > 1e-9]
+val_stop(max(abs(.nz_u$disc / .nz_u$undisc - 1 / (1 + sub_disc)^(.nz_u$year - sub_y0))) < 1e-6,
+         "subnational undiscounted cost is not the discounted series without the discount factor")
+cost_prov_u <- s_ac[, .(undisc = sum(undisc)), by = .(location, year)]
+cost_prov_u <- merge(cost_prov_u, prov_pop, by = c("location", "year"))
+cost_prov_u[, pc := undisc / pop]
+cost_prov_u <- cost_prov_u[year %in% c(sub_ytar1, sub_ytar2)]
+val_stop(all(is.finite(cost_prov_u$pc)), "subnational undiscounted per-capita cost has non-finite values")
+chk38(cost_prov_u, c(sub_ytar1, sub_ytar2), "undiscounted per-capita cost map")
+title_sub_cost_undisc <- "The undiscounted provincial financing requirement grows as coverage scales up"
 ```
 
 # The challenge, and the opportunity
@@ -666,6 +1408,47 @@ if (has_joint)
 
 \srcmethod{\textbf{Source:} results contract (\texttt{09\_deck\_results.rds}) + combined workbook. \textbf{Method:} deaths averted cumulative `r HZ_START`--`r HZ_END` (six CVD causes $+$ type-2 diabetes); cost per death averted $=$ discounted additional cost $\div$ deaths averted (`r price_year` US\$). \costcaveat}
 
+## `r title_exec_undisc`
+
+\begin{columns}[T]
+\begin{column}{0.5\textwidth}
+```{r exec-block-undisc, results='asis'}
+if (has_joint) {
+  cat(sprintf(paste0(
+    "\\begin{combinedblock}{Combining clinical + public health, valued undiscounted}\n",
+    "\\footnotesize Together they could avert about \\hlkey{%s deaths} over %d--%d, ",
+    "cut the probability of death from CVD before age 70 in %d by \\hlkey{%s}, at about \\hlkey{%s per death averted (undiscounted)}.\n",
+    "\\end{combinedblock}\n"),
+    fmt_short(combo_da), HZ_START, HZ_END, HZ_END, fmt_pct(combo_qred,0), fmt_usd(combo_cpda_undisc)))
+} else {
+  cat(paste0("\\begin{block}{Two complementary levers}\n\\footnotesize This run reports the ",
+             "clinical and public-health families; the joint package was not part of this ",
+             "configuration.\n\\end{block}\n"))
+}
+```
+\end{column}
+\begin{column}{0.5\textwidth}
+\begin{itemize}\footnotesize\itemsep3pt
+```{r exec-bullets-undisc, results='asis'}
+if (has_clin)
+  cat(sprintf("  \\item \\textcolor{clinicalcol}{\\textbf{All clinical interventions}}: $\\approx$%s deaths averted; probability of death from CVD before age 70 down %s by %d.\n",
+              fmt_short(clin_da), fmt_pct(clin_qred,0), HZ_END))
+if (has_ph)
+  cat(sprintf("  \\item \\textcolor{phcol}{\\textbf{All public-health policies}}: $\\approx$%s deaths averted at about %s per death averted (undiscounted).\n",
+              fmt_short(ph_da), fmt_usd(ph_cpda_undisc)))
+if (!is.na(top_clin_sc) && !is.na(top_ph_sc))
+  cat(sprintf("  \\item \\textbf{Most impactful single levers}: \\textcolor{clinicalcol}{%s} and \\textcolor{phcol}{%s}.\n",
+              lbl(top_clin_sc, met_clin), lbl(top_ph_sc, met_ph)))
+if (has_joint)
+  cat(sprintf("  \\item \\textbf{Affordability (undiscounted)}: the combined package costs about %s per death averted.\n",
+              fmt_usd(combo_cpda_undisc)))
+```
+\end{itemize}
+\end{column}
+\end{columns}
+
+\srcmethod{\textbf{Source:} results contract (\texttt{09\_deck\_results.rds}) + combined workbook. \textbf{Method:} deaths averted cumulative `r HZ_START`--`r HZ_END` (six CVD causes $+$ type-2 diabetes); \textbf{undiscounted} cost per death averted $=$ \textbf{undiscounted} additional cost $\div$ deaths averted (`r price_year` US\$, `r cost_perspective`). Health results are identical to the discounted slide. \costcaveat}
+
 ## The model follows how prevention and treatment change disease and survival
 
 \begin{columns}[T]
@@ -756,6 +1539,9 @@ if (nrow(clin_disp)) {
     column_spec(1, bold=TRUE, width="4.6cm") |>
     column_spec(2, width="6.4cm") |> column_spec(3, width="3.0cm") |>
     row_spec(0, bold=TRUE))
+  reg_tbl("tbl-clin-interventions",
+          "Clinical care prevents disease and helps people survive it",
+          cd, c("Intervention", "Target population", "Model effect"))
 } else cat("\\begin{center}\\large No clinical interventions selected for this run.\\end{center}")
 ```
 
@@ -799,6 +1585,10 @@ if (nrow(ph_disp)) {
     column_spec(1, bold=TRUE, width="2.9cm") |> column_spec(2, width="2.3cm") |>
     column_spec(3, width="3.1cm") |> column_spec(4, width="5.7cm") |>
     row_spec(0, bold=TRUE))
+  reg_tbl("tbl-ph-interventions",
+          "Population policies cut tobacco, salt, and trans-fat risk across the whole population",
+          pd[, .(Policy, Risk, Acts, Lever)],
+          c("Policy", "Risk factor", "Model effect", "Implementation lever"))
 } else cat("\\begin{center}\\large No public-health policies selected for this run.\\end{center}")
 ```
 
@@ -825,6 +1615,8 @@ src <- data.table(
           "Healthy years lost or gained (DALYs)","New-case \\& survival effects","New-case \\& survival effects",
           "Budget impact \\& value for money",
           "Benchmarking Indonesia vs.\\ neighbours"))
+reg_tbl("tbl-sources", "Every input is traceable to a recognised data source",
+        src, c("Model component", "Primary source", "Years / version", "Use in model"))
 kbl(src, format="latex", booktabs=TRUE, escape=FALSE,
     col.names=c("Model component","Primary source","Years / version","Use in model"), align="llll") |>
   kable_styling(latex_options=c("hold_position"), font_size=6.6) |>
@@ -881,18 +1673,208 @@ if (nrow(ft$tb)) {
   k <- kbl(ft$tb, format="latex", booktabs=TRUE, escape=FALSE,
       col.names=mkhdr(c("Clinical intervention","Deaths averted\n(cumulative)","Prob. of CVD death\nbefore age 70, 2050",
                   "Reduction in that\nprobability, 2050","Deaths reduction\n2050","Cost per\ndeath averted",
-                  "Add'l cost/capita\nper yr, undisc.","Add'l cost/capita\nper yr, disc.")),
+                  "Avg. annual add'l\ncost/capita, 2026-50 (disc.)","Add'l cost/capita\nin 2050 (disc.)")),
       align="lrrrrrrr") |>
     kable_styling(latex_options=c("hold_position","scale_down"), font_size=8.5) |>
     column_spec(1, bold=TRUE) |> row_spec(0, bold=TRUE)
   if (!is.na(ft$agg_idx)) k <- k |> row_spec(ft$agg_idx, bold=TRUE, background="#EAF1FB")
   print(k)
+  reg_tbl("tbl-clin-ce",
+          "Scaling up clinical care sharply cuts premature cardiovascular deaths",
+          ft$tb,
+          c("Clinical intervention","Deaths averted\n(cumulative)","Prob. of CVD death\nbefore age 70, 2050",
+            "Reduction in that\nprobability, 2050","Deaths reduction\n2050","Cost per\ndeath averted",
+            "Avg. annual add'l\ncost/capita, 2026-50 (disc.)","Add'l cost/capita\nin 2050 (disc.)"))
   if (ft$n_omitted > 0)
     cat(sprintf("\n\n\\vspace{1pt}\\scriptsize %d additional clinical intervention(s) omitted for space; see the appendix crosswalk and the workbook.\n", ft$n_omitted))
 } else cat("\\begin{center}\\large No clinical interventions selected for this run.\\end{center}")
 ```
 
-\srcmethod{\textbf{Source:} results contract (\texttt{09\_deck\_results.rds}); Model 09 divides each year's additional cost by that year's Indonesia population from \texttt{model\_output\_Indonesia\_htncov2\_aspirational.rds} (workbooks carry the same as live \texttt{Budget\_Impact} / \texttt{Cost\_Effectiveness} formulae). \textbf{Method:} cost per death averted $=$ discounted additional cost $\div$ deaths averted (`r fmt_pct(disc_rate*100,0)`/yr, `r price_year` US\$, `r cost_perspective`); the two per-capita columns are the simple mean of the annual additional cost per capita (undiscounted / discounted) over `r (HZ_START+1L)`--`r HZ_END`. \costcaveat}
+\srcmethod{\textbf{Source:} clinical cost workbook (\texttt{indonesia\_model\_cost\_value\_formulae.xlsx}, sheet \texttt{Budget\_Impact}); population is the workbook's own \texttt{national\_population}. \textbf{Method:} cost per death averted $=$ discounted additional cost $\div$ deaths averted (`r fmt_pct(disc_rate*100,0)`/yr, `r price_year` US\$, `r cost_perspective`). \textbf{Avg. annual additional cost per capita, 2026--`r HZ_END`} $=$ cumulative discounted additional cost over 2026--`r HZ_END` $\div$ (25 $\times$ `r HZ_START+1L` population). \textbf{Additional cost per capita in `r HZ_END`} $=$ discounted additional cost in `r HZ_END` $\div$ `r HZ_END` population. \costcaveat}
+
+## Undiscounted costs are higher, yet clinical care still sharply cuts premature deaths
+
+```{r tbl-clin-ce-undisc, results='asis'}
+## Undiscounted counterpart of tbl-clin-ce: identical health columns; every monetary
+## column is undiscounted (ce_row_undisc). Costs from the clinical workbook's own
+## undiscounted incremental_cost / incremental_cost_per_capita.
+ftu <- family_table(met_clin, clin_all_id, ce_row_undisc)
+if (nrow(ftu$tb)) {
+  k <- kbl(ftu$tb, format="latex", booktabs=TRUE, escape=FALSE,
+      col.names=mkhdr(c("Clinical intervention","Deaths averted\n(cumulative)","Prob. of CVD death\nbefore age 70, 2050",
+                  "Reduction in that\nprobability, 2050","Deaths reduction\n2050","Cost per death\naverted (undisc.)",
+                  "Avg. annual add'l\ncost/capita, 2026-50 (undisc.)","Add'l cost/capita\nin 2050 (undisc.)")),
+      align="lrrrrrrr") |>
+    kable_styling(latex_options=c("hold_position","scale_down"), font_size=8.5) |>
+    column_spec(1, bold=TRUE) |> row_spec(0, bold=TRUE)
+  if (!is.na(ftu$agg_idx)) k <- k |> row_spec(ftu$agg_idx, bold=TRUE, background="#EAF1FB")
+  print(k)
+  reg_tbl("tbl-clin-ce-undisc",
+          "Undiscounted costs are higher, yet clinical care still sharply cuts premature deaths",
+          ftu$tb,
+          c("Clinical intervention","Deaths averted\n(cumulative)","Prob. of CVD death\nbefore age 70, 2050",
+            "Reduction in that\nprobability, 2050","Deaths reduction\n2050","Cost per death\naverted (undisc.)",
+            "Avg. annual add'l\ncost/capita, 2026-50 (undisc.)","Add'l cost/capita\nin 2050 (undisc.)"))
+  if (ftu$n_omitted > 0)
+    cat(sprintf("\n\n\\vspace{1pt}\\scriptsize %d additional clinical intervention(s) omitted for space; see the appendix crosswalk and the workbook.\n", ftu$n_omitted))
+} else cat("\\begin{center}\\large No clinical interventions selected for this run.\\end{center}")
+```
+
+\srcmethod{\textbf{Source:} clinical cost workbook (\texttt{indonesia\_model\_cost\_value\_formulae.xlsx}, sheet \texttt{Budget\_Impact}); population is the workbook's own \texttt{national\_population}. \textbf{Method (undiscounted):} cost per death averted $=$ \textbf{undiscounted} additional cost $\div$ deaths averted (`r price_year` US\$, `r cost_perspective`). \textbf{Avg. annual additional cost per capita, 2026--`r HZ_END`} $=$ cumulative \textbf{undiscounted} additional cost over 2026--`r HZ_END` $\div$ (25 $\times$ `r HZ_START+1L` population). \textbf{Additional cost per capita in `r HZ_END`} $=$ \textbf{undiscounted} additional cost in `r HZ_END` $\div$ `r HZ_END` population. Health results are identical to the discounted slide. \costcaveat}
+
+```{r clin-budget-data, include=FALSE}
+## ---------------------------------------------------------------------------
+## Clinical budget impact over time, decomposed by clinical intervention.
+## Source of truth: the CLINICAL cost workbook (Annual_Cost) - the all-clinical
+## scenario's discounted additional cost, keyed by (year, intervention_id), with
+## the workbook's shared-cost rule (count each shared component once). Population
+## is the workbook's own national_population. Two cumulative measures:
+##   left  = cumulative DISCOUNTED total additional cost through year t
+##   right = that cumulative total / national_population(t)  (per capita through t)
+## QA: intervention-level totals must reconcile, by year, to the all-clinical
+## Budget_Impact totals (annual and cumulative).
+## ---------------------------------------------------------------------------
+.cb_ac <- read_clin_ac()
+.cb_bi <- read_clin_bi()
+need_ac <- c("scenario","year","intervention_id","disc_cost_incremental","shared_duplicate_count")
+val_stop(all(need_ac %in% names(.cb_ac)), "clinical Annual_Cost missing a column needed for the budget figure")
+val_stop("all" %in% .cb_ac$scenario, "clinical Annual_Cost has no all-clinical scenario for the budget figure")
+.cb_ac[, w := 1 / pmax(shared_duplicate_count, 1)]     # shared components counted once
+clin_bud <- .cb_ac[scenario == "all",
+                   .(disc = sum(disc_cost_incremental * w)), by = .(intervention_id, year)]
+setorder(clin_bud, intervention_id, year)
+clin_bud[, cum := cumsum(disc), by = intervention_id]
+clin_pop <- .cb_bi[scenario == "all", .(year, pop = national_population)]
+clin_bud <- merge(clin_bud, clin_pop, by = "year")
+clin_bud[, cum_pc := cum / pop]                        # cumulative discounted cost per capita through t
+
+## QA reconciliation to the all-clinical Budget_Impact (annual + cumulative).
+.qa_ann <- merge(clin_bud[, .(s = sum(disc)), by = year],
+                 .cb_bi[scenario == "all", .(year, bi = disc_incremental_cost)], by = "year")
+val_stop(max(abs(.qa_ann$s - .qa_ann$bi)) < 1,
+         "clinical budget figure: intervention sums do not reconcile to all-clinical annual cost")
+.qa_cum <- merge(clin_bud[, .(s = sum(cum)), by = year],
+                 .cb_bi[scenario == "all", .(year, bic = cumulative_disc_incremental_cost)], by = "year")
+val_stop(max(abs(.qa_cum$s - .qa_cum$bic)) < 1,
+         "clinical budget figure: intervention sums do not reconcile to all-clinical cumulative cost")
+val_stop(setequal(clin_bud$year, HZ_START:HZ_END), "clinical budget figure: year coverage is not 2025-2050")
+
+## Plain-language labels + stacking order (largest cumulative contribution first).
+.ord <- clin_bud[year == HZ_END, .(cum), by = intervention_id][order(-cum)]
+.ord[, lab := vapply(intervention_id, function(s) lbl(s, met_clin), character(1))]
+lev <- .ord$lab
+clin_bud[, ivlab := vapply(intervention_id, function(s) lbl(s, met_clin), character(1))]
+clin_bud[, ivlab := factor(ivlab, levels = rev(lev))]  # largest at bottom of the stack
+## Accessible clinical palette (blue-anchored), one colour per intervention, shared across panels.
+clin_bud_pal <- setNames(
+  c("#08306B","#2171B5","#6BAED6","#B2182B","#EF8A62","#00897B","#66C2A5","#B39DDB")[seq_len(nrow(.ord))],
+  .ord$lab)
+## Long form: two panels.
+cb_long <- rbind(
+  clin_bud[, .(year, ivlab, value = cum / 1e9,
+               panel = "Cumulative discounted additional cost (US$ billions)")],
+  clin_bud[, .(year, ivlab, value = cum_pc,
+               panel = "Cumulative discounted additional cost per capita (US$)")])
+cb_long[, panel := factor(panel, levels = c("Cumulative discounted additional cost (US$ billions)",
+                                            "Cumulative discounted additional cost per capita (US$)"))]
+## Takeaway title (plain text; no % or $ so it survives \frametitle).
+clin_top_lab   <- .ord$lab[1]
+clin_top_share <- .ord$cum[1] / sum(.ord$cum) * 100
+title_clin_budget <- sprintf(
+  "%s drives most of Indonesia's clinical cardiovascular budget through %d",
+  clin_top_lab, HZ_END)
+```
+
+```{r clin-budget-data-undisc, include=FALSE}
+## ---------------------------------------------------------------------------
+## UNDISCOUNTED clinical budget impact over time -- an exact twin of clin-budget-data
+## using the workbook's UNDISCOUNTED annual_cost_incremental (shared components counted
+## once via the same w). Reuses the discounted figure's palette (clin_bud_pal) and
+## stacking order (lev) so the two figures are visually comparable; only the monetary
+## magnitudes differ. QA: intervention-level totals reconcile, by year, to the
+## all-clinical Budget_Impact UNDISCOUNTED annual + cumulative totals.
+## ---------------------------------------------------------------------------
+need_ac_u <- c("scenario","year","intervention_id","annual_cost_incremental")
+val_stop(all(need_ac_u %in% names(.cb_ac)), "clinical Annual_Cost missing a column needed for the undiscounted budget figure")
+clin_bud_u <- .cb_ac[scenario == "all",
+                     .(undisc = sum(annual_cost_incremental * w)), by = .(intervention_id, year)]
+setorder(clin_bud_u, intervention_id, year)
+clin_bud_u[, cum := cumsum(undisc), by = intervention_id]
+clin_bud_u <- merge(clin_bud_u, clin_pop, by = "year")     # clin_pop (national_population) from clin-budget-data
+clin_bud_u[, cum_pc := cum / pop]                          # cumulative undiscounted cost per capita through t
+## QA reconciliation to the all-clinical Budget_Impact UNDISCOUNTED annual + cumulative.
+.qa_ann_u <- merge(clin_bud_u[, .(s = sum(undisc)), by = year],
+                   .cb_bi[scenario == "all", .(year, bi = incremental_cost)], by = "year")
+val_stop(max(abs(.qa_ann_u$s - .qa_ann_u$bi)) < 1,
+         "undiscounted clinical budget figure: intervention sums do not reconcile to all-clinical annual cost")
+.qa_cum_u <- merge(clin_bud_u[, .(s = sum(cum)), by = year],
+                   .cb_bi[scenario == "all", .(year, bic = cumulative_incremental_cost)], by = "year")
+val_stop(max(abs(.qa_cum_u$s - .qa_cum_u$bic)) < 1,
+         "undiscounted clinical budget figure: intervention sums do not reconcile to all-clinical cumulative cost")
+val_stop(setequal(clin_bud_u$year, HZ_START:HZ_END), "undiscounted clinical budget figure: year coverage is not 2025-2050")
+clin_bud_u[, ivlab := vapply(intervention_id, function(s) lbl(s, met_clin), character(1))]
+clin_bud_u[, ivlab := factor(ivlab, levels = rev(lev))]    # same stacking order + palette as the discounted figure
+cb_long_u <- rbind(
+  clin_bud_u[, .(year, ivlab, value = cum / 1e9,
+                 panel = "Cumulative additional cost (US$ billions)")],
+  clin_bud_u[, .(year, ivlab, value = cum_pc,
+                 panel = "Cumulative additional cost per capita (US$)")])
+cb_long_u[, panel := factor(panel, levels = c("Cumulative additional cost (US$ billions)",
+                                              "Cumulative additional cost per capita (US$)"))]
+.ord_u <- clin_bud_u[year == HZ_END, .(cum), by = intervention_id][order(-cum)]
+.ord_u[, lab := vapply(intervention_id, function(s) lbl(s, met_clin), character(1))]
+title_clin_budget_undisc <- sprintf(
+  "%s still drives most of the undiscounted clinical cardiovascular budget through %d",
+  .ord_u$lab[1], HZ_END)
+```
+
+## `r title_clin_budget`
+
+```{r fig-clin-budget, fig.width=9.6, fig.height=3.2, out.width="\\linewidth"}
+reg_fig(
+ggplot(cb_long, aes(year, value, fill = ivlab)) +
+  geom_area(colour = "white", linewidth = 0.15) +
+  facet_wrap(~panel, scales = "free_y") +
+  scale_fill_manual(values = clin_bud_pal, breaks = lev, drop = FALSE) +
+  scale_x_continuous(limits = c(HZ_START, HZ_END), breaks = seq(HZ_START, HZ_END, 5),
+                     expand = expansion(mult = c(0.01, 0.01))) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.03))) +
+  guides(fill = guide_legend(nrow = 2, byrow = TRUE)) +
+  labs(title = NULL, x = "Year", y = NULL) +
+  theme_exec(11) +
+  theme(legend.position = "bottom", legend.text = element_text(size = 7.4),
+        legend.key.size = unit(0.32, "cm"),
+        strip.text = element_text(face = "bold", colour = col_wbnavy, size = 9.5),
+        panel.grid.major.x = element_line(colour = "grey92", linewidth = 0.25)),
+"fig-clin-budget", title_clin_budget, 9.6, 3.2)
+```
+
+\srcmethod{\textbf{Source:} clinical cost workbook (\texttt{indonesia\_model\_cost\_value\_formulae.xlsx}, sheet \texttt{Annual\_Cost}); all-clinical scenario, discounted additional cost by intervention (shared components counted once); population is the workbook's own \texttt{national\_population}. \textbf{Method:} `r HZ_START` is the discount base year and coverage scales up over `r HZ_START`--`r HZ_END`; left is cumulative discounted additional cost through each year, right is that total $\div$ that year's population; intervention totals reconcile to the all-clinical totals by year. \costcaveat}
+
+## `r title_clin_budget_undisc`
+
+```{r fig-clin-budget-undisc, fig.width=9.6, fig.height=3.2, out.width="\\linewidth"}
+## Undiscounted counterpart of fig-clin-budget: same interventions, colours, stacking
+## order and layout; both panels show UNDISCOUNTED cumulative additional cost.
+reg_fig(
+ggplot(cb_long_u, aes(year, value, fill = ivlab)) +
+  geom_area(colour = "white", linewidth = 0.15) +
+  facet_wrap(~panel, scales = "free_y") +
+  scale_fill_manual(values = clin_bud_pal, breaks = lev, drop = FALSE) +
+  scale_x_continuous(limits = c(HZ_START, HZ_END), breaks = seq(HZ_START, HZ_END, 5),
+                     expand = expansion(mult = c(0.01, 0.01))) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.03))) +
+  guides(fill = guide_legend(nrow = 2, byrow = TRUE)) +
+  labs(title = NULL, x = "Year", y = NULL) +
+  theme_exec(11) +
+  theme(legend.position = "bottom", legend.text = element_text(size = 7.4),
+        legend.key.size = unit(0.32, "cm"),
+        strip.text = element_text(face = "bold", colour = col_wbnavy, size = 9.5),
+        panel.grid.major.x = element_line(colour = "grey92", linewidth = 0.25)),
+"fig-clin-budget-undisc", title_clin_budget_undisc, 9.6, 3.2)
+```
+
+\srcmethod{\textbf{Source:} clinical cost workbook (\texttt{indonesia\_model\_cost\_value\_formulae.xlsx}, sheet \texttt{Annual\_Cost}); all-clinical scenario, \textbf{undiscounted} additional cost by intervention (shared components counted once); population is the workbook's own \texttt{national\_population}. \textbf{Method (undiscounted):} coverage scales up over `r HZ_START`--`r HZ_END`; left is cumulative \textbf{undiscounted} additional cost through each year, right is that total $\div$ that year's population (`r price_year` US\$); intervention totals reconcile to the all-clinical undiscounted totals by year. \costcaveat}
 
 ## Population policies avert deaths at very low cost
 
@@ -902,18 +1884,54 @@ if (nrow(ft$tb)) {
   k <- kbl(ft$tb, format="latex", booktabs=TRUE, escape=FALSE,
       col.names=mkhdr(c("Public-health policy","Deaths averted\n(cumulative)","Prob. of CVD death\nbefore age 70, 2050",
                   "Reduction in that\nprobability, 2050","Deaths reduction\n2050","Cost per\ndeath averted",
-                  "Add'l cost/capita\nper yr, undisc.","Add'l cost/capita\nper yr, disc.")),
+                  "Avg. annual add'l\ncost/capita, 2026-50 (disc.)","Add'l cost/capita\nin 2050 (disc.)")),
       align="lrrrrrrr") |>
     kable_styling(latex_options=c("hold_position","scale_down"), font_size=8.5) |>
     column_spec(1, bold=TRUE) |> row_spec(0, bold=TRUE)
   if (!is.na(ft$agg_idx)) k <- k |> row_spec(ft$agg_idx, bold=TRUE, background="#E7F4F1")
   print(k)
+  reg_tbl("tbl-ph-ce",
+          "Population policies avert deaths at very low cost",
+          ft$tb,
+          c("Public-health policy","Deaths averted\n(cumulative)","Prob. of CVD death\nbefore age 70, 2050",
+            "Reduction in that\nprobability, 2050","Deaths reduction\n2050","Cost per\ndeath averted",
+            "Avg. annual add'l\ncost/capita, 2026-50 (disc.)","Add'l cost/capita\nin 2050 (disc.)"))
   if (ft$n_omitted > 0)
     cat(sprintf("\n\n\\vspace{1pt}\\scriptsize %d additional public-health intervention(s) omitted for space; see the appendix crosswalk and the workbook.\n", ft$n_omitted))
 } else cat("\\begin{center}\\large No public-health policies selected for this run.\\end{center}")
 ```
 
-\srcmethod{\textbf{Source:} results contract (\texttt{09\_deck\_results.rds}); Model 09 divides each year's additional cost by that year's Indonesia population from \texttt{model\_output\_Indonesia\_htncov2\_aspirational.rds} (workbooks carry the same as live \texttt{Budget\_Impact} / \texttt{Cost\_Effectiveness} formulae). \textbf{Method:} cumulative deaths averted `r HZ_START`--`r HZ_END` vs baseline; tobacco and sodium packages each modelled as one joint run; the two per-capita columns are the simple mean of the annual additional cost per capita (undiscounted / discounted) over `r (HZ_START+1L)`--`r HZ_END`. \costcaveat}
+\srcmethod{\textbf{Source:} public-health cost workbook (\texttt{indonesia\_cost\_value\_public\_health\_formulae.xlsx}); annual additional cost reproduced from its \texttt{Annual\_Cost} inputs and reconciled to the run total; population is the workbook's own \texttt{national\_population}. \textbf{Method:} cumulative deaths averted `r HZ_START`--`r HZ_END` vs baseline; tobacco and sodium packages each modelled as one joint run. \textbf{Avg. annual additional cost per capita, 2026--`r HZ_END`} $=$ cumulative discounted additional cost over 2026--`r HZ_END` $\div$ (25 $\times$ `r HZ_START+1L` population); \textbf{cost per capita in `r HZ_END`} $=$ discounted additional cost in `r HZ_END` $\div$ `r HZ_END` population. \costcaveat}
+
+## Even undiscounted, population policies avert deaths at very low cost
+
+```{r tbl-ph-ce-undisc, results='asis'}
+## Undiscounted counterpart of tbl-ph-ce: identical health columns; every monetary
+## column undiscounted (annual undiscounted cost reproduced from the PH workbook's own
+## Annual_Cost inputs and reconciled to the run's undiscounted total).
+ftu <- family_table(met_ph, ph_all_id, ce_row_undisc)
+if (nrow(ftu$tb)) {
+  k <- kbl(ftu$tb, format="latex", booktabs=TRUE, escape=FALSE,
+      col.names=mkhdr(c("Public-health policy","Deaths averted\n(cumulative)","Prob. of CVD death\nbefore age 70, 2050",
+                  "Reduction in that\nprobability, 2050","Deaths reduction\n2050","Cost per death\naverted (undisc.)",
+                  "Avg. annual add'l\ncost/capita, 2026-50 (undisc.)","Add'l cost/capita\nin 2050 (undisc.)")),
+      align="lrrrrrrr") |>
+    kable_styling(latex_options=c("hold_position","scale_down"), font_size=8.5) |>
+    column_spec(1, bold=TRUE) |> row_spec(0, bold=TRUE)
+  if (!is.na(ftu$agg_idx)) k <- k |> row_spec(ftu$agg_idx, bold=TRUE, background="#E7F4F1")
+  print(k)
+  reg_tbl("tbl-ph-ce-undisc",
+          "Even undiscounted, population policies avert deaths at very low cost",
+          ftu$tb,
+          c("Public-health policy","Deaths averted\n(cumulative)","Prob. of CVD death\nbefore age 70, 2050",
+            "Reduction in that\nprobability, 2050","Deaths reduction\n2050","Cost per death\naverted (undisc.)",
+            "Avg. annual add'l\ncost/capita, 2026-50 (undisc.)","Add'l cost/capita\nin 2050 (undisc.)"))
+  if (ftu$n_omitted > 0)
+    cat(sprintf("\n\n\\vspace{1pt}\\scriptsize %d additional public-health intervention(s) omitted for space; see the appendix crosswalk and the workbook.\n", ftu$n_omitted))
+} else cat("\\begin{center}\\large No public-health policies selected for this run.\\end{center}")
+```
+
+\srcmethod{\textbf{Source:} public-health cost workbook (\texttt{indonesia\_cost\_value\_public\_health\_formulae.xlsx}); annual additional cost reproduced from its \texttt{Annual\_Cost} inputs and reconciled to the run's \textbf{undiscounted} total; population is the workbook's own \texttt{national\_population}. \textbf{Method (undiscounted):} cumulative deaths averted `r HZ_START`--`r HZ_END` vs baseline; tobacco and sodium packages each modelled as one joint run. \textbf{Avg. annual additional cost per capita, 2026--`r HZ_END`} $=$ cumulative \textbf{undiscounted} additional cost over 2026--`r HZ_END` $\div$ (25 $\times$ `r HZ_START+1L` population); \textbf{cost per capita in `r HZ_END`} $=$ \textbf{undiscounted} additional cost in `r HZ_END` $\div$ `r HZ_END` population (`r price_year` US\$). Health results are identical to the discounted slide. \costcaveat}
 
 
 # Clinical and population action, combined
@@ -930,17 +1948,22 @@ if (length(pk)) {
     q50  = fmt_pct(hv(s, "cvd_40q30_2050"), 1),
     cost = fmt_usd_short(hv(s, "disc_incremental_cost")),
     cpd  = fmt_usd(hv(s, "cost_per_death_averted")),
-    pcu  = pc_undisc(met_comb, s),
-    pcd  = pc_disc(met_comb, s))))
+    pc1c = pc1(met_comb, s),
+    pc2c = pc2(met_comb, s))))
   k <- kbl(tb, format="latex", booktabs=TRUE, escape=FALSE,
       col.names=mkhdr(c("Package","Deaths averted\n(cumulative)","Reduction in prob.\nof CVD death <70, 2050","Prob. of CVD death\nbefore age 70, 2050",
-                  "Discounted total\ncost","Cost per\ndeath averted","Add'l cost/capita\nper yr, undisc.","Add'l cost/capita\nper yr, disc.")),
+                  "Discounted total\ncost","Cost per\ndeath averted","Avg. annual add'l\ncost/capita, 2026-50 (disc.)","Add'l cost/capita\nin 2050 (disc.)")),
       align="lrrrrrrr") |>
     kable_styling(latex_options=c("hold_position","scale_down"), font_size=9) |>
     column_spec(1, bold=TRUE) |> row_spec(0, bold=TRUE)
   jidx <- which(pk == joint_id)
   if (length(jidx)) k <- k |> row_spec(jidx, bold=TRUE, background="#FCEFCB")
   print(k)
+  reg_tbl("tbl-combined",
+          "Clinical care and prevention achieve more together than alone",
+          tb,
+          c("Package","Deaths averted\n(cumulative)","Reduction in prob.\nof CVD death <70, 2050","Prob. of CVD death\nbefore age 70, 2050",
+            "Discounted total\ncost","Cost per\ndeath averted","Avg. annual add'l\ncost/capita, 2026-50 (disc.)","Add'l cost/capita\nin 2050 (disc.)"))
 } else cat("\\begin{center}\\large No package scenarios available for this run.\\end{center}")
 ```
 
@@ -958,7 +1981,57 @@ if (has_joint) {
 }
 ```
 
-\srcmethod{\textbf{Source:} results contract (\texttt{09\_deck\_results.rds}); Model 09 divides each year's additional cost by that year's Indonesia population from \texttt{model\_output\_Indonesia\_htncov2\_aspirational.rds} (workbooks carry the same as live \texttt{Budget\_Impact} / \texttt{Cost\_Effectiveness} formulae). \textbf{Method:} joint package $=$ one projection applying both families (not their sum); the two per-capita columns are the simple mean of the annual additional cost per capita (undiscounted / discounted, `r fmt_pct(disc_rate*100,0)`/yr, `r price_year` US\$) over `r (HZ_START+1L)`--`r HZ_END`. \costcaveat}
+\srcmethod{\textbf{Source:} combined cost workbook (\texttt{indonesia\_model\_cost\_value\_clinical\_public\_health\_formulae.xlsx}); annual additional cost reproduced from its \texttt{Annual\_Cost} inputs and reconciled to the run total; population is the workbook's own \texttt{national\_population}. \textbf{Method:} joint package $=$ one projection applying both families (not their sum). \textbf{Avg. annual additional cost per capita, 2026--`r HZ_END`} $=$ cumulative discounted additional cost over 2026--`r HZ_END` $\div$ (25 $\times$ `r HZ_START+1L` population); \textbf{cost per capita in `r HZ_END`} $=$ discounted additional cost in `r HZ_END` $\div$ `r HZ_END` population (`r fmt_pct(disc_rate*100,0)`/yr, `r price_year` US\$). \costcaveat}
+
+## Undiscounted, clinical care and prevention still achieve more together
+
+```{r tbl-combined-undisc, results='asis'}
+## Undiscounted counterpart of tbl-combined: identical health columns; total cost, cost
+## per death averted, and both per-capita measures are undiscounted (reproduced from the
+## combined workbook's own Annual_Cost inputs and reconciled to the run's undiscounted total).
+pku <- intersect(c(clin_all_id, ph_all_id, joint_id), met_comb$scenario)
+if (length(pku)) {
+  tbu <- rbindlist(lapply(pku, function(s) data.table(
+    Package = lbl(s),
+    da   = fmt_thou(hv(s, "deaths_averted")),
+    qr   = fmt_pct(hv(s, "cvd_40q30_pct_reduction_2050"), 1),
+    q50  = fmt_pct(hv(s, "cvd_40q30_2050"), 1),
+    cost = fmt_usd_short(hv(s, "incremental_cost")),
+    cpd  = fmt_usd(cpda_undisc(s, met_comb)),
+    pc1c = pc1u(met_comb, s),
+    pc2c = pc2u(met_comb, s))))
+  k <- kbl(tbu, format="latex", booktabs=TRUE, escape=FALSE,
+      col.names=mkhdr(c("Package","Deaths averted\n(cumulative)","Reduction in prob.\nof CVD death <70, 2050","Prob. of CVD death\nbefore age 70, 2050",
+                  "Undiscounted total\ncost","Cost per death\naverted (undisc.)","Avg. annual add'l\ncost/capita, 2026-50 (undisc.)","Add'l cost/capita\nin 2050 (undisc.)")),
+      align="lrrrrrrr") |>
+    kable_styling(latex_options=c("hold_position","scale_down"), font_size=9) |>
+    column_spec(1, bold=TRUE) |> row_spec(0, bold=TRUE)
+  jidxu <- which(pku == joint_id)
+  if (length(jidxu)) k <- k |> row_spec(jidxu, bold=TRUE, background="#FCEFCB")
+  print(k)
+  reg_tbl("tbl-combined-undisc",
+          "Undiscounted, clinical care and prevention still achieve more together",
+          tbu,
+          c("Package","Deaths averted\n(cumulative)","Reduction in prob.\nof CVD death <70, 2050","Prob. of CVD death\nbefore age 70, 2050",
+            "Undiscounted total\ncost","Cost per death\naverted (undisc.)","Avg. annual add'l\ncost/capita, 2026-50 (undisc.)","Add'l cost/capita\nin 2050 (undisc.)"))
+} else cat("\\begin{center}\\large No package scenarios available for this run.\\end{center}")
+```
+
+```{r combined-block-undisc, results='asis'}
+if (has_joint) {
+  cat(sprintf(paste0(
+    "\\begin{combinedblock}{The combined package is one run --- valued undiscounted}\n",
+    "\\footnotesize Because the two families' effects overlap, the joint scenario is projected in a single run: about \\textbf{%s deaths} averted and the %d probability of CVD death before age 70 cut to \\textbf{%s} (from %s), at about \\textbf{%s per death averted (undiscounted)}.\n",
+    "\\end{combinedblock}\n"),
+    fmt_short(combo_da), HZ_END, fmt_pct(combo_q50,1), fmt_pct(base_q_2050,1), fmt_usd(combo_cpda_undisc)))
+} else {
+  cat(paste0("\\begin{block}{Single-family run}\n\\footnotesize The joint clinical + ",
+             "public-health scenario was not built in this configuration; family results are ",
+             "shown above.\n\\end{block}\n"))
+}
+```
+
+\srcmethod{\textbf{Source:} combined cost workbook (\texttt{indonesia\_model\_cost\_value\_clinical\_public\_health\_formulae.xlsx}); annual additional cost reproduced from its \texttt{Annual\_Cost} inputs and reconciled to the run's \textbf{undiscounted} total; population is the workbook's own \texttt{national\_population}. \textbf{Method (undiscounted):} joint package $=$ one projection applying both families (not their sum). \textbf{Avg. annual additional cost per capita, 2026--`r HZ_END`} $=$ cumulative \textbf{undiscounted} additional cost over 2026--`r HZ_END` $\div$ (25 $\times$ `r HZ_START+1L` population); \textbf{cost per capita in `r HZ_END`} $=$ \textbf{undiscounted} additional cost in `r HZ_END` $\div$ `r HZ_END` population (`r price_year` US\$). Health results are identical to the discounted slide. \costcaveat}
 
 ## Indonesia's premature cardiovascular mortality can fall toward its neighbours
 
@@ -969,7 +2042,7 @@ lab_scen <- idn_scen_plot[year == HZ_END]
 
 lab_cmp <- cmp_lines[, .SD[which.max(year)], by = country_label]
 
-ggplot() +
+p_fig_40q30 <- ggplot() +
   geom_line(
     data = cmp_lines,
     aes(year, q, group = country_label),
@@ -1046,6 +2119,9 @@ ggplot() +
       linewidth = 0.25
     )
   )
+reg_fig(p_fig_40q30, "fig-40q30",
+        "Indonesia's premature cardiovascular mortality can fall toward its neighbours",
+        9.6, 4.2)
 ```
 
 \srcmethod{\textbf{Source:} combined results workbook (annual probability-of-death sheet, R-reconciled values); ASEAN comparator series in \texttt{data/raw/}. \textbf{Method:} model scenarios (dashed) run `r HZ_START`--`r HZ_END` for the six modelled cardiovascular causes over exact ages 30--70; comparators are WPP-scaled reference series shown for context only.}
@@ -1100,6 +2176,7 @@ htn_long[, xlab := factor(year, levels = c(HZ_START, casc_ytar1, casc_ytar2),
                                      paste0(casc_ytar1, "\n(70-30-30)"),
                                      paste0(casc_ytar2, "\n(70-70-70)")))]
 casc_blues <- c(Diagnosed = "#9ECAE1", Treated = "#4292C6", Controlled = "#08519C")
+reg_fig(
 ggplot(htn_long, aes(xlab, share, fill = stage)) +
   geom_col(position = position_dodge2(width = 0.8, preserve = "single"), width = 0.8) +
   geom_text(aes(label = paste0(formatC(share * 100, format = "f", digits = 1), "%")),
@@ -1112,7 +2189,8 @@ ggplot(htn_long, aes(xlab, share, fill = stage)) +
        subtitle = "Diagnosed, treated, and controlled shares of all people with hypertension (intervention scenario)",
        x = NULL, y = "% of people with hypertension") +
   theme_exec(11) +
-  theme(legend.position = "top", panel.grid.major.x = element_blank())
+  theme(legend.position = "top", panel.grid.major.x = element_blank()),
+"fig-htn-cascade", "Indonesia's hypertension cascade can progress in two achievable stages", 9.4, 3.7)
 ```
 
 \srcmethod{\textbf{Source:} cascade \texttt{Cascade\_Trajectory} (sex-averaged) and \texttt{Cascade\_Assumptions}; scale-up begins `r HZ_START+1L`. \textbf{Method:} baseline (`r HZ_START`) shows only measured treated/controlled --- diagnosis is not modelled at baseline, so no diagnosed bar. Type-2 diabetes follows the same targets (baseline treated $\approx$ `r fmt_pct(dm_base$treated*100,1)`, controlled $\approx$ `r fmt_pct(dm_base$controlled*100,1)`).}
@@ -1133,22 +2211,64 @@ two[, panel := factor(panel, levels = c("Probability of death from CVD before ag
                                          "Cumulative discounted health-system cost (US$ billions)"))]
 casc_pal <- c("Baseline (current course)" = col_baseline, "Intervention" = "#D55E00")
 ends <- two[, .SD[year == max(year)], by = .(series, panel)]
+## Readable endpoint labels: short text, visible leader segments, and ample right-side
+## room so labels never sit on the lines or clip. Deterministic (fixed seed + offsets).
+ends[, lab := ifelse(series == "Intervention", "Intervention", "Baseline")]
+reg_fig(
 ggplot(two, aes(year, value, colour = series)) +
   geom_line(linewidth = 1.15) +
-  ggrepel::geom_text_repel(data = ends, aes(label = series), size = 2.7, fontface = "bold",
-                           hjust = 0, nudge_x = 1.0, direction = "y", segment.colour = NA,
+  ggrepel::geom_text_repel(data = ends, aes(label = lab), size = 2.7, fontface = "bold",
+                           hjust = 0, nudge_x = 1.6, direction = "y",
+                           segment.colour = "grey55", segment.size = 0.3,
+                           min.segment.length = 0, box.padding = 0.5, point.padding = 0.3,
                            max.overlaps = Inf, seed = 3, show.legend = FALSE) +
   facet_wrap(~panel, scales = "free_y") +
   scale_colour_manual(values = casc_pal) +
-  scale_x_continuous(limits = c(HZ_START, casc_y1 + 6), breaks = seq(HZ_START, casc_y1, 5)) +
+  scale_x_continuous(limits = c(HZ_START, casc_y1 + 11), breaks = seq(HZ_START, casc_y1, 5)) +
   labs(title = NULL, x = "Year", y = NULL) +
   theme_exec(11) +
   theme(legend.position = "none",
         strip.text = element_text(face = "bold", colour = col_wbnavy, size = 10),
-        panel.grid.major.x = element_line(colour = "grey92", linewidth = 0.25))
+        panel.grid.major.x = element_line(colour = "grey92", linewidth = 0.25)),
+"fig-casc-2panel", "Stronger prevention lowers premature deaths at a rising but bounded cost", 9.6, 3.7)
 ```
 
 \srcmethod{\textbf{Source:} cascade workbook --- annual probability-of-death sheet (R-reconciled) and \texttt{Annual\_Cost}, cumulatively summed and reconciled to \texttt{Budget\_Impact}. \textbf{Method:} probability over the six CVD causes, ages 30--70; cumulative discounted health-system cost (`r fmt_pct(casc_disc*100,0)`/yr to `r HZ_START`, `r casc_price` US\$) of the CVD primary-care and type-2 diabetes cascades. \costcaveat}
+
+## Undiscounted, stronger prevention still lowers premature deaths at a rising cost
+
+```{r fig-casc-2panel-undisc, fig.width=9.6, fig.height=3.7, out.width="\\linewidth"}
+## Undiscounted counterpart of fig-casc-2panel: the health panel is unchanged; the cost
+## panel shows cumulative UNDISCOUNTED baseline vs intervention health-system cost.
+cdat_u <- rbind(
+  casc_cost_u[, .(year, series = "Baseline (current course)", value = cum_base / 1e9)],
+  casc_cost_u[, .(year, series = "Intervention",              value = cum_scen / 1e9)])
+cdat_u[, panel := "Cumulative health-system cost (US$ billions, undiscounted)"]
+two_u <- rbind(qdat[, .(year, series, value, panel)], cdat_u)
+two_u[, panel := factor(panel, levels = c("Probability of death from CVD before age 70 (%)",
+                                          "Cumulative health-system cost (US$ billions, undiscounted)"))]
+ends_u <- two_u[, .SD[year == max(year)], by = .(series, panel)]
+ends_u[, lab := ifelse(series == "Intervention", "Intervention", "Baseline")]
+reg_fig(
+ggplot(two_u, aes(year, value, colour = series)) +
+  geom_line(linewidth = 1.15) +
+  ggrepel::geom_text_repel(data = ends_u, aes(label = lab), size = 2.7, fontface = "bold",
+                           hjust = 0, nudge_x = 1.6, direction = "y",
+                           segment.colour = "grey55", segment.size = 0.3,
+                           min.segment.length = 0, box.padding = 0.5, point.padding = 0.3,
+                           max.overlaps = Inf, seed = 3, show.legend = FALSE) +
+  facet_wrap(~panel, scales = "free_y") +
+  scale_colour_manual(values = casc_pal) +
+  scale_x_continuous(limits = c(HZ_START, casc_y1 + 11), breaks = seq(HZ_START, casc_y1, 5)) +
+  labs(title = NULL, x = "Year", y = NULL) +
+  theme_exec(11) +
+  theme(legend.position = "none",
+        strip.text = element_text(face = "bold", colour = col_wbnavy, size = 10),
+        panel.grid.major.x = element_line(colour = "grey92", linewidth = 0.25)),
+"fig-casc-2panel-undisc", "Undiscounted, stronger prevention still lowers premature deaths at a rising cost", 9.6, 3.7)
+```
+
+\srcmethod{\textbf{Source:} cascade workbook --- annual probability-of-death sheet (R-reconciled) and \texttt{Annual\_Cost}, cumulatively summed and reconciled to \texttt{Budget\_Impact} \textbf{undiscounted} cumulative additional cost. \textbf{Method:} probability over the six CVD causes, ages 30--70 (identical to the discounted slide); cumulative \textbf{undiscounted} health-system cost (`r casc_price` US\$) of the CVD primary-care and type-2 diabetes cascades. \costcaveat}
 
 ## `r title_cascade_results`
 
@@ -1156,25 +2276,353 @@ ggplot(two, aes(year, value, colour = series)) +
 snp <- lapply(casc_tab_years, casc_snapshot); names(snp) <- as.character(casc_tab_years)
 mm  <- function(x) formatC(x / 1e6, format = "f", digits = 3, big.mark = ",")   # deaths, millions
 bn  <- function(x) formatC(x / 1e9, format = "f", digits = 2)                    # cost, US$ billions
+pcf <- function(x) paste0("US\\$", formatC(x, format = "f", digits = 2, big.mark = ",")) # US$/person
 casc_tb <- data.table(
   Metric = c("\\quad Baseline (current course)", "\\quad Intervention",
              "\\quad Baseline (current course)", "\\quad Intervention",
-             "Additional cost (US\\$ billion, discounted)", "Deaths prevented (million)"),
-  y1 = c(mm(snp[[1]]$d_base), mm(snp[[1]]$d_scen), bn(snp[[1]]$c_base), bn(snp[[1]]$c_scen), bn(snp[[1]]$c_add), mm(snp[[1]]$d_av)),
-  y2 = c(mm(snp[[2]]$d_base), mm(snp[[2]]$d_scen), bn(snp[[2]]$c_base), bn(snp[[2]]$c_scen), bn(snp[[2]]$c_add), mm(snp[[2]]$d_av)),
-  y3 = c(mm(snp[[3]]$d_base), mm(snp[[3]]$d_scen), bn(snp[[3]]$c_base), bn(snp[[3]]$c_scen), bn(snp[[3]]$c_add), mm(snp[[3]]$d_av)))
+             "Additional cost (US\\$ billion, discounted)", "Deaths prevented (million)",
+             "Additional cost per capita in that year (US\\$, discounted)"),
+  y1 = c(mm(snp[[1]]$d_base), mm(snp[[1]]$d_scen), bn(snp[[1]]$c_base), bn(snp[[1]]$c_scen), bn(snp[[1]]$c_add), mm(snp[[1]]$d_av), pcf(snp[[1]]$pc_ann)),
+  y2 = c(mm(snp[[2]]$d_base), mm(snp[[2]]$d_scen), bn(snp[[2]]$c_base), bn(snp[[2]]$c_scen), bn(snp[[2]]$c_add), mm(snp[[2]]$d_av), pcf(snp[[2]]$pc_ann)),
+  y3 = c(mm(snp[[3]]$d_base), mm(snp[[3]]$d_scen), bn(snp[[3]]$c_base), bn(snp[[3]]$c_scen), bn(snp[[3]]$c_add), mm(snp[[3]]$d_av), pcf(snp[[3]]$pc_ann)))
+reg_tbl("tbl-cascade", title_cascade_results, casc_tb,
+        c("Cumulative from 2025 through year (unless noted)", as.character(casc_tab_years)))
 kbl(casc_tb, format = "latex", booktabs = TRUE, escape = FALSE,
-    col.names = c("Cumulative from 2025 through year", as.character(casc_tab_years)),
+    col.names = c("Cumulative from 2025 through year (unless noted)", as.character(casc_tab_years)),
     align = "lrrr") |>
-  kable_styling(latex_options = c("hold_position"), font_size = 8.5) |>
+  kable_styling(latex_options = c("hold_position"), font_size = 8) |>
   column_spec(1, width = "6.6cm") |> column_spec(2:4, width = "2.2cm") |>
   row_spec(0, bold = TRUE) |>
-  pack_rows("Projected deaths --- CVD (six causes) + type-2 diabetes (million)", 1, 2, bold = TRUE, latex_gap_space = "0.25em", escape = FALSE) |>
-  pack_rows("Projected health-system cost (US\\$ billion, discounted)", 3, 4, bold = TRUE, latex_gap_space = "0.25em", escape = FALSE) |>
-  pack_rows("Net effect of the strategy", 5, 6, bold = TRUE, latex_gap_space = "0.25em")
+  pack_rows("Projected deaths --- CVD (six causes) + type-2 diabetes (million)", 1, 2, bold = TRUE, latex_gap_space = "0.2em", escape = FALSE) |>
+  pack_rows("Projected health-system cost (US\\$ billion, discounted)", 3, 4, bold = TRUE, latex_gap_space = "0.2em", escape = FALSE) |>
+  pack_rows("Net effect of the strategy", 5, 6, bold = TRUE, latex_gap_space = "0.2em") |>
+  pack_rows("Annual financing intensity (that year only, not cumulative)", 7, 7, bold = TRUE, latex_gap_space = "0.2em", escape = FALSE)
 ```
 
-\srcmethod{\textbf{Source:} cascade \texttt{Annual\_Mortality} and \texttt{Annual\_Cost}/\texttt{Budget\_Impact}; scale-up begins `r HZ_START+1L`. \textbf{Method:} each column cumulative from `r HZ_START` through that year; deaths prevented $=$ baseline $-$ intervention (six CVD causes $+$ type-2 diabetes); additional cost $=$ intervention $-$ baseline (discounted `r fmt_pct(casc_disc*100,0)` to `r HZ_START`, `r casc_price` US\$). \costcaveat}
+\srcmethod{\textbf{Source:} cascade \texttt{Annual\_Mortality}, \texttt{Annual\_Cost}/\texttt{Budget\_Impact}. \textbf{Method:} deaths/cost columns cumulative from `r HZ_START` through that year (six CVD causes $+$ type-2 diabetes; discounted `r fmt_pct(casc_disc*100,0)` to `r HZ_START`, `r casc_price` US\$); the per-capita row is that year only, not cumulative. \costcaveat}
+
+## `r title_cascade_results_undisc`
+
+```{r tbl-cascade-undisc, results='asis'}
+## Undiscounted counterpart of tbl-cascade: deaths rows are unchanged (deaths are never
+## discounted); baseline cost, intervention cost, additional cost, and the annual
+## additional cost per capita are all UNDISCOUNTED (from casc_snapshot_undisc).
+snpu <- lapply(casc_tab_years, casc_snapshot_undisc); names(snpu) <- as.character(casc_tab_years)
+mm  <- function(x) formatC(x / 1e6, format = "f", digits = 3, big.mark = ",")   # deaths, millions
+bn  <- function(x) formatC(x / 1e9, format = "f", digits = 2)                    # cost, US$ billions
+pcf <- function(x) paste0("US\\$", formatC(x, format = "f", digits = 2, big.mark = ",")) # US$/person
+casc_tb_u <- data.table(
+  Metric = c("\\quad Baseline (current course)", "\\quad Intervention",
+             "\\quad Baseline (current course)", "\\quad Intervention",
+             "Additional cost (US\\$ billion, undiscounted)", "Deaths prevented (million)",
+             "Additional cost per capita in that year (US\\$, undiscounted)"),
+  y1 = c(mm(snpu[[1]]$d_base), mm(snpu[[1]]$d_scen), bn(snpu[[1]]$c_base), bn(snpu[[1]]$c_scen), bn(snpu[[1]]$c_add), mm(snpu[[1]]$d_av), pcf(snpu[[1]]$pc_ann)),
+  y2 = c(mm(snpu[[2]]$d_base), mm(snpu[[2]]$d_scen), bn(snpu[[2]]$c_base), bn(snpu[[2]]$c_scen), bn(snpu[[2]]$c_add), mm(snpu[[2]]$d_av), pcf(snpu[[2]]$pc_ann)),
+  y3 = c(mm(snpu[[3]]$d_base), mm(snpu[[3]]$d_scen), bn(snpu[[3]]$c_base), bn(snpu[[3]]$c_scen), bn(snpu[[3]]$c_add), mm(snpu[[3]]$d_av), pcf(snpu[[3]]$pc_ann)))
+reg_tbl("tbl-cascade-undisc", title_cascade_results_undisc, casc_tb_u,
+        c("Cumulative from 2025 through year (unless noted)", as.character(casc_tab_years)))
+kbl(casc_tb_u, format = "latex", booktabs = TRUE, escape = FALSE,
+    col.names = c("Cumulative from 2025 through year (unless noted)", as.character(casc_tab_years)),
+    align = "lrrr") |>
+  kable_styling(latex_options = c("hold_position"), font_size = 8) |>
+  column_spec(1, width = "6.6cm") |> column_spec(2:4, width = "2.2cm") |>
+  row_spec(0, bold = TRUE) |>
+  pack_rows("Projected deaths --- CVD (six causes) + type-2 diabetes (million)", 1, 2, bold = TRUE, latex_gap_space = "0.2em", escape = FALSE) |>
+  pack_rows("Projected health-system cost (US\\$ billion, undiscounted)", 3, 4, bold = TRUE, latex_gap_space = "0.2em", escape = FALSE) |>
+  pack_rows("Net effect of the strategy", 5, 6, bold = TRUE, latex_gap_space = "0.2em") |>
+  pack_rows("Annual financing intensity (that year only, not cumulative)", 7, 7, bold = TRUE, latex_gap_space = "0.2em", escape = FALSE)
+```
+
+\srcmethod{\textbf{Source:} cascade \texttt{Annual\_Mortality}, \texttt{Annual\_Cost}/\texttt{Budget\_Impact}. \textbf{Method (undiscounted):} deaths/cost columns cumulative from `r HZ_START` through that year (six CVD causes $+$ type-2 diabetes; \textbf{undiscounted}, `r casc_price` US\$); the per-capita row is that year only, not cumulative. Deaths are identical to the discounted slide. \costcaveat}
+
+## Care cascade, tobacco tax, all prevention, and the full package all move Indonesia toward its neighbours
+
+```{r fig-40q30-cascade, fig.width=9.6, fig.height=4.2, out.width="\\linewidth"}
+## ---------------------------------------------------------------------------
+## FOUR EXPLICITLY-MODELLED annual probability-of-death-before-70 trajectories,
+## each read as the stored R-reconciled literal (cvd_40q30_r) from its OWN
+## workbook's CVD_40q30 sheet -- never summed, multiplied, averaged, or
+## interpolated. All four workbooks' baselines reconcile EXACTLY (asserted below),
+## so the six-cause / exact-ages-30-70 definition is identical and the lines are
+## directly comparable:
+##   * 70-70-70 target achieved         -> S_70_30_30_TO_70_70_70   (isolated cascade wb)
+##   * Tobacco tax                      -> I_PH_TOBACCO_TAX          (public-health wb)
+##   * All public-health interventions  -> ph_all_id (all_public_health, public-health wb)
+##   * All clinical + public health     -> all_clinical_public_health (combined wb)
+## The all-public-health line is read as the public-health workbook's OWN
+## all-public-health scenario (its stored annual cvd_40q30_r) -- NOT reused from the
+## combined workbook, NOT summed from individual policies, NOT the tobacco-tax line.
+## Reuses the SAME observed history (idn_obs) and ASEAN comparators (cmp_lines)
+## as the earlier neighbours slide; the modelled status-quo baseline is NOT drawn.
+## ---------------------------------------------------------------------------
+scen_specs <- list(
+  list(id = "S_70_30_30_TO_70_70_70",     wb = casc_wb, label = "70-70-70 target achieved",                     col = col_clinical),
+  list(id = "I_PH_TOBACCO_TAX",           wb = wb_ph,   label = "Tobacco tax",                                  col = col_ph),
+  list(id = ph_all_id,                    wb = wb_ph,   label = "All public-health interventions",              col = "#D95F02"),
+  list(id = "all_clinical_public_health", wb = wb_comb, label = "All clinical and public-health interventions", col = col_combined))
+
+read_scen_q3 <- function(path, sid) {
+  d <- rd(path, "CVD_40q30")
+  if ("location" %in% names(d)) d <- d[location == "Indonesia"]
+  qc <- if ("cvd_40q30_r" %in% names(d)) "cvd_40q30_r" else "cvd_40q30"
+  d[scenario == sid & year >= HZ_START & !is.na(get(qc)), .(year, q = get(qc))][order(year)]
+}
+idn_scen4 <- rbindlist(lapply(scen_specs, function(s) {
+  x <- read_scen_q3(s$wb, s$id); x[, `:=`(scenario = s$id, scen = s$label)]; x[]
+}))
+## Fail loudly if any requested scenario lacks a full HZ_START..HZ_END trajectory.
+for (s in scen_specs) {
+  ys <- idn_scen4[scenario == s$id, year]
+  if (!length(ys) || max(ys) < HZ_END || min(ys) > HZ_START)
+    stop(sprintf("VALIDATION STOP -- scenario '%s' has no full %d-%d trajectory in %s",
+                 s$id, HZ_START, HZ_END, basename(s$wb)), call. = FALSE)
+}
+## Baseline reconciliation: every plotted line's own workbook must share the identical
+## six-cause / ages-30-70 baseline probability series across HZ_START..HZ_END, so the
+## four lines (and the new all-public-health line in particular) are directly comparable.
+.base_ref <- read_scen_q3(wb_comb, "baseline")
+for (s in scen_specs) {
+  .b <- read_scen_q3(s$wb, "baseline"); .bm <- merge(.base_ref, .b, by = "year")
+  if (nrow(.bm) < length(HZ_START:HZ_END) || max(abs(.bm$q.x - .bm$q.y)) > 1e-6)
+    stop(sprintf("VALIDATION STOP -- baseline probability series in %s does not reconcile with the combined workbook baseline",
+                 basename(s$wb)), call. = FALSE)
+}
+scen4_levels <- vapply(scen_specs, `[[`, character(1), "label")
+idn_scen4[, scen := factor(scen, levels = scen4_levels)]
+scen4_pal <- setNames(vapply(scen_specs, `[[`, character(1), "col"), scen4_levels)
+
+## Direct 2050 endpoint labels. Because four modelled lines AND six comparators cluster
+## near 2050, ALL endpoint labels are deconflicted TOGETHER in a single ggrepel call
+## (visible leader segments, fixed seed, ample right-side room) so no label sits on a
+## line or another label. Scenario labels are bold + line-coloured; comparators muted grey.
+scen_end <- idn_scen4[year == HZ_END, .(year, q, key = as.character(scen), grp = "scenario")]
+scen_end[key == "All clinical and public-health interventions",
+         disp := "All clinical and\npublic-health interventions"]
+scen_end[is.na(disp), disp := key]
+cmp_end  <- cmp_lines[, .SD[which.max(year)], by = country_label][
+              , .(year, q, key = country_label, grp = "comparator", disp = country_label)]
+lab_ends <- rbind(scen_end[, .(year, q, key, grp, disp)], cmp_end)
+## Single shared colour scale: scenario labels take their line colour, comparators grey.
+lab_pal4 <- c(scen4_pal, setNames(rep(col_comparator, uniqueN(cmp_end$key)), unique(cmp_end$key)))
+
+p_fig_40q30_cascade <- ggplot() +
+  geom_line(
+    data = cmp_lines,
+    aes(year, q, group = country_label),
+    colour = col_comparator,
+    linewidth = 0.5
+  ) +
+  geom_line(
+    data = idn_obs,
+    aes(year, q),
+    colour = "grey20",
+    linewidth = 1.0
+  ) +
+  annotate(
+    "segment",
+    x = 2024, xend = 2024,
+    y = 10.5, yend = 20.5,
+    linetype = "dotted",
+    colour = "grey45"
+  ) +
+  annotate(
+    "text",
+    x = 2024, y = 20.9,
+    label = "Modeled scenarios →",
+    hjust = 1, size = 2.7,
+    colour = "grey35"
+  ) +
+  geom_line(
+    data = idn_scen4,
+    aes(year, q, colour = scen),
+    linewidth = 1.15,
+    linetype = "22"
+  ) +
+  ggrepel::geom_text_repel(
+    data = lab_ends,
+    aes(year, q, label = disp, colour = key, fontface = grp),
+    size = 2.6, hjust = 0,
+    nudge_x = 1.3, direction = "y",
+    segment.colour = "grey65", segment.size = 0.25,
+    min.segment.length = 0, box.padding = 0.32, point.padding = 0.2,
+    max.overlaps = Inf, show.legend = FALSE, seed = 11
+  ) +
+  scale_colour_manual(values = lab_pal4) +
+  ggplot2::scale_discrete_manual("fontface", values = c(comparator = "plain", scenario = "bold"), guide = "none") +
+  scale_x_continuous(
+    limits = c(1995, 2068),
+    breaks = seq(1995, 2050, 5),
+    expand = expansion(mult = c(0.01, 0))
+  ) +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  labs(
+    title = "Probability of death from CVD before age 70: cascade, tobacco tax, all prevention, and full package",
+    subtitle = "Chance of dying from CVD between exact ages 30 and 70",
+    x = NULL,
+    y = "Probability of CVD death before age 70 (%)",
+    caption = paste(
+      "Indonesia observed history (solid, to 2023) and ASEAN comparators are WPP-scaled reference series.",
+      "\nFour modelled scenarios are dashed for 2025–2050; each is one joint model run, not a sum of separate effects.",
+      "\nASEAN comparator trends use linear extrapolation for illustrative reference."
+    )
+  ) +
+  theme_exec(11) +
+  theme(
+    legend.position = "none",
+    panel.grid.major.x = element_line(
+      colour = "grey92",
+      linewidth = 0.25
+    )
+  )
+reg_fig(p_fig_40q30_cascade, "fig-40q30-cascade",
+        "Care cascade, tobacco tax, all prevention, and the full package all move Indonesia toward its neighbours",
+        9.6, 4.2)
+```
+
+\srcmethod{\textbf{Source:} each modelled line is the stored R-reconciled literal from the annual probability-of-death-before-70 sheet of its \emph{own} workbook --- \textbf{70-70-70 target achieved:} isolated cascade workbook \texttt{output/70\_30\_30\_to\_70\_70\_70/indonesia\_70\_30\_30\_to\_70\_70\_70\_cost\_value\_formulae.xlsx} (scenario \texttt{S\_70\_30\_30\_TO\_70\_70\_70}); \textbf{Tobacco tax:} public-health workbook \texttt{indonesia\_cost\_value\_public\_health\_formulae.xlsx} (scenario \texttt{I\_PH\_TOBACCO\_TAX}); \textbf{All public-health interventions:} the SAME public-health workbook (its own all-public-health scenario \texttt{all\_public\_health}); \textbf{All clinical and public-health interventions:} combined workbook \texttt{indonesia\_model\_cost\_value\_clinical\_public\_health\_formulae.xlsx} (scenario \texttt{all\_clinical\_public\_health}). ASEAN comparators in \texttt{data/raw/}. \textbf{Method:} the cascade, the all-public-health, and the all-interventions lines are each a \emph{single joint model run} applying all of their interventions simultaneously --- never a sum, product, or average of separately modelled effects; all four workbooks share an identical baseline (asserted), so every line is the probability of death from the six modelled cardiovascular causes over exact ages 30--70. Comparators are WPP-scaled reference series shown for context only.}
+
+# Where the gains fall: a province-level view of the cascade
+
+## `r title_sub_pareto`
+
+```{r fig-sub-pareto, fig.width=9.7, fig.height=3.5, out.width="\\linewidth"}
+sf_scale <- max(da_prov$da)
+reg_fig(
+ggplot(da_prov, aes(x = location)) +
+  geom_col(aes(y = da), fill = col_clinical, width = 0.72) +
+  geom_line(aes(y = cum_share / 100 * sf_scale, group = 1), colour = col_casefatal, linewidth = 0.7) +
+  geom_point(aes(y = cum_share / 100 * sf_scale), colour = col_casefatal, size = 0.9) +
+  scale_y_continuous(
+    name = "Cumulative deaths averted, 2025-2050 (thousands)",
+    labels = function(x) formatC(x / 1e3, format = "d", big.mark = ","),
+    expand = expansion(mult = c(0, 0.02)),
+    sec.axis = sec_axis(~ . / sf_scale * 100, name = "Cumulative share of national total (%)",
+                        labels = function(x) paste0(x, "%"))) +
+  labs(x = NULL) +
+  theme_exec(10) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.4, size = 5.6),
+        axis.title.y.left  = element_text(colour = col_clinical, size = 8),
+        axis.title.y.right = element_text(colour = col_casefatal, size = 8),
+        panel.grid.major.x = element_blank()),
+"fig-sub-pareto", title_sub_pareto, 9.7, 3.5)
+```
+
+\srcmethod{\textbf{Source:} isolated subnational cascade workbook (\texttt{...\_formulae\_subnational.xlsx}), sheet \texttt{Health\_Outcomes}. \textbf{Method:} bars are cumulative deaths averted `r HZ_START`--`r HZ_END` per province (official cascade scope: six CVD causes $+$ type-2 diabetes); the line is the running share of the national total. Province-summed baseline deaths reconcile to \texttt{Province\_Reconciliation} (`r sub_recon_status`; residual `r fmt_pct(sub_recon_reldiff,2)`). `r sub_caveat` `r sub_hetero`}
+
+## `r title_sub_cov`
+
+```{r fig-sub-cov, fig.width=9.4, fig.height=3.0, out.width="\\linewidth"}
+cov_map <- maps_two_year(cov_prov, c(HZ_START, sub_ytar2), c(as.character(HZ_START), as.character(sub_ytar2)),
+                         agg = "popw", valcol = "cov")
+cov_lims <- pos_scale_lims(cov_map$value)   # bar starts at the min positive displayed value
+reg_fig(
+ggplot(cov_map) +
+  geom_sf(aes(fill = value), colour = "white", linewidth = 0.12) +
+  facet_wrap(~panel) +
+  scale_fill_gradientn(colours = ramp_blue, limits = cov_lims, oob = scales::squish,
+                       labels = function(x) paste0(formatC(x * 100, format = "f", digits = 0), "%"),
+                       name = "CVD primary-care effective coverage used by the model") +
+  coord_sf(expand = FALSE) +
+  theme_map_exec(10),
+"fig-sub-cov", title_sub_cov, 9.4, 3.0)
+```
+
+\srcmethod{\textbf{Source:} subnational cascade workbook, sheet \texttt{Cascade\_Trajectory}. \textbf{Method:} CVD primary-care effective coverage (the model's own effect/cost driver) for `r HZ_START` and `r sub_ytar2`; the workbook provides no sex-population split, so the two sexes are pooled with equal weight (their modelled coverage is identical from the `r sub_ytar2` target onward); one common scale. `r sub_geo_note` `r sub_caveat` `r sub_hetero`}
+
+## `r title_sub_cvddeath`
+
+```{r fig-sub-cvddeath, fig.width=9.4, fig.height=3.0, out.width="\\linewidth"}
+## % reduction in CVD deaths: aggregate summed baseline & scenario CVD deaths to the
+## boundary polygon, then recompute the reduction (never average percentages).
+cvd_map <- do.call(rbind, lapply(c(sub_ytar1, sub_ytar2), function(yr) {
+  d <- merge(cvd_red[year == yr], prov_meta[, .(location, iso)], by = "location")
+  a <- d[, .(base = sum(base), scen = sum(scen)), by = iso]
+  a[, value := (base - scen) / base * 100]
+  s <- map_sf(a[, .(iso, value)]); s$panel <- as.character(yr); s
+}))
+cvd_lims <- pos_scale_lims(cvd_map$value)   # bar starts at the min positive displayed value
+reg_fig(
+ggplot(cvd_map) +
+  geom_sf(aes(fill = value), colour = "white", linewidth = 0.12) +
+  facet_wrap(~panel) +
+  scale_fill_gradientn(colours = ramp_grn, limits = cvd_lims, oob = scales::squish,
+                       labels = function(x) paste0(formatC(x, format = "f", digits = 1), "%"),
+                       name = "Reduction in CVD deaths vs baseline (%)") +
+  coord_sf(expand = FALSE) +
+  theme_map_exec(10),
+"fig-sub-cvddeath", title_sub_cvddeath, 9.4, 3.0)
+```
+
+\srcmethod{\textbf{Source:} subnational cascade workbook, sheet \texttt{Annual\_Mortality}. \textbf{Method:} percentage reduction in deaths from the six modelled CVD causes (type-2 diabetes excluded) $=$ (baseline $-$ scenario) $\div$ baseline, for `r sub_ytar1` and `r sub_ytar2`; one common scale. `r sub_geo_note` `r sub_caveat` `r sub_hetero`}
+
+## `r title_sub_40q30`
+
+```{r fig-sub-40q30, fig.width=9.4, fig.height=3.0, out.width="\\linewidth"}
+q40_map <- maps_two_year(q40, c(sub_ytar1, sub_ytar2), c(as.character(sub_ytar1), as.character(sub_ytar2)),
+                         agg = "popw", valcol = "pctred")
+q40_lims <- pos_scale_lims(q40_map$value)   # bar starts at the min positive displayed value
+reg_fig(
+ggplot(q40_map) +
+  geom_sf(aes(fill = value), colour = "white", linewidth = 0.12) +
+  facet_wrap(~panel) +
+  scale_fill_gradientn(colours = ramp_grn, limits = q40_lims, oob = scales::squish,
+                       labels = function(x) paste0(formatC(x, format = "f", digits = 1), "%"),
+                       name = "Reduction in the probability of death from CVD before age 70 (%)") +
+  coord_sf(expand = FALSE) +
+  theme_map_exec(10),
+"fig-sub-40q30", title_sub_40q30, 9.4, 3.0)
+```
+
+\srcmethod{\textbf{Source:} subnational cascade workbook, probability-of-death-before-70 sheet (R-reconciled literal probabilities). \textbf{Method:} percentage reduction in the probability of death from CVD before age 70 $=$ (baseline $-$ scenario) $\div$ baseline, for `r sub_ytar1` and `r sub_ytar2`, pooled to the boundary polygon with population weights; one common scale. `r sub_geo_note` `r sub_caveat` `r sub_hetero`}
+
+## `r title_sub_cost`
+
+```{r fig-sub-cost, fig.width=9.4, fig.height=3.0, out.width="\\linewidth"}
+cost_map <- maps_two_year(cost_prov, c(sub_ytar1, sub_ytar2), c(as.character(sub_ytar1), as.character(sub_ytar2)),
+                          agg = "ratio")
+cost_lims <- pos_scale_lims(cost_map$value)   # bar starts at the min positive displayed value
+reg_fig(
+ggplot(cost_map) +
+  geom_sf(aes(fill = value), colour = "white", linewidth = 0.12) +
+  facet_wrap(~panel) +
+  scale_fill_gradientn(colours = ramp_org, limits = cost_lims, oob = scales::squish,
+                       breaks = scales::breaks_pretty(n = 4),
+                       labels = function(x) formatC(x, format = "f", digits = 2),
+                       name = "Annual additional cost per capita (US$ per person, discounted)") +
+  coord_sf(expand = FALSE) +
+  theme_map_exec(10),
+"fig-sub-cost", title_sub_cost, 9.4, 3.0)
+```
+
+\srcmethod{\textbf{Source:} subnational cascade workbook, sheets \texttt{Annual\_Cost} / \texttt{Budget\_Impact}. \textbf{Method:} \emph{annual} (not cumulative) discounted additional cost in each province divided by that province's population, for `r sub_ytar1` and `r sub_ytar2` (discounted `r fmt_pct(sub_disc*100,0)`/yr to `r HZ_START`, `r sub_price` US\$); one common scale. `r sub_geo_note` `r sub_caveat` `r sub_hetero`}
+
+## `r title_sub_cost_undisc`
+
+```{r fig-sub-cost-undisc, fig.width=9.4, fig.height=3.0, out.width="\\linewidth"}
+## Undiscounted counterpart of fig-sub-cost: each province's ANNUAL UNDISCOUNTED
+## additional cost / that province's population (sum(cost)/sum(pop) per boundary
+## polygon), for the two milestone years. Same geometry, same common positive-anchored
+## legend rule (zeros squished to the low colour, no detached US$0 tick).
+cost_map_u <- do.call(rbind, lapply(c(sub_ytar1, sub_ytar2), function(yr) {
+  d <- merge(cost_prov_u[year == yr], prov_meta[, .(location, iso)], by = "location")
+  a <- d[, .(value = sum(undisc) / sum(pop)), by = iso]
+  s <- map_sf(a); s$panel <- as.character(yr); s
+}))
+cost_lims_u <- pos_scale_lims(cost_map_u$value)
+reg_fig(
+ggplot(cost_map_u) +
+  geom_sf(aes(fill = value), colour = "white", linewidth = 0.12) +
+  facet_wrap(~panel) +
+  scale_fill_gradientn(colours = ramp_org, limits = cost_lims_u, oob = scales::squish,
+                       breaks = scales::breaks_pretty(n = 4),
+                       labels = function(x) formatC(x, format = "f", digits = 2),
+                       name = "Annual additional cost per capita (US$ per person, undiscounted)") +
+  coord_sf(expand = FALSE) +
+  theme_map_exec(10),
+"fig-sub-cost-undisc", title_sub_cost_undisc, 9.4, 3.0)
+```
+
+\srcmethod{\textbf{Source:} subnational cascade workbook, sheets \texttt{Annual\_Cost} / \texttt{Budget\_Impact}. \textbf{Method (undiscounted):} \emph{annual} (not cumulative) \textbf{undiscounted} additional cost in each province divided by that province's population, for `r sub_ytar1` and `r sub_ytar2` (`r sub_price` US\$); one common scale. `r sub_geo_note` `r sub_caveat` `r sub_hetero`}
 
 # What this means for policy
 
@@ -1259,6 +2707,48 @@ if (has_joint) {
 
 \srcmethod{\textbf{Source:} results contract (\texttt{09\_deck\_results.rds}). \textbf{Method:} deaths averted cumulative `r HZ_START`--`r HZ_END`; reduction in the probability of death from CVD before age 70 in `r HZ_END`; cost per death averted uses discounted additional cost. \costcaveat}
 
+## Undiscounted, the case still holds: two levers, affordable, and a reachable target
+
+\begin{columns}[T]
+\begin{column}{0.33\textwidth}
+```{r remember-1-undisc, results='asis'}
+if (has_joint) {
+  cat(sprintf("\\begin{combinedblock}{1. Both, together}\n\\footnotesize Clinical + public health averts \\textbf{\\textasciitilde%s deaths} by %d --- more than either alone.\n\\end{combinedblock}\n", fmt_short(combo_da), HZ_END))
+} else {
+  cat("\\begin{combinedblock}{1. Two levers}\n\\footnotesize Clinical care and population prevention each cut premature CVD mortality.\n\\end{combinedblock}\n")
+}
+```
+\end{column}
+\begin{column}{0.33\textwidth}
+```{r remember-2-undisc, results='asis'}
+cat(sprintf("\\begin{phblock}{2. Prevention is affordable}\n\\footnotesize Population policies avert deaths at about \\textbf{%s} each (undiscounted).\n\\end{phblock}\n", fmt_usd(ph_cpda_undisc %+na% NA_real_)))
+```
+\end{column}
+\begin{column}{0.33\textwidth}
+```{r remember-3-undisc, results='asis'}
+if (has_joint) {
+  cat(sprintf("\\begin{clinicalblock}{3. A reachable target}\n\\footnotesize The probability of death from CVD before age 70 falls \\textbf{%s} by %d under the combined package.\n\\end{clinicalblock}\n", fmt_pct(combo_qred,0), HZ_END))
+} else {
+  cat(sprintf("\\begin{clinicalblock}{3. A reachable target}\n\\footnotesize All clinical interventions cut the probability of death from CVD before age 70 by \\textbf{%s} by %d.\n\\end{clinicalblock}\n", fmt_pct(clin_qred,0), HZ_END))
+}
+```
+\end{column}
+\end{columns}
+
+\vspace{4pt}
+```{r closing-banner-undisc, results='asis'}
+if (has_joint) {
+  cat(sprintf(paste0("\\begin{center}\n\\large Combined action against CVD could avert about \\hlkey{%s deaths} ",
+                     "at about \\hlkey{%s per death averted (undiscounted)} through %d.\n\\end{center}\n"),
+              fmt_short(combo_da), fmt_usd(combo_cpda_undisc), HZ_END))
+} else {
+  cat(sprintf(paste0("\\begin{center}\n\\large Scaling up CVD interventions could avert hundreds of thousands ",
+                     "of deaths through %d at a modest undiscounted cost per death averted.\n\\end{center}\n"), HZ_END))
+}
+```
+
+\srcmethod{\textbf{Source:} results contract (\texttt{09\_deck\_results.rds}). \textbf{Method (undiscounted):} deaths averted cumulative `r HZ_START`--`r HZ_END`; reduction in the probability of death from CVD before age 70 in `r HZ_END`; cost per death averted uses \textbf{undiscounted} additional cost (`r price_year` US\$). Health results are identical to the discounted slide. \costcaveat}
+
 # Technical appendix
 
 ## Appendix 1 --- Scenario crosswalk
@@ -1278,6 +2768,8 @@ xwd[is.na(Family), Family := intervention_family]
 xwd[, Family := ifelse(duplicated(Family), "", Family)]
 xwd[, IDesc := gsub("_", "\\\\_", scenario)]
 xw <- xwd[, .(Family, ID = IDesc, Label = scenario_label)]
+reg_tbl("tbl-crosswalk", "Appendix 1 - Scenario crosswalk", xw,
+        c("Family", "Workbook scenario id", "Executive label"))
 kbl(xw, format="latex", booktabs=TRUE, escape=FALSE,
     col.names=c("Family","Workbook scenario id","Executive label"), align="lll") |>
   kable_styling(latex_options=c("hold_position"), font_size=5.2) |>
@@ -1343,3 +2835,159 @@ $PIN$ = people in need (population $\times$ epidemiological need); $cov$ = cover
 
 ::: {#refs}
 :::
+
+```{r build-xlsx-workbook, include=FALSE}
+## =====================================================================
+##  ASSEMBLE + WRITE THE COMPANION WORKBOOK: reports/executive_slides.xlsx
+##  Runs after every slide chunk, so .xlsx_items holds every figure and
+##  table captured (in slide order) by reg_fig()/reg_tbl(). Each item gets
+##  its own logically-named worksheet (<=31 chars) labelled with the slide
+##  title and the chunk/figure/table id; tables are written as real,
+##  editable cells; figures are embedded as PNG images at readable
+##  resolution. A leading Contents sheet indexes everything.
+##
+##  Wrapped in tryCatch so a workbook hiccup can never break the deck:
+##  the slide PDF is the primary artifact and its rendering is untouched.
+## =====================================================================
+if (isTRUE(.xlsx_enabled) && length(.xlsx_items)) tryCatch({
+
+  xlsx_out <- here::here("reports", "executive_slides.xlsx")
+
+  ## ---- Strip LaTeX markup from a string so cells/labels are plain text ----
+  latex_clean <- function(x) {
+    x <- as.character(x); x[is.na(x)] <- ""
+    ## \textcolor{colour}{text} -> text (two braced args; keep the second)
+    x <- gsub("\\\\textcolor\\{[^{}]*\\}\\{([^{}]*)\\}", "\\1", x)
+    x <- gsub("\\\\makecell\\[[^]]*\\]\\{([^{}]*)\\}", "\\1", x)
+    ## remaining single-argument commands \cmd{...} -> ... (iterate for nesting)
+    repeat { y <- gsub("\\\\[A-Za-z@]+\\*?\\{([^{}]*)\\}", "\\1", x); if (identical(y, x)) break; x <- y }
+    ## escaped specials
+    x <- gsub("US\\\\\\$", "US$", x)
+    x <- gsub("\\\\%", "%", x); x <- gsub("\\\\\\$", "$", x)
+    x <- gsub("\\\\_", "_", x); x <- gsub("\\\\&", "&", x); x <- gsub("\\\\#", "#", x)
+    x <- gsub("\\$\\\\approx\\$", "~", x)
+    x <- gsub("\\\\textasciitilde\\{\\}", "~", x)
+    ## any leftover backslash commands (no braces) then stray braces
+    x <- gsub("\\\\[A-Za-z@]+", "", x); x <- gsub("[{}]", "", x)
+    ## header line breaks -> spaces; collapse whitespace
+    x <- gsub("[\r\n]+", " ", x); x <- gsub("[ \t]+", " ", x)
+    trimws(x)
+  }
+  ## ---- Sheet-name helper: Excel forbids \ / ? * [ ] : and caps at 31 chars --
+  sanitize_sheet <- function(s) substr(gsub("[\\\\/?*\\[\\]:]", "-", s), 1, 31)
+
+  ## openxlsx 4.2.x registers a drawing + vmlDrawing relationship (and a drawing
+  ## Content_Types override) for EVERY worksheet, but writes drawing<i>.xml only for
+  ## sheets that hold an image and never writes the vmlDrawing parts -- leaving
+  ## dangling part references that Excel tolerates but strict readers (openpyxl /
+  ## LibreOffice / Sheets) reject. Remove ONLY the phantom references, keeping the
+  ## real embedded-image drawings intact. Guarded no-op on a future openxlsx layout.
+  strip_phantom_drawings <- function(wb) {
+    tryCatch({
+      has_img <- vapply(seq_along(wb$worksheets),
+                        function(i) !is.null(wb$drawings[[i]]) && length(wb$drawings[[i]]) > 0, logical(1))
+      if (!is.null(wb$Content_Types)) {
+        is_draw  <- grepl("/xl/drawings/drawing[0-9]+\\.xml", wb$Content_Types)
+        keep_pat <- if (any(has_img))
+          paste0("PartName=\"/xl/drawings/drawing", which(has_img), "\\.xml\"", collapse = "|") else NA_character_
+        keep_img <- if (is.na(keep_pat)) rep(FALSE, length(wb$Content_Types)) else grepl(keep_pat, wb$Content_Types)
+        wb$Content_Types <- wb$Content_Types[!is_draw | keep_img]
+      }
+      if (!is.null(wb$worksheets_rels))
+        for (i in seq_along(wb$worksheets_rels)) {
+          r <- wb$worksheets_rels[[i]]; if (!length(r)) next
+          r <- r[!grepl("/vmlDrawing", r)]                       # vmlDrawing parts are never written
+          if (!has_img[i]) r <- r[!grepl("/drawings/drawing[0-9]+\\.xml", r)]
+          wb$worksheets_rels[[i]] <- r
+        }
+    }, error = function(e) message("  (phantom-drawing strip skipped: ", conditionMessage(e), ")"))
+    invisible(wb)
+  }
+
+  wb <- openxlsx::createWorkbook()
+  st_title <- openxlsx::createStyle(fontSize = 13, textDecoration = "bold", fontColour = "#0F2A56")
+  st_sub   <- openxlsx::createStyle(fontSize = 9,  textDecoration = "italic", fontColour = "#5B6B7B")
+  st_link  <- openxlsx::createStyle(fontColour = "#3B6FB6", textDecoration = "underline")
+  st_hdr   <- openxlsx::createStyle(textDecoration = "bold", fgFill = "#EAF1FB",
+                                    halign = "center", valign = "center", wrapText = TRUE,
+                                    border = "TopBottom", borderColour = "#B7C7DA")
+  st_ihdr  <- openxlsx::createStyle(textDecoration = "bold", fgFill = "#0F2A56", fontColour = "white")
+
+  ## Pre-compute one worksheet name per item.
+  item_sheets <- vapply(seq_along(.xlsx_items),
+                        function(i) sanitize_sheet(sprintf("%02d_%s", i, .xlsx_items[[i]]$id)), character(1))
+
+  ## ---- Contents / index sheet (added first => leftmost tab) ---------------
+  openxlsx::addWorksheet(wb, "Contents")
+  openxlsx::writeData(wb, "Contents", "Executive deck - companion workbook", startCol = 1, startRow = 1)
+  openxlsx::addStyle(wb, "Contents", st_title, rows = 1, cols = 1)
+  openxlsx::writeData(wb, "Contents",
+    sprintf("Every figure and table from executive_slides.Rmd, in slide order (generated %s).",
+            format(Sys.time(), "%Y-%m-%d %H:%M")),
+    startCol = 1, startRow = 2)
+  openxlsx::addStyle(wb, "Contents", st_sub, rows = 2, cols = 1)
+  contents <- data.frame(
+    `#`            = seq_along(.xlsx_items),
+    Type           = vapply(.xlsx_items, function(z) z$kind, character(1)),
+    `Slide title`  = vapply(.xlsx_items, function(z) latex_clean(z$title), character(1)),
+    Identifier     = vapply(.xlsx_items, function(z) z$id, character(1)),
+    Worksheet      = item_sheets,
+    check.names = FALSE, stringsAsFactors = FALSE)
+  openxlsx::writeData(wb, "Contents", contents, startRow = 4, startCol = 1, colNames = TRUE)
+  openxlsx::addStyle(wb, "Contents", st_ihdr, rows = 4, cols = seq_len(ncol(contents)), gridExpand = TRUE)
+  openxlsx::setColWidths(wb, "Contents", cols = 1:5, widths = c(5, 9, 62, 26, 24))
+  openxlsx::freezePane(wb, "Contents", firstActiveRow = 5)
+
+  ## ---- One worksheet per item --------------------------------------------
+  for (i in seq_along(.xlsx_items)) {
+    it <- .xlsx_items[[i]]; sh <- item_sheets[i]
+    openxlsx::addWorksheet(wb, sh)
+    openxlsx::writeData(wb, sh, latex_clean(it$title), startRow = 1, startCol = 1)
+    openxlsx::addStyle(wb, sh, st_title, rows = 1, cols = 1)
+    openxlsx::writeData(wb, sh, sprintf("%s  |  %s", toupper(it$kind), it$id), startRow = 2, startCol = 1)
+    openxlsx::addStyle(wb, sh, st_sub, rows = 2, cols = 1)
+    try({
+      openxlsx::writeFormula(wb, sh,
+        x = openxlsx::makeHyperlinkString(sheet = "Contents", row = 1, col = 1, text = "<- Contents"),
+        startRow = 3, startCol = 1)
+      openxlsx::addStyle(wb, sh, st_link, rows = 3, cols = 1)
+    }, silent = TRUE)
+
+    r0 <- 5L
+    if (identical(it$kind, "table")) {
+      df <- it$data
+      ## Cleaned display headers: prefer the slide's own col_names, else the object's names.
+      hdr <- if (!is.null(it$col_names) && length(it$col_names) == ncol(df))
+               latex_clean(it$col_names) else latex_clean(names(df))
+      names(df) <- make.unique(hdr)
+      ## Clean every character/factor cell to plain text (LaTeX markup -> readable).
+      for (j in seq_along(df))
+        if (is.character(df[[j]]) || is.factor(df[[j]])) df[[j]] <- latex_clean(as.character(df[[j]]))
+      openxlsx::writeData(wb, sh, df, startRow = r0, startCol = 1, colNames = TRUE, headerStyle = st_hdr)
+      ## Readable, capped column widths.
+      widths <- vapply(seq_along(df), function(j) {
+        w <- max(nchar(names(df)[j]), max(nchar(as.character(df[[j]])), 0L, na.rm = TRUE))
+        min(60, max(12, w + 2))
+      }, numeric(1))
+      openxlsx::setColWidths(wb, sh, cols = seq_along(df), widths = widths)
+      openxlsx::freezePane(wb, sh, firstActiveRow = r0 + 1)
+    } else {
+      if (!is.na(it$path) && file.exists(it$path)) {
+        openxlsx::insertImage(wb, sh, file = it$path, startRow = r0, startCol = 1,
+                              width = it$width, height = it$height, units = "in", dpi = 200)
+      } else {
+        openxlsx::writeData(wb, sh, "[figure image could not be generated for this run]",
+                            startRow = r0, startCol = 1)
+      }
+    }
+  }
+
+  strip_phantom_drawings(wb)
+  openxlsx::saveWorkbook(wb, xlsx_out, overwrite = TRUE)
+  message(sprintf("Companion workbook written: %s  (%d items: %d figures, %d tables)",
+                  xlsx_out, length(.xlsx_items),
+                  sum(vapply(.xlsx_items, function(z) z$kind == "figure", logical(1))),
+                  sum(vapply(.xlsx_items, function(z) z$kind == "table",  logical(1)))))
+}, error = function(e)
+  warning("Companion workbook (executive_slides.xlsx) was NOT written: ", conditionMessage(e), call. = FALSE))
+```
