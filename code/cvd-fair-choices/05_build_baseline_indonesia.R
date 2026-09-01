@@ -366,6 +366,13 @@ if(run_CF_trend== TRUE){
 # intervention actually targets its sick -> dead transition; an excluded
 # intervention (e.g. an SSB -> diabetes mortality link flagged 0) imposes no
 # requirement. Fail loud rather than emit NA/all-zero sick or CF. Non-analytic.
+#
+# JOIN-RUN NOTE (00_run_70_30_30_to_70_70_70_public_health.R): this loop already
+# unions BOTH `public_health_inputs$valid_links` and the cascade
+# `fair_inputs$valid_links`. In a cascade+PH join run both objects are present, so
+# the required set is simply the union of each family's case-fatality target
+# causes; no join-specific code path is needed and any missing baseline stock still
+# fails loudly below.
 .sick_dead_target_codes <- character(0)
 for (.obj in c("public_health_inputs", "fair_inputs")) {
   if (exists(.obj) && !is.null(get(.obj)) && !is.null(get(.obj)$valid_links)) {
@@ -380,6 +387,11 @@ for (.obj in c("public_health_inputs", "fair_inputs")) {
   !is.na(.sick_dead_target_codes) & nzchar(.sick_dead_target_codes)])
 # Restrict to causes that are actually modeled in the baseline.
 .sick_dead_target_codes <- intersect(.sick_dead_target_codes, unique(b_rates$cause))
+if (isTRUE(get0("run_cascade_70_30_30_to_70_70_70", ifnotfound = FALSE)) &&
+    isTRUE(get0("run_public_health_interventions", ifnotfound = FALSE)))
+  cat(sprintf(paste0("Model 05: cascade+PH join run -- sick->dead case-fatality target ",
+                     "cause(s) (union of cascade + public-health links): {%s}.\n"),
+              paste(.sick_dead_target_codes, collapse = ", ")))
 if (length(.sick_dead_target_codes)) {
   for (.cc in .sick_dead_target_codes) {
     .sub <- b_rates[cause == .cc & year >= 2025]

@@ -490,6 +490,21 @@ if (!exists("public_health_cost_value_formulae_file"))
   public_health_cost_value_formulae_file <-
     paste0(wd_outp, "indonesia_cost_value_public_health_formulae.xlsx")
 
+# Cascade + public-health JOIN predicate + roll-up workbook path (Section 15,
+# written ONLY by 00_run_70_30_30_to_70_70_70_public_health.R). The predicate is
+# derived from the two underlying flags so it is TRUE only in the join run and
+# inert (FALSE) in both the ordinary and the plain-cascade runs.
+run_cascade_public_health_join <-
+  isTRUE(get0("run_cascade_70_30_30_to_70_70_70", ifnotfound = FALSE)) &&
+  isTRUE(get0("run_public_health_interventions",  ifnotfound = FALSE))
+# The combined cascade+PH roll-up workbook is the ONE deliverable this run writes
+# to the canonical output/ directory; it defaults there (never under wd_outp,
+# which the join orchestrator redirects to an isolated sub-directory).
+if (!exists("combined_cost_value_70_30_30_public_health_formulae_file"))
+  combined_cost_value_70_30_30_public_health_formulae_file <- paste0(
+    (if (exists("wd")) wd else sub("output/?$", "", wd_outp)),
+    "output/indonesia_model_cost_value_70_30_30_to_70_70_70_public_health_formulae.xlsx")
+
 # Intervention-family switches (single source of truth: Model 00). Each family's
 # workbook is written only when its switch is TRUE; the shared Model 06 output
 # (baseline + whichever families ran) is loaded once below and filtered per family.
@@ -3532,7 +3547,13 @@ source_public_health_cost_value <- function() {
 # provenance retained; collision-safe keys). Not a values-only copy of the two
 # existing workbooks -- fully formatted and formula-driven.
 # =====================================================================
-source_combined_cost_value <- function() {
+source_combined_cost_value <- function(
+    joint_id           = "all_clinical_public_health",
+    out_file           = if (exists("combined_cost_value_formulae_file"))
+                           combined_cost_value_formulae_file else
+                           paste0(wd_outp, "indonesia_model_cost_value_clinical_public_health_formulae.xlsx"),
+    fair_family_label  = "clinical",
+    joint_family_label = "clinical_public_health") {
   stopifnot(exists("fair_inputs"), !is.null(fair_inputs),
             exists("public_health_inputs"), !is.null(public_health_inputs),
             exists("fair_scenarios"), !is.null(fair_scenarios),
@@ -3541,10 +3562,29 @@ source_combined_cost_value <- function() {
             exists("mo_all"), exists("dt_h07"), exists("ev08"), exists("bca_params"),
             exists("dt_cvd_40q30"), exists("cvd_age_40q30"))
   `%||%` <- function(a, b) if (is.null(a) || length(a) == 0) b else a
-  out_file <- if (exists("combined_cost_value_formulae_file"))
-    combined_cost_value_formulae_file else
-    paste0(wd_outp, "indonesia_model_cost_value_clinical_public_health_formulae.xlsx")
-  message("  Building combined clinical + public-health formula workbook: ", out_file)
+  # TRUE only for the cascade + public-health join run. Everything below reduces to
+  # the byte-for-byte original standard combined workbook when this is FALSE (the
+  # parameter defaults are the original hard-coded constants); the cascade join
+  # substitutes the joint scenario id, the two family labels and the descriptive
+  # prose, and honours the cascade's exact per-year cost coverage_path.
+  is_cascade_join <- !identical(joint_id, "all_clinical_public_health")
+  fair_wb_base    <- basename(fair_inputs$inputs_path)   # == "indonesia_model_inputs.xlsx" in the standard run
+  .prose <- function(x) {
+    if (!is_cascade_join) return(x)
+    x <- gsub("all_clinical_public_health", joint_id, x, fixed = TRUE)
+    x <- gsub("clinical_public_health", joint_family_label, x, fixed = TRUE)
+    x <- gsub("clinical (FAIR Choices) + public-health",
+              "70-30-30 -> 70-70-70 cascade + public-health", x, fixed = TRUE)
+    x <- gsub("Combined clinical + public-health",
+              "Combined cascade + public-health", x, fixed = TRUE)
+    x <- gsub("baseline / clinical / public_health",
+              paste0("baseline / ", fair_family_label, " / public_health"), x, fixed = TRUE)
+    x <- gsub("every clinical scenario", "the 70-30-30 -> 70-70-70 cascade scenario", x, fixed = TRUE)
+    x <- gsub("prefixed CL_ (clinical)", "prefixed CL_ (cascade clinical arm)", x, fixed = TRUE)
+    x
+  }
+  message("  Building combined ", if (is_cascade_join) "cascade" else "clinical",
+          " + public-health formula workbook: ", out_file)
 
   A  <- fair_inputs$assumptions
   PA <- public_health_inputs$assumptions
@@ -3559,16 +3599,22 @@ source_combined_cost_value <- function() {
   ramp_years   <- max(PA$policy_cost_ramp_years, 1)
   base_impl    <- 0
   base_id      <- fair_inputs$baseline_scenario_id %||% "baseline"
-  joint_id     <- "all_clinical_public_health"
+  # joint_id / fair_family_label / joint_family_label are function parameters
+  # (defaults reproduce the standard combined workbook exactly).
 
   produced_ids <- unique(mo_all$scenario)
-  if (!(joint_id %in% produced_ids))
-    stop("combined workbook: the joint scenario '", joint_id, "' is not present in the ",
-         "Model 06 output. Re-run Model 06 with both intervention families enabled.",
+  # Every joint scenario built by Model 04 that Model 06 actually produced. The
+  # scalar `joint_id` stays the PRIMARY QA/reconciliation anchor and MUST be among
+  # them; any additional joint scenario (e.g. the targeted cascade + tobacco-tax
+  # interaction) flows through the same sheets from its OWN Model 06 output.
+  joint_ids <- intersect(names(combined_scenarios), produced_ids)
+  if (!(joint_id %in% joint_ids))
+    stop("combined workbook: the primary joint scenario '", joint_id, "' is not present in ",
+         "the Model 06 output. Re-run Model 06 with both intervention families enabled.",
          call. = FALSE)
   clin_comparators <- setdiff(intersect(names(fair_scenarios), produced_ids), base_id)
   ph_comparators   <- setdiff(intersect(names(public_health_scenarios), produced_ids), base_id)
-  comparators      <- c(clin_comparators, ph_comparators, joint_id)
+  comparators      <- unique(c(clin_comparators, ph_comparators, joint_ids))
   combined_ids     <- c(base_id, comparators)
 
   # Labels from all three catalogues (never relabelled).
@@ -3634,11 +3680,27 @@ source_combined_cost_value <- function() {
       cr <- comps[i]
       q_s <- qty_by_year(scn, cr); q_b <- qty_by_year(base_id, cr)
       cov_s <- cov_path(cr$cov_baseline, cr$cov_target, cr$cov_start_year, cr$cov_target_year, analysis_yrs)
+      # OPTIONAL exact per-year cost-coverage path (ADDITIVE / backward-compatible):
+      # the 70-30-30 -> 70-70-70 cascade attaches a `coverage_path` list-column so the
+      # cost coverage follows the SAME piecewise effective-coverage path as the health
+      # effects (identical to the standalone cascade workbook, Section 11). Absent on
+      # every standard clinical workbook -> the linear cov_path above is used unchanged.
+      if (scn != base_id && "coverage_path" %in% names(comps)) {
+        cpp <- cr[["coverage_path"]][[1]]
+        if (!is.null(cpp) && NROW(cpp) > 0L) {
+          cpp <- as.data.table(cpp)
+          lk  <- setNames(as.numeric(cpp$coverage_t), as.character(cpp$year))
+          v   <- as.numeric(lk[as.character(analysis_yrs)])
+          v[is.na(v) & analysis_yrs < min(cpp$year)] <- cr$cov_baseline
+          v[is.na(v) & analysis_yrs > max(cpp$year)] <- as.numeric(lk[[as.character(max(cpp$year))]])
+          cov_s <- pmin(pmax(v, 0), 1)
+        }
+      }
       cov_b <- rep(cr$cov_baseline, length(analysis_yrs))
       cost_rows[[length(cost_rows) + 1L]] <<- data.table(
-        scenario = scn, family = "clinical", year = analysis_yrs,
+        scenario = scn, family = fair_family_label, year = analysis_yrs,
         intervention_id = cr$intervention_id, cost_record_id = as.character(cr$cost_record_id),
-        cost_key = paste0("clinical|", cr$cost_record_id),
+        cost_key = paste0(fair_family_label, "|", cr$cost_record_id),
         cost_component = as.character(cr$cost_component %||% cr$cost_component_key),
         cause_code = as.character(cr$cause_code %||% NA_character_),
         cost_scope = as.character(cr$cost_scope), pin_measure = cr$population_in_need_measure,
@@ -3671,10 +3733,15 @@ source_combined_cost_value <- function() {
   }
   for (scn in clin_comparators) add_clin(scn, fair_scenarios[[scn]]$intervention_ids)
   for (scn in ph_comparators)   add_ph(scn,  public_health_scenarios[[scn]]$intervention_ids)
-  # JOINT scenario: clinical components (its clinical rule) + PH components (its PH
-  # rule), each computed against the joint scenario's OWN Model 06 population.
-  add_clin(joint_id, combined_scenarios[[joint_id]]$clinical_intervention_ids)
-  add_ph(joint_id,   combined_scenarios[[joint_id]]$public_health_intervention_ids)
+  # JOINT scenarios: clinical components (its clinical rule) + PH components (its PH
+  # rule), each computed against THAT joint scenario's OWN Model 06 population. Every
+  # joint scenario is costed from its OWN clinical + public-health id sets, so e.g.
+  # the cascade + tobacco-tax scenario carries ONLY its cascade components plus
+  # I_PH_TOBACCO_TAX -- never the other public-health cost components.
+  for (scn in joint_ids) {
+    add_clin(scn, combined_scenarios[[scn]]$clinical_intervention_ids)
+    add_ph(scn,   combined_scenarios[[scn]]$public_health_intervention_ids)
+  }
   annual_cost <- if (length(cost_rows)) rbindlist(cost_rows, fill = TRUE) else data.table()
   if (nrow(annual_cost)) {
     annual_cost[, discount_factor := 1 / (1 + disc_rate)^(year - yr_start)]
@@ -3732,17 +3799,17 @@ source_combined_cost_value <- function() {
 
   ## ---- scenario catalogue (family + level + provenance) -------------------
   catrow <- function(scn) {
-    if (scn == joint_id) { e <- combined_scenarios[[joint_id]]
+    if (scn %in% joint_ids) { e <- combined_scenarios[[scn]]
       return(data.table(scenario = scn, scenario_label = e$scenario_label,
-        intervention_family = "clinical_public_health", scenario_level = "combined",
+        intervention_family = joint_family_label, scenario_level = "combined",
         scenario_role = "combined", parent_package_id = NA_character_,
         intervention_ids = paste(e$intervention_ids, collapse = "; "),
         n_interventions = length(e$intervention_ids))) }
     if (scn %in% names(fair_scenarios)) { e <- fair_scenarios[[scn]]
       return(data.table(scenario = scn, scenario_label = e$scenario_label,
-        intervention_family = "clinical",
-        scenario_level = if (scn == "all") "combined" else "standalone",
-        scenario_role = NA_character_, parent_package_id = NA_character_,
+        intervention_family = fair_family_label,
+        scenario_level = e$scenario_level %||% (if (scn == "all") "combined" else "standalone"),
+        scenario_role = e$scenario_role %||% NA_character_, parent_package_id = NA_character_,
         intervention_ids = paste(e$intervention_ids, collapse = "; "),
         n_interventions = length(e$intervention_ids))) }
     e <- public_health_scenarios[[scn]]
@@ -3784,7 +3851,7 @@ source_combined_cost_value <- function() {
             " -- they appear in health/CVD sheets but not Economic_Value/Benefit_Cost.")
   scen_meta_comb <- unique(dt_h07[scenario %in% comparators, .(
     scenario, scenario_label, intervention_family,
-    scenario_level = fifelse(scenario %in% c("all", "all_public_health", joint_id), "combined",
+    scenario_level = fifelse(scenario %in% c("all", "all_public_health", joint_ids), "combined",
                       fifelse(is.na(scenario_role), "standalone", scenario_role)))])
 
   # ------------------------------------------------------------------------
@@ -3874,9 +3941,9 @@ source_combined_cost_value <- function() {
                    "R USD per death averted for the anchor (joint) scenario",
                    "Scenario used for Excel-vs-R reconciliation (the joint scenario)"),
     source = c("Model 04 / Model 09","Model 04 / Model 09","Model 04",
-               "indonesia_model_inputs.xlsx","indonesia_model_inputs.xlsx",
+               fair_wb_base, fair_wb_base,
                basename(public_health_inputs$inputs_path), basename(public_health_inputs$inputs_path),
-               "Model 09","indonesia_model_inputs.xlsx","Workbook QA rule","Workbook QA rule",
+               "Model 09", fair_wb_base,"Workbook QA rule","Workbook QA rule",
                rep("Model 09 current run",3), rep("Model 09 current run (R CEA)",4)))
   .bcab <- bca_ca_block(bca_params)
   n_ca_core <- nrow(ca)
@@ -3929,6 +3996,7 @@ source_combined_cost_value <- function() {
     "CVD_40q30 / CVD_40q30_Age give the period probability of dying from the six CVD causes between exact ages 30 and 70 (percent on a 0-100 scale). The life table (m_x, q_x, l_x, l_{x+1}) is live Excel formula; cvd_40q30 reconciles to the Model 07 R value.",
     "Reference-Case VSL/VSLY benefit-cost (Robinson et al. 2019) on Health_Outcomes / Economic_Value / Benefit_Cost; PARTIAL mortality-benefit BCA.",
     "header dark-blue; formula light-blue; R-source grey; editable-input pale-yellow; QA green/red/orange."))
+  readme[, detail := .prose(detail)]   # identity for the standard combined workbook
   addWorksheet(wb, "README")
   writeData(wb, "README", readme, headerStyle = st_hdr)
   style_sheet("README", names(readme), nrow(readme), wrap_cols = 2, filter = FALSE, max_w = 120)
@@ -3952,7 +4020,7 @@ source_combined_cost_value <- function() {
   addWorksheet(wb, "Scenario_Catalog")
   writeData(wb, "Scenario_Catalog", as.data.frame(scat), headerStyle = st_hdr)
   style_sheet("Scenario_Catalog", names(scat), nrow(scat), rsource_cols = seq_along(scat), wrap_cols = c(2, 7))
-  .jrow_sc <- which(scat$scenario == joint_id)
+  .jrow_sc <- which(scat$scenario %in% joint_ids)
   if (length(.jrow_sc)) addStyle(wb, "Scenario_Catalog", st_joint, rows = .jrow_sc + 1L,
                                  cols = seq_along(scat), gridExpand = TRUE, stack = TRUE)
 
@@ -4191,7 +4259,7 @@ source_combined_cost_value <- function() {
     wfS(25, function(r) sprintf("IF(W%d>0,V%d/W%d,\"\")", r, r, r))     # benefit_cost_ratio
   }
   style_sheet("Summary", sum_cols, n_sm, formula_cols = 6:25, rsource_cols = 5, wrap_cols = 2, max_w = 22)
-  .jrow_sm <- which(SM$scenario == joint_id)
+  .jrow_sm <- which(SM$scenario %in% joint_ids)
   if (length(.jrow_sm)) addStyle(wb, "Summary", st_joint, rows = .jrow_sm + 1L,
                                  cols = seq_along(sum_cols), gridExpand = TRUE, stack = TRUE)
 
@@ -4215,6 +4283,7 @@ source_combined_cost_value <- function() {
              "Joint scenario Excel discounted incremental cost reconciles to the R engine value",
              "The shared baseline is the comparator, never itself a comparator row"),
     stringsAsFactors = FALSE)
+  qa_df$note <- .prose(qa_df$note)     # identity for the standard combined workbook
   addWorksheet(wb, "QA_Checks")
   writeData(wb, "QA_Checks", qa_df, headerStyle = st_hdr)
   n_qa <- nrow(qa_df); r_qa <- n_qa + 1L
@@ -4256,6 +4325,7 @@ source_combined_cost_value <- function() {
     source = c(rep("Model 04 / Model 06 / Model 09", 2), "Model 07 / Model 09",
                "Model 06 / Model 09", "Robinson et al. 2019 / Model 08",
                "Model 09", "Model 07 / Model 09"))
+  methods[, detail := .prose(detail)]   # identity for the standard combined workbook
   addWorksheet(wb, "Methods_and_Sources")
   writeData(wb, "Methods_and_Sources", methods, headerStyle = st_hdr)
   style_sheet("Methods_and_Sources", names(methods), nrow(methods), wrap_cols = c(3, 4), filter = FALSE, max_w = 96)
@@ -4290,7 +4360,8 @@ source_combined_cost_value <- function() {
   if (exists("strip_dangling_drawings")) strip_dangling_drawings(wb)
   if (!dir.exists(dirname(out_file))) dir.create(dirname(out_file), recursive = TRUE)
   saveWorkbook(wb, out_file, overwrite = TRUE)
-  message("  Wrote combined clinical + public-health formula workbook: ", out_file)
+  message("  Wrote combined ", if (is_cascade_join) "cascade" else "clinical",
+          " + public-health formula workbook: ", out_file)
   message(sprintf("  Combined scenarios (%d): %s", length(comparators),
                   paste(comparators, collapse = ", ")))
   invisible(out_file)
@@ -4326,6 +4397,50 @@ if (isTRUE(run_clinical_interventions) && isTRUE(run_public_health_interventions
   combined_ok <- tryCatch({ source_combined_cost_value(); TRUE },
                           error = function(e) { message("  Combined workbook FAILED: ",
                                                         conditionMessage(e)); FALSE })
+}
+
+#===========================================================================
+# 15. CASCADE + PUBLIC-HEALTH combined cost/value formula workbook ----
+#---------------------------------------------------------------------------
+# Written ONLY by 00_run_70_30_30_to_70_70_70_public_health.R (both the cascade
+# flag and the public-health family on). This is a DIRECT ANALOGUE of the standard
+# combined clinical+public-health workbook (Section 13): it calls the SAME builder
+# source_combined_cost_value() with the cascade substituted for the clinical arm --
+# the cascade scenario S_70_30_30_TO_70_70_70 supplies the "clinical" (fair_wb)
+# comparator and the joint scenario is all_cascade_public_health. Same sheet names,
+# styles, columns, live formulas, summary tables, ordering and reconciliation.
+# Writes exactly one file:
+#   output/indonesia_model_cost_value_70_30_30_to_70_70_70_public_health_formulae.xlsx
+# The join scenario must have been produced by Model 06; fail loud otherwise.
+#===========================================================================
+if (isTRUE(run_cascade_public_health_join)) {
+  # Both joint scenarios must have been built by Model 04: the full-package joint
+  # (primary QA anchor) AND the targeted cascade + tobacco-tax interaction. Both
+  # are written into the SAME workbook by one builder call below.
+  .required_joint_ids <- c("all_cascade_public_health",
+                           "S_70_30_30_TO_70_70_70_I_PH_TOBACCO_TAX")
+  if (!exists("combined_scenarios") || is.null(combined_scenarios) ||
+      !all(.required_joint_ids %in% names(combined_scenarios)))
+    stop("Model 09: run_cascade_public_health_join = TRUE but not all required joint ",
+         "scenarios (", paste(.required_joint_ids, collapse = ", "), ") were built by ",
+         "Model 04. Missing: ",
+         paste(setdiff(.required_joint_ids,
+                       if (exists("combined_scenarios") && !is.null(combined_scenarios))
+                         names(combined_scenarios) else character(0)), collapse = ", "),
+         ". Cannot write the cascade + public-health combined workbook.", call. = FALSE)
+  # ONE builder call writes ONE workbook holding EVERY joint scenario in
+  # combined_scenarios; 'all_cascade_public_health' stays the primary QA anchor.
+  cascade_ph_ok <- tryCatch({
+      source_combined_cost_value(
+        joint_id           = "all_cascade_public_health",
+        out_file           = combined_cost_value_70_30_30_public_health_formulae_file,
+        fair_family_label  = if (exists("cascade_family")) cascade_family else "cascade_70_30_30_to_70_70_70",
+        joint_family_label = "cascade_public_health")
+      TRUE },
+    error = function(e) {
+      message("  Cascade + public-health combined workbook FAILED: ", conditionMessage(e))
+      stop(e) })
+  rm(list = intersect(ls(), ".required_joint_ids"))
 }
 
 #===========================================================================

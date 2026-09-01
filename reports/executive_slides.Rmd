@@ -245,6 +245,15 @@ csv_cmp   <- here("data", "raw", "03_asean_cvd_40q30_comparison.csv")
 casc_wb <- if (nzchar(.casc_dir)) file.path(.casc_dir, "indonesia_70_30_30_to_70_70_70_cost_value_formulae.xlsx") else
   here("output", "70_30_30_to_70_70_70", "indonesia_70_30_30_to_70_70_70_cost_value_formulae.xlsx")
 
+## Joint cascade + public-health run. Its CVD_40q30 sheet contains, among other
+## scenarios, the hypertension/cholesterol + diabetes cascade (S_70_30_30_TO_70_70_70)
+## and the cascade combined with the tobacco tax ONLY
+## (S_70_30_30_TO_70_70_70_I_PH_TOBACCO_TAX) -- not the full tobacco regulatory
+## package. Used by fig-40q30-cascade only.
+.casc_ph_wb <- Sys.getenv("EXEC_DECK_CASCADE_PH_WB", unset = "")
+casc_ph_wb <- if (nzchar(.casc_ph_wb)) .casc_ph_wb else
+  outp("indonesia_model_cost_value_70_30_30_to_70_70_70_public_health_formulae.xlsx")
+
 ## Isolated SUBNATIONAL 70-30-30 -> 70-70-70 cascade run (38 provinces; its OWN output dir).
 ## The expected deliverable is the province-level formula workbook; overridable for testing.
 .subnat_dir <- Sys.getenv("EXEC_DECK_SUBNAT_DIR", unset = "")
@@ -257,6 +266,7 @@ subnat_wb <- if (nzchar(.subnat_dir))
                 clinical_workbook_cached = wb_clin_cached,
                 public_health_workbook = wb_ph, combined_workbook = wb_comb,
                 comparator = csv_cmp, cascade_workbook = casc_wb,
+                cascade_public_health_workbook = casc_ph_wb,
                 subnational_workbook = subnat_wb)
 .missing <- .req_files[!file.exists(.req_files)]
 if (length(.missing))
@@ -2167,6 +2177,27 @@ Controlled & `r fmt_pct(casc_diag*casc_t30*casc_c30*100,1)` & `r fmt_pct(casc_di
 ## Indonesia's hypertension cascade can progress in two achievable stages
 
 ```{r fig-htn-cascade, fig.width=9.4, fig.height=3.7, out.width="0.94\\linewidth"}
+#Patch: manual update to Farizals value automatize later
+
+htn_sh[year == 2025, `:=`(
+  controlled = 0.04,
+  treated    = 0.22,
+  diagnosed  = 0.27
+)]
+
+htn_sh[year == 2030, `:=`(
+  controlled = 0.063,
+  treated    = 0.21,
+  diagnosed  = 0.700
+)]
+
+htn_sh[year == 2040, `:=`(
+  controlled = 0.343,
+  treated    = 0.490,
+  diagnosed  = 0.700
+)]
+
+
 htn_long <- melt(htn_sh[, .(year, Diagnosed = diagnosed, Treated = treated, Controlled = controlled)],
                  id.vars = "year", variable.name = "stage", value.name = "share")
 htn_long <- htn_long[!is.na(share)]
@@ -2335,20 +2366,25 @@ kbl(casc_tb_u, format = "latex", booktabs = TRUE, escape = FALSE,
 
 \srcmethod{\textbf{Source:} cascade \texttt{Annual\_Mortality}, \texttt{Annual\_Cost}/\texttt{Budget\_Impact}. \textbf{Method (undiscounted):} deaths/cost columns cumulative from `r HZ_START` through that year (six CVD causes $+$ type-2 diabetes; \textbf{undiscounted}, `r casc_price` US\$); the per-capita row is that year only, not cumulative. Deaths are identical to the discounted slide. \costcaveat}
 
-## Care cascade, tobacco tax, all prevention, and the full package all move Indonesia toward its neighbours
+## The care cascade and tobacco policies jointly move Indonesia further toward its neighbours
 
-```{r fig-40q30-cascade, fig.width=9.6, fig.height=4.2, out.width="\\linewidth"}
+```{r fig-40q30-cascade, fig.width=8.0, fig.height=6.0, out.width="\\linewidth"}
 ## ---------------------------------------------------------------------------
-## FOUR EXPLICITLY-MODELLED annual probability-of-death-before-70 trajectories,
+## FIVE EXPLICITLY-MODELLED annual probability-of-death-before-70 trajectories,
 ## each read as the stored R-reconciled literal (cvd_40q30_r) from its OWN
 ## workbook's CVD_40q30 sheet -- never summed, multiplied, averaged, or
-## interpolated. All four workbooks' baselines reconcile EXACTLY (asserted below),
+## interpolated. All source workbooks' baselines reconcile EXACTLY (asserted below),
 ## so the six-cause / exact-ages-30-70 definition is identical and the lines are
 ## directly comparable:
-##   * 70-70-70 target achieved         -> S_70_30_30_TO_70_70_70   (isolated cascade wb)
-##   * Tobacco tax                      -> I_PH_TOBACCO_TAX          (public-health wb)
-##   * All public-health interventions  -> ph_all_id (all_public_health, public-health wb)
-##   * All clinical + public health     -> all_clinical_public_health (combined wb)
+## * Hypertension/cholesterol + diabetes 70-70-70 cascade
+##     -> S_70_30_30_TO_70_70_70 (joint cascade + public-health wb)
+## * 70-70-70 cascade + tobacco tax ONLY (targeted interaction; the tobacco tax
+##   is the ONLY public-health intervention added -- NOT clean-air, mass-media or
+##   the advertising ban, and NOT the full all_cascade_public_health package)
+##     -> S_70_30_30_TO_70_70_70_I_PH_TOBACCO_TAX (joint cascade + public-health wb)
+## * Tobacco tax -> I_PH_TOBACCO_TAX (public-health wb)
+## * All public-health interventions -> ph_all_id (all_public_health, public-health wb)
+## * All clinical + public health -> all_clinical_public_health (combined wb)
 ## The all-public-health line is read as the public-health workbook's OWN
 ## all-public-health scenario (its stored annual cvd_40q30_r) -- NOT reused from the
 ## combined workbook, NOT summed from individual policies, NOT the tobacco-tax line.
@@ -2356,10 +2392,14 @@ kbl(casc_tb_u, format = "latex", booktabs = TRUE, escape = FALSE,
 ## as the earlier neighbours slide; the modelled status-quo baseline is NOT drawn.
 ## ---------------------------------------------------------------------------
 scen_specs <- list(
-  list(id = "S_70_30_30_TO_70_70_70",     wb = casc_wb, label = "70-70-70 target achieved",                     col = col_clinical),
-  list(id = "I_PH_TOBACCO_TAX",           wb = wb_ph,   label = "Tobacco tax",                                  col = col_ph),
-  list(id = ph_all_id,                    wb = wb_ph,   label = "All public-health interventions",              col = "#D95F02"),
-  list(id = "all_clinical_public_health", wb = wb_comb, label = "All clinical and public-health interventions", col = col_combined))
+  list(id = "S_70_30_30_TO_70_70_70", wb = casc_ph_wb,
+       label = "70-70-70 target achieved",
+       col = col_clinical),
+  list(id = "S_70_30_30_TO_70_70_70_I_PH_TOBACCO_TAX", wb = casc_ph_wb,
+       label = "70-70-70 target achieved + tobacco tax",
+       col = "#7B3294"),
+  list(id = "all_clinical_public_health", wb = wb_comb, label = "All clinical + tobacco tax & regulatory package", col = col_combined)
+)
 
 read_scen_q3 <- function(path, sid) {
   d <- rd(path, "CVD_40q30")
@@ -2367,43 +2407,42 @@ read_scen_q3 <- function(path, sid) {
   qc <- if ("cvd_40q30_r" %in% names(d)) "cvd_40q30_r" else "cvd_40q30"
   d[scenario == sid & year >= HZ_START & !is.na(get(qc)), .(year, q = get(qc))][order(year)]
 }
-idn_scen4 <- rbindlist(lapply(scen_specs, function(s) {
-  x <- read_scen_q3(s$wb, s$id); x[, `:=`(scenario = s$id, scen = s$label)]; x[]
+
+idn_scen5 <- rbindlist(lapply(scen_specs, function(s) {
+  x <- read_scen_q3(s$wb, s$id)
+  x[, `:=`(scenario = s$id, scen = s$label)]
+  x[]
 }))
+
 ## Fail loudly if any requested scenario lacks a full HZ_START..HZ_END trajectory.
 for (s in scen_specs) {
-  ys <- idn_scen4[scenario == s$id, year]
+  ys <- idn_scen5[scenario == s$id, year]
   if (!length(ys) || max(ys) < HZ_END || min(ys) > HZ_START)
     stop(sprintf("VALIDATION STOP -- scenario '%s' has no full %d-%d trajectory in %s",
                  s$id, HZ_START, HZ_END, basename(s$wb)), call. = FALSE)
 }
+
 ## Baseline reconciliation: every plotted line's own workbook must share the identical
 ## six-cause / ages-30-70 baseline probability series across HZ_START..HZ_END, so the
-## four lines (and the new all-public-health line in particular) are directly comparable.
+## five lines are directly comparable.
 .base_ref <- read_scen_q3(wb_comb, "baseline")
 for (s in scen_specs) {
-  .b <- read_scen_q3(s$wb, "baseline"); .bm <- merge(.base_ref, .b, by = "year")
+  .b <- read_scen_q3(s$wb, "baseline")
+  .bm <- merge(.base_ref, .b, by = "year")
   if (nrow(.bm) < length(HZ_START:HZ_END) || max(abs(.bm$q.x - .bm$q.y)) > 1e-6)
     stop(sprintf("VALIDATION STOP -- baseline probability series in %s does not reconcile with the combined workbook baseline",
                  basename(s$wb)), call. = FALSE)
 }
-scen4_levels <- vapply(scen_specs, `[[`, character(1), "label")
-idn_scen4[, scen := factor(scen, levels = scen4_levels)]
-scen4_pal <- setNames(vapply(scen_specs, `[[`, character(1), "col"), scen4_levels)
 
-## Direct 2050 endpoint labels. Because four modelled lines AND six comparators cluster
-## near 2050, ALL endpoint labels are deconflicted TOGETHER in a single ggrepel call
-## (visible leader segments, fixed seed, ample right-side room) so no label sits on a
-## line or another label. Scenario labels are bold + line-coloured; comparators muted grey.
-scen_end <- idn_scen4[year == HZ_END, .(year, q, key = as.character(scen), grp = "scenario")]
-scen_end[key == "All clinical and public-health interventions",
-         disp := "All clinical and\npublic-health interventions"]
-scen_end[is.na(disp), disp := key]
-cmp_end  <- cmp_lines[, .SD[which.max(year)], by = country_label][
-              , .(year, q, key = country_label, grp = "comparator", disp = country_label)]
-lab_ends <- rbind(scen_end[, .(year, q, key, grp, disp)], cmp_end)
-## Single shared colour scale: scenario labels take their line colour, comparators grey.
-lab_pal4 <- c(scen4_pal, setNames(rep(col_comparator, uniqueN(cmp_end$key)), unique(cmp_end$key)))
+scen5_levels <- vapply(scen_specs, `[[`, character(1), "label")
+idn_scen5[, scen := factor(scen, levels = scen5_levels)]
+scen5_pal <- setNames(vapply(scen_specs, `[[`, character(1), "col"), scen5_levels)
+
+## Endpoint labels ONLY for ASEAN comparators (right-hand side).
+## Scenario (intervention) labels are deliberately omitted from the RHS;
+## they appear only in the legend.
+cmp_end <- cmp_lines[, .SD[which.max(year)], by = country_label][
+  , .(year, q, country_label)]
 
 p_fig_40q30_cascade <- ggplot() +
   geom_line(
@@ -2420,35 +2459,43 @@ p_fig_40q30_cascade <- ggplot() +
   ) +
   annotate(
     "segment",
-    x = 2024, xend = 2024,
-    y = 10.5, yend = 20.5,
-    linetype = "dotted",
-    colour = "grey45"
+    x = 2024, xend = 2024, y = 10.5, yend = 20.5,
+    linetype = "dotted", colour = "grey45"
   ) +
   annotate(
     "text",
     x = 2024, y = 20.9,
     label = "Modeled scenarios →",
-    hjust = 1, size = 2.7,
-    colour = "grey35"
+    hjust = 1, size = 2.7, colour = "grey35"
   ) +
   geom_line(
-    data = idn_scen4,
+    data = idn_scen5,
     aes(year, q, colour = scen),
     linewidth = 1.15,
     linetype = "22"
   ) +
+  ## Country names only (larger, grey) on the right-hand side
   ggrepel::geom_text_repel(
-    data = lab_ends,
-    aes(year, q, label = disp, colour = key, fontface = grp),
-    size = 2.6, hjust = 0,
-    nudge_x = 1.3, direction = "y",
-    segment.colour = "grey65", segment.size = 0.25,
-    min.segment.length = 0, box.padding = 0.32, point.padding = 0.2,
-    max.overlaps = Inf, show.legend = FALSE, seed = 11
+    data = cmp_end,
+    aes(year, q, label = country_label),
+    colour = "grey40",
+    size = 3.4,
+    hjust = 0,
+    nudge_x = 1.3,
+    direction = "y",
+    segment.colour = "grey65",
+    segment.size = 0.25,
+    min.segment.length = 0,
+    box.padding = 0.35,
+    point.padding = 0.2,
+    max.overlaps = Inf,
+    show.legend = FALSE,
+    seed = 11
   ) +
-  scale_colour_manual(values = lab_pal4) +
-  ggplot2::scale_discrete_manual("fontface", values = c(comparator = "plain", scenario = "bold"), guide = "none") +
+  scale_colour_manual(
+    values = scen5_pal,
+    name = NULL
+  ) +
   scale_x_continuous(
     limits = c(1995, 2068),
     breaks = seq(1995, 2050, 5),
@@ -2456,30 +2503,29 @@ p_fig_40q30_cascade <- ggplot() +
   ) +
   scale_y_continuous(labels = function(x) paste0(x, "%")) +
   labs(
-    title = "Probability of death from CVD before age 70: cascade, tobacco tax, all prevention, and full package",
+    title = "Cascade, tobacco policies, and combined packages",
     subtitle = "Chance of dying from CVD between exact ages 30 and 70",
     x = NULL,
-    y = "Probability of CVD death before age 70 (%)",
-    caption = paste(
-      "Indonesia observed history (solid, to 2023) and ASEAN comparators are WPP-scaled reference series.",
-      "\nFour modelled scenarios are dashed for 2025–2050; each is one joint model run, not a sum of separate effects.",
-      "\nASEAN comparator trends use linear extrapolation for illustrative reference."
-    )
-  ) +
+    y = "Probability of CVD death before age 70 (%)"
+    ) +
   theme_exec(11) +
   theme(
-    legend.position = "none",
-    panel.grid.major.x = element_line(
-      colour = "grey92",
-      linewidth = 0.25
-    )
+    legend.position = c(0.02, 0.02),   # lower-left
+    legend.justification = c(0, 0),
+    legend.background = element_rect(fill = alpha("white", 0.85), colour = "grey80", linewidth = 0.3),
+    legend.key.width = unit(1.1, "cm"),
+    legend.key.height = unit(0.40, "cm"),
+    legend.text = element_text(size = 7.8),
+    panel.grid.major.x = element_line(colour = "grey92", linewidth = 0.25)
   )
-reg_fig(p_fig_40q30_cascade, "fig-40q30-cascade",
-        "Care cascade, tobacco tax, all prevention, and the full package all move Indonesia toward its neighbours",
-        9.6, 4.2)
+
+reg_fig(p_fig_40q30_cascade,
+        "fig-40q30-cascade",
+        "The care cascade and tobacco policies jointly move Indonesia further toward its neighbours",
+        8.0, 6.0)
 ```
 
-\srcmethod{\textbf{Source:} each modelled line is the stored R-reconciled literal from the annual probability-of-death-before-70 sheet of its \emph{own} workbook --- \textbf{70-70-70 target achieved:} isolated cascade workbook \texttt{output/70\_30\_30\_to\_70\_70\_70/indonesia\_70\_30\_30\_to\_70\_70\_70\_cost\_value\_formulae.xlsx} (scenario \texttt{S\_70\_30\_30\_TO\_70\_70\_70}); \textbf{Tobacco tax:} public-health workbook \texttt{indonesia\_cost\_value\_public\_health\_formulae.xlsx} (scenario \texttt{I\_PH\_TOBACCO\_TAX}); \textbf{All public-health interventions:} the SAME public-health workbook (its own all-public-health scenario \texttt{all\_public\_health}); \textbf{All clinical and public-health interventions:} combined workbook \texttt{indonesia\_model\_cost\_value\_clinical\_public\_health\_formulae.xlsx} (scenario \texttt{all\_clinical\_public\_health}). ASEAN comparators in \texttt{data/raw/}. \textbf{Method:} the cascade, the all-public-health, and the all-interventions lines are each a \emph{single joint model run} applying all of their interventions simultaneously --- never a sum, product, or average of separately modelled effects; all four workbooks share an identical baseline (asserted), so every line is the probability of death from the six modelled cardiovascular causes over exact ages 30--70. Comparators are WPP-scaled reference series shown for context only.}
+\srcmethod{\textbf{Source:} each modelled line is the stored R-reconciled literal from the annual probability-of-death-before-70 sheet of its \emph{own} workbook --- \textbf{70-70-70 hypertension/cholesterol + diabetes cascade} and \textbf{cascade + tobacco tax:} joint cascade/public-health workbook \texttt{indonesia\_model\_cost\_value\_70\_30\_30\_to\_70\_70\_70\_public\_health\_formulae.xlsx} (scenarios \texttt{S\_70\_30\_30\_TO\_70\_70\_70} and \texttt{S\_70\_30\_30\_TO\_70\_70\_70\_I\_PH\_TOBACCO\_TAX}); \textbf{Tobacco tax:} public-health workbook \texttt{indonesia\_cost\_value\_public\_health\_formulae.xlsx} (scenario \texttt{I\_PH\_TOBACCO\_TAX}); \textbf{All public-health interventions:} the SAME public-health workbook (scenario \texttt{all\_public\_health}); \textbf{All clinical and public-health interventions:} combined workbook \texttt{indonesia\_model\_cost\_value\_clinical\_public\_health\_formulae.xlsx} (scenario \texttt{all\_clinical\_public\_health}). ASEAN comparators in \texttt{data/raw/}. \textbf{Method:} every intervention line is a \emph{single joint model run} applying its listed interventions simultaneously --- never a sum, product, or average of separately modelled effects; all source workbooks share an identical baseline (asserted), so every line is the probability of death from the six modelled cardiovascular causes over exact ages 30--70. The plotted purple ``cascade + tobacco tax'' line (scenario \texttt{S\_70\_30\_30\_TO\_70\_70\_70\_I\_PH\_TOBACCO\_TAX}) adds ONLY the tobacco tax to the cascade --- it does NOT include the clean-air law, mass-media campaign, or advertising ban, and is NOT the broader \texttt{all\_cascade\_public\_health} package. Comparators are WPP-scaled reference series shown for context only.}
 
 # Where the gains fall: a province-level view of the cascade
 

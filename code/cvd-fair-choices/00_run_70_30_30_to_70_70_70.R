@@ -195,9 +195,9 @@ local({
 #...........................................................
 # 02-09: reuse the EXISTING model scripts (unchanged behavior) ----
 #...........................................................
-source("02_load_inputs_indonesia.R")
+#source("02_load_inputs_indonesia.R")
 
-setwd(wd_code); source("03_calibration_indonesia_nelder_mead.R")
+#setwd(wd_code); source("03_calibration_indonesia_nelder_mead.R")
 
 # Model 04 -> cascade catalogue (run_cascade flag routes .build_cascade_catalogue)
 setwd(wd_code); source("04_define_interventions_indonesia.R")

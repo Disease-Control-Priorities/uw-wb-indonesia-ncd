@@ -3338,9 +3338,136 @@ if (.run_cl && .run_ph) {
                      "runnable interventions; %d clinical + %d public-health effect rows ",
                      "(single joint run, fair_wb + ph_wb).\n\n"),
               .joint_id, length(.cl_ids), length(.ph_ids), nrow(.cl_rows), nrow(.ph_rows)))
+} else if (isTRUE(get0("run_cascade_70_30_30_to_70_70_70", ifnotfound = FALSE)) &&
+           isTRUE(get0("run_public_health_interventions",  ifnotfound = FALSE))) {
+  #===========================================================================
+  # JOINT 70-30-30 -> 70-70-70 CASCADE + PUBLIC-HEALTH SCENARIO ----
+  #---------------------------------------------------------------------------
+  # Strict parallel to the all_clinical_public_health block above, EXCEPT the
+  # "clinical" arm is the treatment-cascade scenario S_70_30_30_TO_70_70_70. The
+  # cascade scenario already exposes its effects as `fair_effect_rows` and drives
+  # `interventions = "fair_wb"` (identical shape to a clinical `all` scenario), so
+  # it feeds straight into the joint's fair_wb slot. Model 06 runs the joint as a
+  # SINGLE projection applying fair_wb + ph_wb once each to the same baseline-rate
+  # copy -- cascade and public-health effects compound MULTIPLICATIVELY on the
+  # rate scale; it is NEVER an arithmetic combination of the two families' separate
+  # outputs. Fires ONLY in the dedicated cascade+PH join orchestrator (both flags
+  # set): the plain cascade runner keeps run_public_health_interventions FALSE (so
+  # this branch is inert and combined_scenarios stays NULL there), and the ordinary
+  # runner never sets the cascade flag. The all_clinical_public_health block above
+  # is left completely untouched.
+  #===========================================================================
+  .casc_id  <- get0("cascade_scenario_id", ifnotfound = "S_70_30_30_TO_70_70_70")
+  .casc_scn <- if (exists("fair_scenarios") && !is.null(fair_scenarios))
+    fair_scenarios[[.casc_id]] else NULL
+  .ph_all   <- if (exists("public_health_scenarios") && !is.null(public_health_scenarios))
+    public_health_scenarios[["all_public_health"]] else NULL
+  .casc_rows <- if (!is.null(.casc_scn)) .casc_scn$fair_effect_rows else NULL
+  .ph_rows   <- if (!is.null(.ph_all))   .ph_all$ph_effect_rows     else NULL
+
+  if (is.null(.casc_rows) || !nrow(.casc_rows) || is.null(.ph_rows) || !nrow(.ph_rows))
+    stop("Model 04: the cascade + public-health join run requires BOTH the cascade ",
+         "scenario '", .casc_id, "' (with fair_effect_rows) and the public-health ",
+         "'all_public_health' scenario (>= 2 runnable public-health interventions). ",
+         "Cascade rows: ", if (is.null(.casc_rows)) "MISSING" else nrow(.casc_rows),
+         "; public-health rows: ", if (is.null(.ph_rows)) "MISSING" else nrow(.ph_rows),
+         ".", call. = FALSE)
+
+  .casc_ids <- .casc_scn$intervention_ids
+  .ph_ids   <- .ph_all$intervention_ids
+  .joint_id <- "all_cascade_public_health"
+  # Collision-safety: the joint id must not clash with either family catalogue.
+  if (.joint_id %in% c(names(fair_scenarios), names(public_health_scenarios)))
+    stop("Model 04: joint scenario id '", .joint_id, "' collides with an existing ",
+         "family scenario id.", call. = FALSE)
+
+  combined_scenarios <- list()
+  combined_scenarios[[.joint_id]] <- list(
+    scenario_id      = .joint_id,
+    scenario_label   = "70-30-30 -> 70-70-70 cascade + all public-health interventions (combined)",
+    family           = "cascade_public_health",
+    scenario_level   = "combined",
+    scenario_role    = "combined",
+    parent_package_id   = NA_character_,
+    parent_package_name = NA_character_,
+    intervention_id  = NA_character_,
+    # Union of the cascade component ids and all runnable public-health ids.
+    intervention_ids = c(.casc_ids, .ph_ids),
+    clinical_intervention_ids      = .casc_ids,   # cascade component ids (fair_wb arm)
+    public_health_intervention_ids = .ph_ids,
+    cascade_scenario_id            = .casc_id,
+    component_order  = NA_integer_,
+    # BOTH engines run once each in a single projection (fair_wb + ph_wb).
+    interventions    = c("fair_wb", "ph_wb"),
+    fair_effect_rows = .casc_rows,          # cascade effect rows (fair_wb engine)
+    ph_effect_rows   = .ph_rows)            # complete validated public-health rows
+
+  cat(sprintf(paste0("\nJoint cascade + public-health scenario built: '%s' -> %d cascade + ",
+                     "%d public-health runnable interventions; %d cascade + %d public-health ",
+                     "effect rows (single joint run, fair_wb + ph_wb).\n\n"),
+              .joint_id, length(.casc_ids), length(.ph_ids), nrow(.casc_rows), nrow(.ph_rows)))
+
+  #---------------------------------------------------------------------------
+  # SECOND joint scenario: cascade + tobacco-tax ONLY (targeted interaction).
+  # Same genuine single-projection construction as all_cascade_public_health,
+  # but the public-health arm is restricted to the single I_PH_TOBACCO_TAX
+  # intervention (its own validated ph_effect_rows) instead of the full
+  # all_public_health package. Model 06 runs it as a SINGLE projection applying
+  # fair_wb (cascade) + ph_wb (tobacco tax) once each to the same baseline-rate
+  # copy -- cascade and tobacco-tax effects compound MULTIPLICATIVELY on the
+  # rate scale; it is NEVER an arithmetic combination of the two standalone
+  # output trajectories. The all_cascade_public_health entry above is retained
+  # unchanged; this only ADDS a second entry to combined_scenarios.
+  #---------------------------------------------------------------------------
+  .tax_id   <- "I_PH_TOBACCO_TAX"
+  .tax_scn  <- if (exists("public_health_scenarios") && !is.null(public_health_scenarios))
+    public_health_scenarios[[.tax_id]] else NULL
+  .tax_rows <- if (!is.null(.tax_scn)) .tax_scn$ph_effect_rows else NULL
+  if (is.null(.tax_scn) || is.null(.tax_rows) || !nrow(.tax_rows))
+    stop("Model 04: the cascade + tobacco-tax join run requires the public-health ",
+         "scenario '", .tax_id, "' to exist with non-empty validated ph_effect_rows. ",
+         "Scenario present: ", if (is.null(.tax_scn)) "NO" else "YES",
+         "; tobacco-tax rows: ", if (is.null(.tax_rows)) "MISSING" else nrow(.tax_rows),
+         ".", call. = FALSE)
+
+  .tax_ids      <- .tax_scn$intervention_ids
+  .joint_tax_id <- "S_70_30_30_TO_70_70_70_I_PH_TOBACCO_TAX"
+  # Collision-safety: the new joint id must not clash with any existing scenario id.
+  if (.joint_tax_id %in% c(names(fair_scenarios), names(public_health_scenarios),
+                           names(combined_scenarios)))
+    stop("Model 04: joint scenario id '", .joint_tax_id, "' collides with an existing ",
+         "scenario id.", call. = FALSE)
+
+  combined_scenarios[[.joint_tax_id]] <- list(
+    scenario_id      = .joint_tax_id,
+    scenario_label   = "70-30-30 -> 70-70-70 cascade + tobacco tax",
+    family           = "cascade_public_health",
+    scenario_level   = "combined",
+    scenario_role    = "combined",
+    parent_package_id   = NA_character_,
+    parent_package_name = NA_character_,
+    intervention_id  = NA_character_,
+    # Union of the cascade component ids and the single tobacco-tax id.
+    intervention_ids = c(.casc_ids, .tax_ids),
+    clinical_intervention_ids      = .casc_ids,   # cascade component ids (fair_wb arm)
+    public_health_intervention_ids = .tax_ids,    # tobacco-tax ONLY (ph_wb arm)
+    cascade_scenario_id            = .casc_id,
+    component_order  = NA_integer_,
+    # BOTH engines run once each in a single projection (fair_wb + ph_wb).
+    interventions    = c("fair_wb", "ph_wb"),
+    fair_effect_rows = .casc_rows,          # cascade effect rows (fair_wb engine)
+    ph_effect_rows   = .tax_rows)           # tobacco-tax validated effect rows only
+
+  cat(sprintf(paste0("\nJoint cascade + tobacco-tax scenario built: '%s' -> %d cascade + ",
+                     "%d public-health (tobacco-tax) intervention(s); %d cascade + %d ",
+                     "tobacco-tax effect rows (single joint run, fair_wb + ph_wb).\n\n"),
+              .joint_tax_id, length(.casc_ids), length(.tax_ids),
+              nrow(.casc_rows), nrow(.tax_rows)))
 } else {
   # Not a both-families run: no joint scenario (single-family runs unchanged).
   combined_scenarios <- NULL
 }
 rm(list = intersect(ls(), c(".run_cl", ".run_ph", ".cl_all", ".ph_all", ".cl_rows",
-                            ".ph_rows", ".cl_ids", ".ph_ids", ".joint_id")))
+                            ".ph_rows", ".cl_ids", ".ph_ids", ".joint_id",
+                            ".casc_id", ".casc_scn", ".casc_rows", ".casc_ids", ".ph_ids",
+                            ".tax_id", ".tax_scn", ".tax_rows", ".tax_ids", ".joint_tax_id")))

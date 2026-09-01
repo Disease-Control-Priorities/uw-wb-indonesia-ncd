@@ -3090,6 +3090,20 @@ if (!isTRUE(run_public_health_interventions) && !isTRUE(run_clinical_interventio
 
 baseline_id <- if (exists("baseline_scenario_id")) baseline_scenario_id else "baseline"
 
+# Cascade + public-health JOIN predicate (single derived flag; TRUE only in the
+# dedicated 00_run_70_30_30_to_70_70_70_public_health.R orchestrator, where the
+# cascade flag AND the public-health family are both on). In a join run the
+# clinical FAIR catalogue is intentionally OFF (run_clinical_interventions =
+# FALSE) but `fair_scenarios` still carries {baseline, cascade} because Model 04
+# routes to the cascade builder on the cascade flag alone. The two guards below
+# therefore also fire on this predicate so the cascade scenario and the joint
+# `all_cascade_public_health` scenario are dispatched. The plain cascade runner
+# keeps run_public_health_interventions FALSE (predicate FALSE -> inert), and the
+# ordinary runner never sets the cascade flag (predicate FALSE -> inert).
+run_cascade_public_health_join <-
+  isTRUE(get0("run_cascade_70_30_30_to_70_70_70", ifnotfound = FALSE)) &&
+  isTRUE(get0("run_public_health_interventions",  ifnotfound = FALSE))
+
 scenarios <- list()
 # Baseline (shared comparator, included once) -- take it from whichever enabled
 # catalogue defines it; both families use the same id/label.
@@ -3108,8 +3122,10 @@ if (is.null(scenarios[[baseline_id]]))
                                    interventions = character(0))
 scenarios[[baseline_id]]$family <- "baseline"
 
-# Clinical (FAIR Choices) family
-if (isTRUE(run_clinical_interventions)) {
+# Clinical (FAIR Choices) family -- also dispatched in a cascade+PH join run, where
+# `fair_scenarios` = {baseline, cascade} carries the cascade scenario even though
+# run_clinical_interventions is FALSE.
+if (isTRUE(run_clinical_interventions) || isTRUE(run_cascade_public_health_join)) {
   if (!exists("fair_scenarios"))
     stop("Model 06: run_clinical_interventions = TRUE but `fair_scenarios` not found. ",
          "Source Model 04 (04_define_interventions_indonesia.R) first.", call. = FALSE)
@@ -3135,11 +3151,13 @@ if (isTRUE(run_public_health_interventions)) {
   }
 }
 
-# Joint clinical + public-health family: the genuine combined scenario is run
-# ONLY when both families are enabled. It is a single project.all() run applying
-# fair_wb + ph_wb once each to the same baseline-rate copy (never an arithmetic
-# combination of the separate `all` / `all_public_health` outputs).
-if (isTRUE(run_clinical_interventions) && isTRUE(run_public_health_interventions) &&
+# Joint family: the genuine combined scenario is run when BOTH clinical + public
+# health are enabled (all_clinical_public_health) OR in a cascade+PH join run
+# (all_cascade_public_health). It is a single project.all() run applying fair_wb +
+# ph_wb once each to the same baseline-rate copy (never an arithmetic combination
+# of the separate `all` / `all_public_health` / cascade outputs).
+if (((isTRUE(run_clinical_interventions) && isTRUE(run_public_health_interventions)) ||
+     isTRUE(run_cascade_public_health_join)) &&
     exists("combined_scenarios") && !is.null(combined_scenarios)) {
   for (nm in setdiff(names(combined_scenarios), baseline_id)) {
     if (nm %in% names(scenarios))
@@ -3360,20 +3378,43 @@ cat("\nSuccessful runs:", sum(successful), "out of", length(locs), "\n")
 cat("Failed countries:", paste(locs[!successful], collapse = ", "), "\n")
 
 # --- Cascade scenario-scope guard (opt-in; no-op unless the isolated 70-30-30 ->
-#     70-70-70 runner set the flag). Asserts every modeled row carries one of the
-#     two permitted scenario ids (baseline + the single cascade scenario). -------
+#     70-70-70 runner set the flag).
+#   * PLAIN cascade run (public health OFF): strict -- every modeled row must carry
+#     one of the two permitted scenario ids (baseline + the single cascade scenario).
+#   * Cascade + public-health JOIN run (public health ON): relaxed -- the permitted
+#     set additionally includes every public-health scenario id Model 04 built plus
+#     the joint `all_cascade_public_health`. The strict guard is deliberately NOT
+#     applied here, so it can never fire when PH is on.
 if (isTRUE(get0("run_cascade_70_30_30_to_70_70_70", ifnotfound = FALSE))) {
   .cs_dt   <- Filter(function(x) is.data.frame(x), results_list)
   .cs_scn  <- unique(unlist(lapply(.cs_dt, function(x) as.character(unique(x$scenario)))))
-  .cs_ok   <- c(if (exists("baseline_scenario_id")) baseline_scenario_id else "baseline",
-                if (exists("cascade_scenario_id"))  cascade_scenario_id  else "S_70_30_30_TO_70_70_70")
-  .cs_bad  <- setdiff(.cs_scn, .cs_ok)
-  if (length(.cs_bad))
-    stop("Cascade Model 06: unexpected scenario id(s) in results: ",
-         paste(.cs_bad, collapse = ", "), " (permitted only: ",
-         paste(.cs_ok, collapse = ", "), ").", call. = FALSE)
-  cat(sprintf("Cascade Model 06 scenario scope OK: {%s}\n", paste(sort(.cs_scn), collapse = ", ")))
-  rm(list = intersect(ls(), c(".cs_dt", ".cs_scn", ".cs_ok", ".cs_bad")))
+  .cs_base <- if (exists("baseline_scenario_id")) baseline_scenario_id else "baseline"
+  .cs_casc <- if (exists("cascade_scenario_id"))  cascade_scenario_id  else "S_70_30_30_TO_70_70_70"
+  if (isTRUE(run_cascade_public_health_join)) {
+    # Relaxed permitted set: baseline + cascade + all PH scenarios + the joint.
+    .cs_ok <- unique(c(.cs_base, .cs_casc,
+                       if (exists("public_health_scenarios") && !is.null(public_health_scenarios))
+                         names(public_health_scenarios) else character(0),
+                       if (exists("combined_scenarios") && !is.null(combined_scenarios))
+                         names(combined_scenarios) else character(0)))
+    .cs_bad <- setdiff(.cs_scn, .cs_ok)
+    if (length(.cs_bad))
+      stop("Cascade+PH join Model 06: unexpected scenario id(s) in results: ",
+           paste(.cs_bad, collapse = ", "), " (permitted: baseline + cascade + all ",
+           "public-health scenarios + all_cascade_public_health).", call. = FALSE)
+    cat(sprintf("Cascade+PH join Model 06 scenario scope OK (%d scenarios): {%s}\n",
+                length(.cs_scn), paste(sort(.cs_scn), collapse = ", ")))
+  } else {
+    # Strict permitted set: baseline + the single cascade scenario only.
+    .cs_ok  <- c(.cs_base, .cs_casc)
+    .cs_bad <- setdiff(.cs_scn, .cs_ok)
+    if (length(.cs_bad))
+      stop("Cascade Model 06: unexpected scenario id(s) in results: ",
+           paste(.cs_bad, collapse = ", "), " (permitted only: ",
+           paste(.cs_ok, collapse = ", "), ").", call. = FALSE)
+    cat(sprintf("Cascade Model 06 scenario scope OK: {%s}\n", paste(sort(.cs_scn), collapse = ", ")))
+  }
+  rm(list = intersect(ls(), c(".cs_dt", ".cs_scn", ".cs_ok", ".cs_bad", ".cs_base", ".cs_casc")))
 }
 
 # Combine all results (if not too large)
