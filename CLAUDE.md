@@ -52,8 +52,8 @@ The codebase currently contains **four coexisting code families**. Know which on
 │   └── slides/            # Presentation-ready .rds + .png files
 ├── outputs/               # INTEGRATED pipeline outputs (tables/, figures/, validation/)
 ├── scenarios/             # R Markdown reports: cvd/ (aim1_report.Rmd), cancer/
-├── reports/               # LaTeX/Beamer decks: executive_slides.Rmd (WB–UW briefing),
-│                          #   technical_presentation.Rmd/.tex, preamble, refs
+├── reports/               # LaTeX/Beamer decks: executive_slides.Rmd (WB–UW briefing; knits
+│                          #   companion executive_slides.xlsx), technical_presentation.Rmd/.tex, refs
 ├── dev/                   # ~19 design/change-log markdown docs for the FAIR Choices work
 ├── R/, config/, tests/    # Top-level placeholders (README only)
 └── docs/                  # Documentation, references, diagrams, prompts.txt
@@ -104,7 +104,8 @@ Hard-codes an absolute `wd`; shares the legacy flag/config convention (`run_cali
 
 Isolated variant runners (each starts a fresh session — run standalone, not via `00`):
 ```r
-source("code/cvd-fair-choices/00_run_70_30_30_to_70_70_70.R")                      # national cascade
+source("code/cvd-fair-choices/00_run_70_30_30_to_70_70_70.R")                      # national cascade (clinical arm)
+source("code/cvd-fair-choices/00_run_70_30_30_to_70_70_70_public_health.R")        # cascade + public-health join run
 source("code/cvd-fair-choices/70_30_30_to_70_70_70_subnational/00_run_70_30_30_to_70_70_70_subnational.R")  # 38-province cascade
 source("code/cvd-fair-choices/10-frp_indonesia.r")                                # FRP quintile allocation (post-run)
 ```
@@ -133,6 +134,11 @@ devtools::install_github("PPgp/wpp2024")   # demographic backbone (integrated sc
 
 # Cancer (additional)
 install.packages(c("tidyverse", "yaml", "curl"))
+
+# Executive deck (reports/executive_slides.Rmd; also needs a XeLaTeX install)
+install.packages(c("rmarkdown", "knitr", "kableExtra", "ggrepel", "here", "scales",
+                   "openxlsx", "sf", "rnaturalearth"))
+install.packages("rnaturalearthhires", repos = "https://ropensci.r-universe.dev")  # not on CRAN; province maps
 ```
 
 `code/R/packages.R` checks for the integrated pipeline's dependencies and stops with an install instruction if any are missing (it does not install silently).
@@ -213,13 +219,13 @@ The entry script sources orchestration scripts that in turn source numbered sub-
 
 **Intervention families & scenarios** (all dynamic and workbook-driven — excluded interventions never appear): clinical `fair_scenarios` = `baseline` + one per valid intervention + combined `all`; public-health `public_health_scenarios` = `baseline` + one per intervention + a joint scenario per parent package (tobacco, salt/SSB) + `all_public_health`; when both families run, a genuine joint `all_clinical_public_health` scenario is added. Analytic assumptions live only in the input workbooks; `00` carries execution switches only.
 
-**Isolated 70-30-30→70-70-70 cascade runs.** The national runner `00_run_70_30_30_to_70_70_70.R` feeds `data/indonesia_70_30_30_to_70_70_70_inputs.xlsx` through Models 01–09 with `run_cascade_70_30_30_to_70_70_70 = TRUE` (clinical machinery only, PH off; Model 04 builds a `baseline` + `S_70_30_30_TO_70_70_70` catalogue); all output lands under `output/70_30_30_to_70_70_70/`, and a fail-fast collision guard asserts no ordinary output is touched. The subnational pipeline (`70_30_30_to_70_70_70_subnational/`) is fully **stand-alone** — adapted copies of Models 04–09 living in that directory, **never** sourcing production `00–09` and skipping stages 01/02/03; it starts from the pre-calibrated `data/processed/b_rates_full_period_reconciled_2017_2050_national_current38.rds` (Indonesia + 38 provinces) and writes only under `output/70_30_30_to_70_70_70_subnational/`.
+**Isolated 70-30-30→70-70-70 cascade runs.** The national runner `00_run_70_30_30_to_70_70_70.R` feeds `data/indonesia_70_30_30_to_70_70_70_inputs.xlsx` through Models 01–09 with `run_cascade_70_30_30_to_70_70_70 = TRUE` (clinical machinery only, PH off; Model 04 builds a `baseline` + `S_70_30_30_TO_70_70_70` catalogue); all output lands under `output/70_30_30_to_70_70_70/`, and a fail-fast collision guard asserts no ordinary output is touched. `00_run_70_30_30_to_70_70_70_public_health.R` is a third runner that runs the cascade *together with* the public-health family (skipping Models 02/03), adds a genuine joint `all_cascade_public_health` scenario, and writes one roll-up deliverable — `output/indonesia_model_cost_value_70_30_30_to_70_70_70_public_health_formulae.xlsx`, a direct analogue of the standard combined workbook with the cascade substituted for the clinical arm — while keeping its intermediates under `output/70_30_30_to_70_70_70_public_health/`. The subnational pipeline (`70_30_30_to_70_70_70_subnational/`) is fully **stand-alone** — adapted copies of Models 04–09 living in that directory, **never** sourcing production `00–09` and skipping stages 01/02/03; it starts from the pre-calibrated `data/processed/b_rates_full_period_reconciled_2017_2050_national_current38.rds` (Indonesia + 38 provinces) and writes only under `output/70_30_30_to_70_70_70_subnational/`.
 
 **Alignment calibration (experimental, isolated).** `03_calibration_indonesia_alignment.R` + `05_build_baseline_indonesia_alignment.R` + `06_run_scenarios_indonesia_fair_alignment.R` recalibrate the well–sick–dead Markov to reproduce an externally-projected epidemiology (2023–2050) via **flow-inversion** (forward-solve) rather than Nelder-Mead multipliers. Run only through `alignment_tests/run_alignment_pipeline.R`; non-destructive (writes to `data/processed/alignment/` and `output_alignment/`). `06_..._alignment.R` is a thin wrapper that repoints `wd_outp` and re-runs the *unmodified* production Model 06, keeping the output contract byte-identical for Models 07–09.
 
 **Tests** (source directly; not wired into `00`): `tests_acceptance_0006.R` (ages-0-95 + dm2 full-lifecycle refactor), `tests_fair_cost_value.R` (fast static checks of the workbook-driven cost/value extension), `tests_tobacco_ssb_mortality.R` (tobacco-Jha / SSB→T2DM mortality), and the `alignment_tests/` suite (`test_alignment_prep.R`, `validate_baseline_vs_projection.R`, `test_downstream_compat.R`).
 
-**Executive deck.** `reports/executive_slides.Rmd` (WB–UW Beamer briefing) is BCA-free and reads only `output/09_deck_results.rds` + the workbook `Scenario_Catalog` — no Excel recalculation.
+**Executive deck.** `reports/executive_slides.Rmd` (WB–UW Beamer briefing) is BCA-free and needs no Excel recalculation. It reads `output/09_deck_results.rds` plus the Model 09 clinical/public-health/combined workbooks and the three cascade workbooks (national, cascade+PH, subnational), and fails loudly if any workbook's `Scenario_Catalog` doesn't reconcile with the results contract. Knitting also writes a companion `reports/executive_slides.xlsx` holding every slide's table/figure data in slide order. Re-run the relevant pipelines before knitting.
 
 ## Cancer Pipeline Architecture
 
@@ -274,7 +280,7 @@ The top-level `code/tests/` and `tests/` dirs are placeholders. The FAIR Choices
 - **Double-calibration**: if you use `03_calibration_indonesia_transparent.R` (or another alternative), set `run_adjustment_model <- FALSE` before stage 05, or `adjustments2023_age.csv` from 032 will be multiplied in a second time.
 - **Multiple pipelines share intermediate files**: the generic, `_indonesia`, and FAIR Choices CVD scripts read/write overlapping intermediate files in `data/processed/`. Run one pipeline end-to-end rather than mixing stages.
 - **FAIR Choices assumptions live in Excel, not code**: analytic assumptions (intervention–cause links, effects, coverage, costs, discounting, years, price year) belong to the input workbooks (`indonesia_model_inputs*.xlsx`); `00_run_model_cvd_fair.R` carries only execution switches. Never hard-code an assumption in the scripts, and edit ages/causes only in `00`'s `cause_map`/age config.
-- **Isolated runs must stay isolated**: the cascade runners (`00_run_70_30_30_to_70_70_70.R`, the subnational `00_...`) and the alignment harness each start with `rm(list=ls())` and must be run in a fresh session — not sourced from `00_run_model_cvd_fair.R`. They write only to their own output trees (`output/70_30_30_to_70_70_70*/`, `output_alignment/`, `data/processed/alignment/`) and guard against clobbering ordinary output.
+- **Isolated runs must stay isolated**: the three cascade runners (`00_run_70_30_30_to_70_70_70.R`, `00_run_70_30_30_to_70_70_70_public_health.R`, the subnational `00_...`) and the alignment harness each start with `rm(list=ls())` and must be run in a fresh session — not sourced from `00_run_model_cvd_fair.R`. They write only to their own output trees (`output/70_30_30_to_70_70_70*/`, `output_alignment/`, `data/processed/alignment/`) and guard against clobbering ordinary output.
 - **FAIR Choices vs legacy `06_run_scenarios_indonesia_fair.R`**: both `code/cvd/` and `code/cvd-fair-choices/` contain this file but they have diverged; the actively-maintained engine is the one in `code/cvd-fair-choices/`.
 - **Raw data not on GitHub**: `data/raw/**` is gitignored (only `.md` files kept). Models expect GBD 2023, UNWPP 2024, IHME, NCD-RisC, and ETIHAD inputs staged locally; the integrated pipeline additionally generates `data/gbd/`, `data/wpp/`, and `data/model/` from its 01–04 steps.
 - **Output dirs differ**: legacy pipelines write to `output/`; the integrated pipeline writes to `outputs/`. `output/out_model/` is gitignored.

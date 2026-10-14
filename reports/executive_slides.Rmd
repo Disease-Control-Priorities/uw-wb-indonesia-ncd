@@ -2368,118 +2368,235 @@ kbl(casc_tb_u, format = "latex", booktabs = TRUE, escape = FALSE,
 
 ## The care cascade and tobacco policies jointly move Indonesia further toward its neighbours
 
-```{r fig-40q30-cascade, fig.width=8.0, fig.height=6.0, out.width="\\linewidth"}
+```{r fig-40q30-cascade, fig.width=13.2, fig.height=6.0, out.width="\\linewidth"}
 ## ---------------------------------------------------------------------------
-## FIVE EXPLICITLY-MODELLED annual probability-of-death-before-70 trajectories,
+## THREE EXPLICITLY-MODELLED annual probability-of-death-before-70 trajectories,
 ## each read as the stored R-reconciled literal (cvd_40q30_r) from its OWN
 ## workbook's CVD_40q30 sheet -- never summed, multiplied, averaged, or
 ## interpolated. All source workbooks' baselines reconcile EXACTLY (asserted below),
 ## so the six-cause / exact-ages-30-70 definition is identical and the lines are
 ## directly comparable:
+##
 ## * Hypertension/cholesterol + diabetes 70-70-70 cascade
 ##     -> S_70_30_30_TO_70_70_70 (joint cascade + public-health wb)
+##
 ## * 70-70-70 cascade + tobacco tax ONLY (targeted interaction; the tobacco tax
 ##   is the ONLY public-health intervention added -- NOT clean-air, mass-media or
 ##   the advertising ban, and NOT the full all_cascade_public_health package)
-##     -> S_70_30_30_TO_70_70_70_I_PH_TOBACCO_TAX (joint cascade + public-health wb)
-## * Tobacco tax -> I_PH_TOBACCO_TAX (public-health wb)
-## * All public-health interventions -> ph_all_id (all_public_health, public-health wb)
-## * All clinical + public health -> all_clinical_public_health (combined wb)
-## The all-public-health line is read as the public-health workbook's OWN
-## all-public-health scenario (its stored annual cvd_40q30_r) -- NOT reused from the
-## combined workbook, NOT summed from individual policies, NOT the tobacco-tax line.
+##     -> S_70_30_30_TO_70_70_70_I_PH_TOBACCO_TAX
+##        (joint cascade + public-health wb)
+##
+## * All clinical + public health
+##     -> all_clinical_public_health (combined wb)
+##
 ## Reuses the SAME observed history (idn_obs) and ASEAN comparators (cmp_lines)
 ## as the earlier neighbours slide; the modelled status-quo baseline is NOT drawn.
+##
+## The figure dimensions fill virtually all available space below the PowerPoint
+## slide title on a 13.33 × 7.5-inch widescreen slide. All plot text is enlarged
+## by 1.5× relative to the previous version.
 ## ---------------------------------------------------------------------------
+
+font_mult <- 1.5
+
 scen_specs <- list(
-  list(id = "S_70_30_30_TO_70_70_70", wb = casc_ph_wb,
-       label = "70-70-70 target achieved",
-       col = col_clinical),
-  list(id = "S_70_30_30_TO_70_70_70_I_PH_TOBACCO_TAX", wb = casc_ph_wb,
-       label = "70-70-70 target achieved + tobacco tax",
-       col = "#7B3294"),
-  list(id = "all_clinical_public_health", wb = wb_comb, label = "All clinical + tobacco tax & regulatory package", col = col_combined)
+  list(
+    id = "S_70_30_30_TO_70_70_70",
+    wb = casc_ph_wb,
+    label = "70-70-70 target achieved",
+    col = col_clinical
+  ),
+  list(
+    id = "S_70_30_30_TO_70_70_70_I_PH_TOBACCO_TAX",
+    wb = casc_ph_wb,
+    label = "70-70-70 target achieved + tobacco tax",
+    col = "#7B3294"
+  ),
+  list(
+    id = "all_clinical_public_health",
+    wb = wb_comb,
+    label = "All clinical + tobacco tax & regulatory package",
+    col = col_combined
+  )
 )
 
 read_scen_q3 <- function(path, sid) {
   d <- rd(path, "CVD_40q30")
-  if ("location" %in% names(d)) d <- d[location == "Indonesia"]
-  qc <- if ("cvd_40q30_r" %in% names(d)) "cvd_40q30_r" else "cvd_40q30"
-  d[scenario == sid & year >= HZ_START & !is.na(get(qc)), .(year, q = get(qc))][order(year)]
+
+  if ("location" %in% names(d)) {
+    d <- d[location == "Indonesia"]
+  }
+
+  qc <- if ("cvd_40q30_r" %in% names(d)) {
+    "cvd_40q30_r"
+  } else {
+    "cvd_40q30"
+  }
+
+  d[
+    scenario == sid &
+      year >= HZ_START &
+      !is.na(get(qc)),
+    .(year, q = get(qc))
+  ][order(year)]
 }
 
 idn_scen5 <- rbindlist(lapply(scen_specs, function(s) {
   x <- read_scen_q3(s$wb, s$id)
-  x[, `:=`(scenario = s$id, scen = s$label)]
+  x[, `:=`(
+    scenario = s$id,
+    scen = s$label
+  )]
   x[]
 }))
 
-## Fail loudly if any requested scenario lacks a full HZ_START..HZ_END trajectory.
+## Fail loudly if any requested scenario lacks a full
+## HZ_START..HZ_END trajectory.
 for (s in scen_specs) {
   ys <- idn_scen5[scenario == s$id, year]
-  if (!length(ys) || max(ys) < HZ_END || min(ys) > HZ_START)
-    stop(sprintf("VALIDATION STOP -- scenario '%s' has no full %d-%d trajectory in %s",
-                 s$id, HZ_START, HZ_END, basename(s$wb)), call. = FALSE)
+
+  if (
+    !length(ys) ||
+      max(ys) < HZ_END ||
+      min(ys) > HZ_START
+  ) {
+    stop(
+      sprintf(
+        paste0(
+          "VALIDATION STOP -- scenario '%s' has no full ",
+          "%d-%d trajectory in %s"
+        ),
+        s$id,
+        HZ_START,
+        HZ_END,
+        basename(s$wb)
+      ),
+      call. = FALSE
+    )
+  }
 }
 
-## Baseline reconciliation: every plotted line's own workbook must share the identical
-## six-cause / ages-30-70 baseline probability series across HZ_START..HZ_END, so the
-## five lines are directly comparable.
+## Baseline reconciliation: every plotted line's own workbook must share the
+## identical six-cause / ages-30-70 baseline probability series across
+## HZ_START..HZ_END, so the three lines are directly comparable.
 .base_ref <- read_scen_q3(wb_comb, "baseline")
+
 for (s in scen_specs) {
   .b <- read_scen_q3(s$wb, "baseline")
   .bm <- merge(.base_ref, .b, by = "year")
-  if (nrow(.bm) < length(HZ_START:HZ_END) || max(abs(.bm$q.x - .bm$q.y)) > 1e-6)
-    stop(sprintf("VALIDATION STOP -- baseline probability series in %s does not reconcile with the combined workbook baseline",
-                 basename(s$wb)), call. = FALSE)
+
+  if (
+    nrow(.bm) < length(HZ_START:HZ_END) ||
+      max(abs(.bm$q.x - .bm$q.y)) > 1e-6
+  ) {
+    stop(
+      sprintf(
+        paste0(
+          "VALIDATION STOP -- baseline probability series in %s ",
+          "does not reconcile with the combined workbook baseline"
+        ),
+        basename(s$wb)
+      ),
+      call. = FALSE
+    )
+  }
 }
 
-scen5_levels <- vapply(scen_specs, `[[`, character(1), "label")
-idn_scen5[, scen := factor(scen, levels = scen5_levels)]
-scen5_pal <- setNames(vapply(scen_specs, `[[`, character(1), "col"), scen5_levels)
+scen5_levels <- vapply(
+  scen_specs,
+  `[[`,
+  character(1),
+  "label"
+)
 
-## Endpoint labels ONLY for ASEAN comparators (right-hand side).
-## Scenario (intervention) labels are deliberately omitted from the RHS;
-## they appear only in the legend.
-cmp_end <- cmp_lines[, .SD[which.max(year)], by = country_label][
-  , .(year, q, country_label)]
+idn_scen5[
+  ,
+  scen := factor(
+    scen,
+    levels = scen5_levels
+  )
+]
+
+scen5_pal <- setNames(
+  vapply(
+    scen_specs,
+    `[[`,
+    character(1),
+    "col"
+  ),
+  scen5_levels
+)
+
+## Endpoint labels ONLY for ASEAN comparators on the right-hand side.
+## Scenario labels are deliberately omitted from the RHS and appear only
+## in the legend.
+cmp_end <- cmp_lines[
+  ,
+  .SD[which.max(year)],
+  by = country_label
+][
+  ,
+  .(year, q, country_label)
+]
 
 p_fig_40q30_cascade <- ggplot() +
   geom_line(
     data = cmp_lines,
-    aes(year, q, group = country_label),
+    aes(
+      x = year,
+      y = q,
+      group = country_label
+    ),
     colour = col_comparator,
     linewidth = 0.5
   ) +
   geom_line(
     data = idn_obs,
-    aes(year, q),
+    aes(
+      x = year,
+      y = q
+    ),
     colour = "grey20",
     linewidth = 1.0
   ) +
   annotate(
     "segment",
-    x = 2024, xend = 2024, y = 10.5, yend = 20.5,
-    linetype = "dotted", colour = "grey45"
+    x = 2024,
+    xend = 2024,
+    y = 10.5,
+    yend = 20.5,
+    linetype = "dotted",
+    colour = "grey45"
   ) +
   annotate(
     "text",
-    x = 2024, y = 20.9,
+    x = 2024,
+    y = 20.9,
     label = "Modeled scenarios →",
-    hjust = 1, size = 2.7, colour = "grey35"
+    hjust = 1,
+    size = 2.7 * font_mult,
+    colour = "grey35"
   ) +
   geom_line(
     data = idn_scen5,
-    aes(year, q, colour = scen),
+    aes(
+      x = year,
+      y = q,
+      colour = scen
+    ),
     linewidth = 1.15,
     linetype = "22"
   ) +
-  ## Country names only (larger, grey) on the right-hand side
+  ## Country names only, enlarged by 1.5×, on the right-hand side.
   ggrepel::geom_text_repel(
     data = cmp_end,
-    aes(year, q, label = country_label),
+    aes(
+      x = year,
+      y = q,
+      label = country_label
+    ),
     colour = "grey40",
-    size = 3.4,
+    size = 3.4 * font_mult,
     hjust = 0,
     nudge_x = 1.3,
     direction = "y",
@@ -2501,28 +2618,45 @@ p_fig_40q30_cascade <- ggplot() +
     breaks = seq(1995, 2050, 5),
     expand = expansion(mult = c(0.01, 0))
   ) +
-  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  scale_y_continuous(
+    labels = function(x) paste0(x, "%")
+  ) +
   labs(
     title = "Cascade, tobacco policies, and combined packages",
     subtitle = "Chance of dying from CVD between exact ages 30 and 70",
     x = NULL,
     y = "Probability of CVD death before age 70 (%)"
-    ) +
-  theme_exec(11) +
+  ) +
+  theme_exec(11 * font_mult) +
   theme(
-    legend.position = c(0.02, 0.02),   # lower-left
+    legend.position = c(0.02, 0.02),
     legend.justification = c(0, 0),
-    legend.background = element_rect(fill = alpha("white", 0.85), colour = "grey80", linewidth = 0.3),
+    legend.background = element_rect(
+      fill = alpha("white", 0.85),
+      colour = "grey80",
+      linewidth = 0.3
+    ),
     legend.key.width = unit(1.1, "cm"),
     legend.key.height = unit(0.40, "cm"),
-    legend.text = element_text(size = 7.8),
-    panel.grid.major.x = element_line(colour = "grey92", linewidth = 0.25)
+    legend.text = element_text(
+      size = 7.8 * font_mult
+    ),
+    panel.grid.major.x = element_line(
+      colour = "grey92",
+      linewidth = 0.25
+    )
   )
 
-reg_fig(p_fig_40q30_cascade,
-        "fig-40q30-cascade",
-        "The care cascade and tobacco policies jointly move Indonesia further toward its neighbours",
-        8.0, 6.0)
+reg_fig(
+  p_fig_40q30_cascade,
+  "fig-40q30-cascade",
+  paste(
+    "The care cascade and tobacco policies jointly move Indonesia",
+    "further toward its neighbours"
+  ),
+  13.2,
+  6.0
+)
 ```
 
 \srcmethod{\textbf{Source:} each modelled line is the stored R-reconciled literal from the annual probability-of-death-before-70 sheet of its \emph{own} workbook --- \textbf{70-70-70 hypertension/cholesterol + diabetes cascade} and \textbf{cascade + tobacco tax:} joint cascade/public-health workbook \texttt{indonesia\_model\_cost\_value\_70\_30\_30\_to\_70\_70\_70\_public\_health\_formulae.xlsx} (scenarios \texttt{S\_70\_30\_30\_TO\_70\_70\_70} and \texttt{S\_70\_30\_30\_TO\_70\_70\_70\_I\_PH\_TOBACCO\_TAX}); \textbf{Tobacco tax:} public-health workbook \texttt{indonesia\_cost\_value\_public\_health\_formulae.xlsx} (scenario \texttt{I\_PH\_TOBACCO\_TAX}); \textbf{All public-health interventions:} the SAME public-health workbook (scenario \texttt{all\_public\_health}); \textbf{All clinical and public-health interventions:} combined workbook \texttt{indonesia\_model\_cost\_value\_clinical\_public\_health\_formulae.xlsx} (scenario \texttt{all\_clinical\_public\_health}). ASEAN comparators in \texttt{data/raw/}. \textbf{Method:} every intervention line is a \emph{single joint model run} applying its listed interventions simultaneously --- never a sum, product, or average of separately modelled effects; all source workbooks share an identical baseline (asserted), so every line is the probability of death from the six modelled cardiovascular causes over exact ages 30--70. The plotted purple ``cascade + tobacco tax'' line (scenario \texttt{S\_70\_30\_30\_TO\_70\_70\_70\_I\_PH\_TOBACCO\_TAX}) adds ONLY the tobacco tax to the cascade --- it does NOT include the clean-air law, mass-media campaign, or advertising ban, and is NOT the broader \texttt{all\_cascade\_public\_health} package. Comparators are WPP-scaled reference series shown for context only.}
@@ -2531,7 +2665,7 @@ reg_fig(p_fig_40q30_cascade,
 
 ## `r title_sub_pareto`
 
-```{r fig-sub-pareto, fig.width=9.7, fig.height=3.5, out.width="\\linewidth"}
+```{r fig-sub-pareto, fig.width=13.2, fig.height=6, out.width="\\linewidth"}
 sf_scale <- max(da_prov$da)
 reg_fig(
 ggplot(da_prov, aes(x = location)) +
@@ -2546,7 +2680,7 @@ ggplot(da_prov, aes(x = location)) +
                         labels = function(x) paste0(x, "%"))) +
   labs(x = NULL) +
   theme_exec(10) +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.4, size = 5.6),
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.4, size = 8.4),
         axis.title.y.left  = element_text(colour = col_clinical, size = 8),
         axis.title.y.right = element_text(colour = col_casefatal, size = 8),
         panel.grid.major.x = element_blank()),
